@@ -92,6 +92,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import com.example.ai.AiModelOption
 import com.example.ai.AiProvider
+import com.example.ai.AiThinkingMode
 import com.example.ai.AiUiState
 import com.example.ai.AiUsageSummary
 import com.example.ai.ChatMessage
@@ -136,6 +137,7 @@ fun IdeWorkspaceScreen(
     jumpToLine: Pair<String, Int>?,
     statusBanner: String?,
     activeProvider: AiProvider,
+    aiThinkingMode: AiThinkingMode = AiThinkingMode.FAST,
     providerApiKeys: Map<AiProvider, String>,
     providerModels: Map<AiProvider, String>,
     liveModels: List<AiModelOption>,
@@ -164,6 +166,7 @@ fun IdeWorkspaceScreen(
     onExportProjectZipUri: (Uri) -> Unit,
     onClearStatusBanner: () -> Unit,
     onSelectProvider: (AiProvider) -> Unit,
+    onSelectThinkingMode: (AiThinkingMode) -> Unit = {},
     onSelectModel: (AiProvider, String) -> Unit,
     onSaveProviderConfig: (AiProvider, String, String) -> Unit,
     onRefreshLiveModels: (AiProvider) -> Unit,
@@ -657,6 +660,7 @@ fun IdeWorkspaceScreen(
                         GeminiPanel(
                             activeFileName = activeFile?.relativePath,
                             activeProvider = activeProvider,
+                            thinkingMode = aiThinkingMode,
                             providerApiKeys = providerApiKeys,
                             providerModels = providerModels,
                             liveModels = liveModels,
@@ -670,6 +674,7 @@ fun IdeWorkspaceScreen(
                             showSplitSideChat = showSplitSideChat,
                             onToggleSplitSideChat = { showSplitSideChat = !showSplitSideChat },
                             onSelectProvider = onSelectProvider,
+                            onSelectThinkingMode = onSelectThinkingMode,
                             onSelectModel = onSelectModel,
                             onSaveProviderConfig = onSaveProviderConfig,
                             onRefreshLiveModels = onRefreshLiveModels,
@@ -770,6 +775,7 @@ fun IdeWorkspaceScreen(
                         GeminiPanel(
                             activeFileName = activeFile?.relativePath,
                             activeProvider = activeProvider,
+                            thinkingMode = aiThinkingMode,
                             providerApiKeys = providerApiKeys,
                             providerModels = providerModels,
                             liveModels = liveModels,
@@ -781,6 +787,7 @@ fun IdeWorkspaceScreen(
                             messages = aiMessages,
                             aiState = aiState,
                             onSelectProvider = onSelectProvider,
+                            onSelectThinkingMode = onSelectThinkingMode,
                             onSelectModel = onSelectModel,
                             onSaveProviderConfig = onSaveProviderConfig,
                             onRefreshLiveModels = onRefreshLiveModels,

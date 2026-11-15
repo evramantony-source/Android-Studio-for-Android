@@ -37,6 +37,28 @@ enum class AiProvider(
     ),
 }
 
+enum class AiThinkingMode(
+    val label: String,
+    val badge: String,
+    val description: String,
+) {
+    FAST(
+        label = "Fast",
+        badge = "⚡ Fast",
+        description = "Minimal thinking delay for instant coding edits",
+    ),
+    BALANCED(
+        label = "Balanced",
+        badge = "⚖ Balanced",
+        description = "Moderate reasoning for multi-file changes",
+    ),
+    DEEP(
+        label = "Deep",
+        badge = "🧠 Deep",
+        description = "Extended reasoning for complex bugs & architecture",
+    ),
+}
+
 data class AiModelOption(
     val id: String,
     val provider: AiProvider,
@@ -165,16 +187,31 @@ data class AiUsageSummary(
 object AiModelsCatalog {
 
     val builtInGeminiModels: List<AiModelOption> = listOf(
-        // Gemini 4
+        // Gemini 3 Series (Fastest & Default)
         AiModelOption(
-            id = "gemini-4-hydrogen",
+            id = "gemini-3.8-flash",
             provider = AiProvider.GEMINI,
-            label = "Gemini 4 Hydrogen",
+            label = "Gemini 3.8 Flash",
             badge = "Default",
-            description = "Next-gen autonomous coding & deep architecture reasoning.",
+            description = "Latest high-speed Gemini 3 Flash for rapid autonomous coding & builds.",
             contextWindow = "1M ctx",
         ),
-        // Gemini 3 Series
+        AiModelOption(
+            id = "gemini-3.6-flash",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 3.6 Flash",
+            badge = "Gemini 3",
+            description = "Production Gemini 3 Flash balancing speed, accuracy, and tool use.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "gemini-3.5-flash-lite",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 3.5 Flash-Lite",
+            badge = "Gemini 3",
+            description = "Ultra-efficient Gemini 3 Flash-Lite for quick edits and low token cost.",
+            contextWindow = "1M ctx",
+        ),
         AiModelOption(
             id = "gemini-3.1-pro-preview",
             provider = AiProvider.GEMINI,
@@ -200,22 +237,6 @@ object AiModelsCatalog {
             contextWindow = "1M ctx",
         ),
         AiModelOption(
-            id = "gemini-3.8-flash",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3.8 Flash",
-            badge = "Gemini 3",
-            description = "Latest high-speed Gemini 3 Flash for rapid autonomous coding & builds.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gemini-3.6-flash",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3.6 Flash",
-            badge = "Gemini 3",
-            description = "Production Gemini 3 Flash balancing speed, accuracy, and tool use.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
             id = "gemini-3-flash-preview",
             provider = AiProvider.GEMINI,
             label = "Gemini 3 Flash Preview",
@@ -224,19 +245,20 @@ object AiModelsCatalog {
             contextWindow = "1M ctx",
         ),
         AiModelOption(
-            id = "gemini-3.5-flash-lite",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3.5 Flash-Lite",
-            badge = "Gemini 3",
-            description = "Ultra-efficient Gemini 3 Flash-Lite for quick edits and low token cost.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
             id = "gemini-3.1-flash-lite",
             provider = AiProvider.GEMINI,
             label = "Gemini 3.1 Flash-Lite",
             badge = "Gemini 3",
             description = "Lightweight Gemini 3 model optimized for high-throughput coding checks.",
+            contextWindow = "1M ctx",
+        ),
+        // Gemini 4 Experimental
+        AiModelOption(
+            id = "gemini-4-hydrogen",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 4 Hydrogen",
+            badge = "Exp",
+            description = "Experimental next-gen model (auto-falls back to Flash if unavailable or 503).",
             contextWindow = "1M ctx",
         ),
         // Gemini 2.5 Series
@@ -654,6 +676,36 @@ object AiModelsCatalog {
             merged.putIfAbsent(model.id, model)
         }
         return merged.values.toList()
+    }
+
+    fun fallbackChain(provider: AiProvider, primaryModelId: String): List<String> {
+        val cleanPrimary = primaryModelId.trim().removePrefix("models/").ifBlank { provider.defaultModelId }
+        val pool = when (provider) {
+            AiProvider.GEMINI -> listOf(
+                "gemini-3.8-flash",
+                "gemini-3.6-flash",
+                "gemini-3.5-flash-lite",
+                "gemini-2.5-flash",
+                "gemini-2.5-flash-lite",
+                "gemini-2.0-flash",
+            )
+            AiProvider.OPENAI -> listOf(
+                "gpt-5-mini",
+                "gpt-4.1",
+                "gpt-4o",
+                "gpt-4o-mini",
+            )
+            AiProvider.CLAUDE -> listOf(
+                "claude-sonnet-4-5",
+                "claude-3-7-sonnet-latest",
+                "claude-haiku-4-5",
+                "claude-3-5-sonnet-latest",
+            )
+        }
+        val ordered = linkedSetOf<String>()
+        ordered.add(cleanPrimary)
+        pool.forEach { ordered.add(it) }
+        return ordered.toList()
     }
 
     suspend fun fetchLiveModels(

@@ -70,6 +70,7 @@ import com.example.ai.AgentStep
 import com.example.ai.AgentStepStatus
 import com.example.ai.AiModelOption
 import com.example.ai.AiProvider
+import com.example.ai.AiThinkingMode
 import com.example.ai.AiUiState
 import com.example.ai.AiUsageSummary
 import com.example.ai.ChatMessage
@@ -83,6 +84,7 @@ import com.example.ui.theme.JetBrainsMonoFontFamily
 fun GeminiPanel(
     activeFileName: String?,
     activeProvider: AiProvider,
+    thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
     providerApiKeys: Map<AiProvider, String>,
     providerModels: Map<AiProvider, String>,
     liveModels: List<AiModelOption>,
@@ -96,6 +98,7 @@ fun GeminiPanel(
     showSplitSideChat: Boolean = false,
     onToggleSplitSideChat: (() -> Unit)? = null,
     onSelectProvider: (AiProvider) -> Unit,
+    onSelectThinkingMode: (AiThinkingMode) -> Unit = {},
     onSelectModel: (AiProvider, String) -> Unit,
     onSaveProviderConfig: (AiProvider, String, String) -> Unit,
     onRefreshLiveModels: (AiProvider) -> Unit,
@@ -127,9 +130,15 @@ fun GeminiPanel(
         }
     }
 
-    LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length, messages.lastOrNull()?.steps?.size) {
+    LaunchedEffect(messages.size, messages.lastOrNull()?.steps?.size) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.lastIndex)
+        }
+    }
+
+    LaunchedEffect(messages.lastOrNull()?.text?.length) {
+        if (messages.isNotEmpty() && aiState is AiUiState.Streaming) {
+            listState.scrollToItem(messages.lastIndex)
         }
     }
 
@@ -262,6 +271,16 @@ fun GeminiPanel(
                 AssistChip(
                     onClick = { showModelMenuDialog = true },
                     label = { Text("Models", style = MaterialTheme.typography.labelSmall) },
+                )
+                FilterChip(
+                    selected = thinkingMode == AiThinkingMode.FAST,
+                    onClick = {
+                        val allModes = AiThinkingMode.entries
+                        val next = allModes[(thinkingMode.ordinal + 1) % allModes.size]
+                        onSelectThinkingMode(next)
+                    },
+                    label = { Text(thinkingMode.badge, style = MaterialTheme.typography.labelSmall) },
+                    modifier = Modifier.testTag("ai_speed_mode_chip"),
                 )
                 AssistChip(
                     onClick = { showUsageDialog = true },

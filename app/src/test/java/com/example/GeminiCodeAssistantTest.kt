@@ -1,10 +1,19 @@
 package com.example
 
+import com.example.ai.AgentStep
+import com.example.ai.AgentStepStatus
+import com.example.ai.AiModelsCatalog
+import com.example.ai.AiProvider
+import com.example.ai.AiThinkingMode
+import com.example.ai.AiUiState
 import com.example.ai.ChatMessage
 import com.example.ai.GEMINI_MODEL_ID
 import com.example.ai.GeminiCodeAssistant
+import com.example.model.FileLanguage
+import com.example.model.ProjectFile
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -17,8 +26,8 @@ import org.robolectric.annotation.Config
 class GeminiCodeAssistantTest {
 
     @Test
-    fun usesGemini4HydrogenModel() {
-        assertEquals("gemini-4-hydrogen", GEMINI_MODEL_ID)
+    fun usesFastReliableGemini3DefaultModel() {
+        assertEquals("gemini-3.8-flash", GEMINI_MODEL_ID)
     }
 
     @Test
@@ -118,11 +127,101 @@ class GeminiCodeAssistantTest {
     }
 
     @Test
-    fun isTransientHttpStatus_retriesOnly5xxServerErrors() {
+    fun isTransientHttpStatus_andFailoverRulesCover503And404() {
         assertTrue(GeminiCodeAssistant.isTransientHttpStatus(503))
+        assertTrue(GeminiCodeAssistant.isTransientHttpStatus(529))
+        assertTrue(GeminiCodeAssistant.isTransientHttpStatus(429))
         assertTrue(GeminiCodeAssistant.isTransientHttpStatus(500))
-        assertEquals(false, GeminiCodeAssistant.isTransientHttpStatus(400))
-        assertEquals(false, GeminiCodeAssistant.isTransientHttpStatus(404))
+        assertFalse(GeminiCodeAssistant.isTransientHttpStatus(400))
+        assertFalse(GeminiCodeAssistant.isTransientHttpStatus(404))
+
+        assertTrue(GeminiCodeAssistant.shouldFailoverHttpStatus(503))
+        assertTrue(GeminiCodeAssistant.shouldFailoverHttpStatus(529))
+        assertTrue(GeminiCodeAssistant.shouldFailoverHttpStatus(404))
+        assertFalse(GeminiCodeAssistant.shouldFailoverHttpStatus(401))
+    }
+
+    @Test
+    fun buildThinkingConfigJson_respectsModelGenerationAndSpeedMode() {
+        val g3Fast = GeminiCodeAssistant.buildThinkingConfigJson("gemini-3.8-flash", AiThinkingMode.FAST)
+        assertEquals("minimal", g3Fast?.getString("thinkingLevel"))
+
+        val g3ProFast = GeminiCodeAssistant.buildThinkingConfigJson("gemini-3.1-pro-preview", AiThinkingMode.FAST)
+        assertEquals("low", g3ProFast?.getString("thinkingLevel"))
+
+        val g25Fast = GeminiCodeAssistant.buildThinkingConfigJson("gemini-2.5-flash", AiThinkingMode.FAST)
+        assertEquals(0, g25Fast?.getInt("thinkingBudget"))
+
+        val g25ProFast = GeminiCodeAssistant.buildThinkingConfigJson("gemini-2.5-pro", AiThinkingMode.FAST)
+        assertEquals(256, g25ProFast?.getInt("thinkingBudget"))
+
+        val g20 = GeminiCodeAssistant.buildThinkingConfigJson("gemini-2.0-flash", AiThinkingMode.FAST)
+        assertNull(g20)
+    }
+
+    @Test
+    fun fallbackChain_startsWithSelectedModelAndIncludesReliableFallbacks() {
+        val geminiChain = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, "gemini-3.1-pro-preview")
+        assertEquals("gemini-3.1-pro-preview", geminiChain.first())
+        assertTrue(geminiChain.contains("gemini-3.8-flash"))
+        assertTrue(geminiChain.contains("gemini-2.5-flash"))
+        assertEquals(geminiChain.distinct().size, geminiChain.size)
+
+        val openAiChain = AiModelsCatalog.fallbackChain(AiProvider.OPENAI, "gpt-6-astra")
+        assertEquals("gpt-6-astra", openAiChain.first())
+        assertTrue(openAiChain.contains("gpt-4o"))
+
+        val claudeChain = AiModelsCatalog.fallbackChain(AiProvider.CLAUDE, "claude-opus-5-5")
+        assertEquals("claude-opus-5-5", claudeChain.first())
+        assertTrue(claudeChain.contains("claude-sonnet-4-5"))
+    }
+
+    @Test
+    fun buildPrompt_preloadsActiveFileAndManifestForSingleTurnSpeed() {
+        val assistant = GeminiCodeAssistant()
+        val mainJava = ProjectFile(
+            relativePath = "src/com/example/app/MainActivity.java",
+            content = "public class MainActivity { int count = 0; }",
+            language = FileLanguage.JAVA,
+        )
+        val manifest = ProjectFile(
+            relativePath = "AndroidManifest.xml",
+            content = "<manifest package=\"com.example.app\"/>",
+            language = FileLanguage.XML,
+        )
+        val prompt = assistant.buildPrompt(
+            userPrompt = "Increment count by 2",
+            projectName = "Demo",
+            packageName = "com.example.app",
+            activeFile = mainJava,
+            allFiles = listOf(mainJava, manifest),
+            diagnostics = emptyList(),
+        )
+        assertTrue(prompt.contains("=== Pre-loaded Project Files ==="))
+        assertTrue(prompt.contains("int count = 0;"))
+        assertTrue(prompt.contains("<manifest package=\"com.example.app\"/>"))
+    }
+
+    @Test
+    fun markCancelled_distinguishesUnexpectedInterruptionFromUserStop() {
+        val assistant = GeminiCodeAssistant()
+        assistant.setMessages(
+            listOf(
+                ChatMessage(
+                    id = "a_1",
+                    isUser = false,
+                    text = "",
+                    isStreaming = true,
+                    steps = listOf(AgentStep(id = "t0", title = "Streaming", status = AgentStepStatus.RUNNING)),
+                ),
+            ),
+        )
+        assistant.markCancelled(targetMsgId = "a_1", userInitiated = false)
+        val msg = assistant.messages.value.single()
+        assertFalse(msg.isStreaming)
+        assertEquals("Interrupted before completion", msg.steps.single().detail)
+        assertFalse(msg.text.contains("Stopped by user"))
+        assertTrue(assistant.uiState.value is AiUiState.Error)
     }
 
     @Test

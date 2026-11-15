@@ -34,6 +34,7 @@ class MainActivity : ComponentActivity() {
             val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
 
             val activeProvider by viewModel.activeProvider.collectAsStateWithLifecycle()
+            val aiThinkingMode by viewModel.aiThinkingMode.collectAsStateWithLifecycle()
             val providerApiKeys by viewModel.providerApiKeys.collectAsStateWithLifecycle()
             val providerModels by viewModel.providerModels.collectAsStateWithLifecycle()
             val liveModels by viewModel.liveModels.collectAsStateWithLifecycle()
@@ -87,6 +88,7 @@ class MainActivity : ComponentActivity() {
                         jumpToLine = jumpToLine,
                         statusBanner = statusBanner,
                         activeProvider = activeProvider,
+                        aiThinkingMode = aiThinkingMode,
                         providerApiKeys = providerApiKeys,
                         providerModels = providerModels,
                         liveModels = liveModels,
@@ -115,6 +117,7 @@ class MainActivity : ComponentActivity() {
                         onExportProjectZipUri = viewModel::exportProjectZipToUri,
                         onClearStatusBanner = viewModel::clearStatusBanner,
                         onSelectProvider = viewModel::selectProvider,
+                        onSelectThinkingMode = viewModel::selectThinkingMode,
                         onSelectModel = viewModel::selectModel,
                         onSaveProviderConfig = viewModel::saveProviderConfig,
                         onRefreshLiveModels = viewModel::refreshLiveModels,

@@ -8,6 +8,7 @@ import com.example.ai.AgentToolResult
 import com.example.ai.AiModelOption
 import com.example.ai.AiModelsCatalog
 import com.example.ai.AiProvider
+import com.example.ai.AiThinkingMode
 import com.example.ai.AiUiState
 import com.example.ai.AiUsageSummary
 import com.example.ai.ChatMessage
@@ -31,6 +32,7 @@ import com.example.model.ProjectTemplate
 import com.example.model.ReleaseSigningConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -104,6 +106,12 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = AiProvider.GEMINI,
+    )
+
+    val aiThinkingMode: StateFlow<AiThinkingMode> = repository.aiThinkingMode.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = AiThinkingMode.FAST,
     )
 
     val providerApiKeys: StateFlow<Map<AiProvider, String>> = repository.providerApiKeys.stateIn(
@@ -495,6 +503,12 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun selectThinkingMode(mode: AiThinkingMode) {
+        viewModelScope.launch {
+            repository.saveThinkingMode(mode)
+        }
+    }
+
     fun selectModel(provider: AiProvider, modelId: String) {
         viewModelScope.launch {
             val currentKey = providerApiKeys.value[provider].orEmpty()
@@ -546,7 +560,6 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     fun selectChatThread(threadId: String) {
         if (_activeThreadId.value == threadId) return
         persistActiveThreadMessages()
-        aiJob?.cancel()
         val target = _chatThreads.value.find { it.id == threadId } ?: return
         _activeThreadId.value = target.id
         geminiAssistant.setMessages(target.messages)
@@ -554,7 +567,6 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun createSideChat(title: String = "") {
         persistActiveThreadMessages()
-        aiJob?.cancel()
         val sideCount = _chatThreads.value.count { !it.isMain } + 1
         val thread = ProjectChatStore.createSideThread(sideCount, title)
         val updated = _chatThreads.value + thread
@@ -602,24 +614,28 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         val active = _projectFiles.value.find { it.relativePath == _activeFilePath.value }
         val diagnostics = _lastBuildResult.value?.diagnostics.orEmpty()
         val provider = activeProvider.value
+        val thinkingMode = aiThinkingMode.value
         val apiKey = providerApiKeys.value[provider].orEmpty()
         val modelId = providerModels.value[provider].orEmpty().ifBlank { provider.defaultModelId }
         val threadIdAtStart = _activeThreadId.value
+        val previousJob = aiJob
 
-        aiJob?.cancel()
         aiJob = viewModelScope.launch {
+            previousJob?.cancelAndJoin()
             val executor = createToolExecutor(project.id, project.packageName)
             geminiAssistant.askGemini(
                 userPrompt = prompt,
                 apiKey = apiKey,
                 modelId = modelId,
                 provider = provider,
+                thinkingMode = thinkingMode,
                 projectName = project.name,
                 packageName = project.packageName,
                 activeFile = active,
                 allFiles = _projectFiles.value,
                 diagnostics = diagnostics,
                 toolExecutor = executor,
+                shouldPublishToUi = { _activeThreadId.value == threadIdAtStart },
                 onUsageRecorded = { usedProvider, usedModel, delta, tools, failed ->
                     viewModelScope.launch {
                         repository.recordAiUsage(usedProvider, usedModel, delta, tools, failed)
@@ -641,9 +657,9 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancelGemini() {
+        geminiAssistant.cancelByUser()
         aiJob?.cancel()
         aiJob = null
-        geminiAssistant.markCancelled()
         persistActiveThreadMessages()
     }
 

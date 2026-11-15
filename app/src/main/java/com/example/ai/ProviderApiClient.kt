@@ -35,8 +35,8 @@ internal data class ExternalTurnOutcome(
 
 internal object ProviderApiClient {
 
-    private const val CONNECT_TIMEOUT_MS = 30_000
-    private const val READ_TIMEOUT_MS = 180_000
+    private const val CONNECT_TIMEOUT_MS = 12_000
+    private const val READ_TIMEOUT_MS = 45_000
 
     fun buildSharedToolSpecs(): List<Triple<String, String, JSONObject>> {
         fun strProp(desc: String) = JSONObject().put("type", "string").put("description", desc)
@@ -112,6 +112,7 @@ internal object ProviderApiClient {
         apiKey: String,
         modelId: String,
         messages: JSONArray,
+        thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
         onConnected: () -> Unit,
         onTextDelta: (String) -> Unit,
     ): ExternalTurnOutcome = withContext(Dispatchers.IO) {
@@ -139,13 +140,21 @@ internal object ProviderApiClient {
             .put("stream", true)
             .put("stream_options", JSONObject().put("include_usage", true))
 
-        val isFixedTempReasoning = modelId.startsWith("o1") ||
-            modelId.startsWith("o3") ||
-            modelId.startsWith("o4") ||
-            modelId.startsWith("gpt-5") ||
-            modelId.startsWith("gpt-6")
+        val lowerModel = modelId.lowercase()
+        val isFixedTempReasoning = lowerModel.startsWith("o1") ||
+            lowerModel.startsWith("o3") ||
+            lowerModel.startsWith("o4") ||
+            lowerModel.startsWith("gpt-5") ||
+            lowerModel.startsWith("gpt-6")
         if (!isFixedTempReasoning) {
             bodyObj.put("temperature", 0.3)
+        } else if (!lowerModel.startsWith("o1")) {
+            val effort = when (thinkingMode) {
+                AiThinkingMode.FAST -> "low"
+                AiThinkingMode.BALANCED -> "medium"
+                AiThinkingMode.DEEP -> "high"
+            }
+            bodyObj.put("reasoning_effort", effort)
         }
 
         val bodyBytes = bodyObj.toString().toByteArray(Charsets.UTF_8)
@@ -276,6 +285,7 @@ internal object ProviderApiClient {
         modelId: String,
         systemInstruction: String,
         messages: JSONArray,
+        thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
         onConnected: () -> Unit,
         onTextDelta: (String) -> Unit,
     ): ExternalTurnOutcome = withContext(Dispatchers.IO) {

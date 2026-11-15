@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.ai.AiModelsCatalog
 import com.example.ai.AiProvider
+import com.example.ai.AiThinkingMode
 import com.example.ai.AiUsageSummary
 import com.example.ai.GEMINI_MODEL_ID
 import com.example.ai.ProviderUsageStats
@@ -56,6 +57,7 @@ class ProjectRepository(
         val OPENAI_MODEL_ID_KEY = stringPreferencesKey("openai_model_id")
         val CLAUDE_MODEL_ID_KEY = stringPreferencesKey("claude_model_id")
 
+        val AI_THINKING_MODE = stringPreferencesKey("ai_thinking_mode")
         val AI_USAGE_JSON = stringPreferencesKey("ai_usage_summary_json")
         val RELEASE_SIGNING_JSON = stringPreferencesKey("release_signing_json")
         val BUILD_VARIANT = stringPreferencesKey("preferred_build_variant")
@@ -64,6 +66,11 @@ class ProjectRepository(
     val activeProvider: Flow<AiProvider> = context.editorDataStore.data.map { prefs ->
         runCatching { AiProvider.valueOf(prefs[PrefKeys.ACTIVE_PROVIDER].orEmpty()) }
             .getOrDefault(AiProvider.GEMINI)
+    }
+
+    val aiThinkingMode: Flow<AiThinkingMode> = context.editorDataStore.data.map { prefs ->
+        runCatching { AiThinkingMode.valueOf(prefs[PrefKeys.AI_THINKING_MODE].orEmpty()) }
+            .getOrDefault(AiThinkingMode.FAST)
     }
 
     val providerApiKeys: Flow<Map<AiProvider, String>> = context.editorDataStore.data.map { prefs ->
@@ -120,6 +127,12 @@ class ProjectRepository(
     suspend fun saveActiveProvider(provider: AiProvider) {
         context.editorDataStore.edit { prefs ->
             prefs[PrefKeys.ACTIVE_PROVIDER] = provider.name
+        }
+    }
+
+    suspend fun saveThinkingMode(mode: AiThinkingMode) {
+        context.editorDataStore.edit { prefs ->
+            prefs[PrefKeys.AI_THINKING_MODE] = mode.name
         }
     }
 

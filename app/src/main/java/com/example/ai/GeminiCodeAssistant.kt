@@ -26,12 +26,14 @@ import java.net.UnknownHostException
 import kotlin.coroutines.coroutineContext
 
 private const val TAG = "GeminiCodeAssistant"
-const val GEMINI_MODEL_ID = "gemini-4-hydrogen"
+const val GEMINI_MODEL_ID = "gemini-3.8-flash"
 private const val GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 private const val MAX_AGENT_TURNS = 12
-private const val CONNECT_TIMEOUT_MS = 30_000
-private const val READ_TIMEOUT_MS = 180_000
-private const val TURN_TIMEOUT_MS = 180_000L
+private const val CONNECT_TIMEOUT_MS = 12_000
+private const val READ_TIMEOUT_MS = 45_000
+private const val TURN_TIMEOUT_MS = 90_000L
+private const val STREAM_UI_THROTTLE_MS = 55L
+private const val PRELOAD_CONTEXT_MAX_CHARS = 16_000
 
 internal class GeminiApiException(
     val httpCode: Int,
@@ -46,12 +48,22 @@ class GeminiCodeAssistant {
     private val _uiState = MutableStateFlow<AiUiState>(AiUiState.Idle)
     val uiState: StateFlow<AiUiState> = _uiState.asStateFlow()
 
+    @Volatile
+    private var activeRunId: String? = null
+
+    @Volatile
+    private var userCancelledRunId: String? = null
+
     fun setMessages(restored: List<ChatMessage>) {
         _messages.value = restored
-        _uiState.value = AiUiState.Idle
+        if (activeRunId == null) {
+            _uiState.value = AiUiState.Idle
+        }
     }
 
     fun clearConversation() {
+        activeRunId = null
+        userCancelledRunId = null
         _messages.value = emptyList()
         _uiState.value = AiUiState.Idle
     }
@@ -66,23 +78,48 @@ class GeminiCodeAssistant {
         return prompt
     }
 
-    fun markCancelled() {
+    fun cancelByUser() {
+        val targetId = activeRunId
+        userCancelledRunId = targetId
+        markCancelled(targetMsgId = targetId, userInitiated = true)
+    }
+
+    fun markCancelled(
+        targetMsgId: String? = activeRunId,
+        userInitiated: Boolean = true,
+    ) {
+        val detailLabel = if (userInitiated) "Stopped by user" else "Interrupted before completion"
         _messages.value = _messages.value.map { msg ->
             if (!msg.isStreaming) return@map msg
+            if (targetMsgId != null && msg.id != targetMsgId) return@map msg
             val updatedSteps = msg.steps.map { step ->
                 if (step.status == AgentStepStatus.RUNNING) {
-                    step.copy(status = AgentStepStatus.FAILED, detail = "Stopped by user")
+                    step.copy(status = AgentStepStatus.FAILED, detail = detailLabel)
                 } else {
                     step
                 }
             }
+            val nextText = if (userInitiated) {
+                msg.text.ifBlank { "Stopped by user." }
+            } else {
+                msg.text
+            }
             msg.copy(
                 isStreaming = false,
                 steps = updatedSteps,
-                text = msg.text.ifBlank { "Stopped." },
+                text = nextText,
             )
         }
-        _uiState.value = AiUiState.Idle
+        if (targetMsgId == null || activeRunId == null || targetMsgId == activeRunId) {
+            _uiState.value = if (userInitiated) {
+                AiUiState.Idle
+            } else {
+                AiUiState.Error(
+                    message = "Request was interrupted before finishing. Tap Retry to continue.",
+                    isRetryable = true,
+                )
+            }
+        }
     }
 
     suspend fun askGemini(
@@ -90,19 +127,21 @@ class GeminiCodeAssistant {
         apiKey: String,
         modelId: String = GEMINI_MODEL_ID,
         provider: AiProvider = AiProvider.GEMINI,
+        thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
         projectName: String,
         packageName: String,
         activeFile: ProjectFile?,
         allFiles: List<ProjectFile>,
         diagnostics: List<BuildDiagnostic>,
         toolExecutor: ProjectToolExecutor,
+        shouldPublishToUi: () -> Boolean = { true },
         onUsageRecorded: (provider: AiProvider, modelId: String, delta: TokenUsageDelta, toolCount: Int, failed: Boolean) -> Unit = { _, _, _, _, _ -> },
         onMessagesChanged: (List<ChatMessage>) -> Unit = {},
     ) {
         val trimmed = userPrompt.trim()
         if (trimmed.isEmpty()) return
 
-        val activeModel = modelId.trim().removePrefix("models/").ifBlank { provider.defaultModelId }
+        val requestedModel = modelId.trim().removePrefix("models/").ifBlank { provider.defaultModelId }
         val resolvedKey = when (provider) {
             AiProvider.GEMINI -> resolveApiKey(apiKey)
             AiProvider.OPENAI, AiProvider.CLAUDE -> apiKey.trim()
@@ -120,12 +159,16 @@ class GeminiCodeAssistant {
             .filter { !it.isStreaming && it.text.isNotBlank() }
             .takeLast(8)
 
+        val now = System.currentTimeMillis()
         val userMsg = ChatMessage(
-            id = "u_${System.currentTimeMillis()}",
+            id = "u_$now",
             isUser = true,
             text = trimmed,
         )
-        val assistantMsgId = "a_${System.currentTimeMillis()}"
+        val assistantMsgId = "a_${now + 1}"
+        activeRunId = assistantMsgId
+        userCancelledRunId = null
+
         val steps = mutableListOf<AgentStep>()
         val assistantPlaceholder = ChatMessage(
             id = assistantMsgId,
@@ -134,12 +177,20 @@ class GeminiCodeAssistant {
             isStreaming = true,
             steps = emptyList(),
             providerName = provider.shortName,
-            modelId = activeModel,
+            modelId = requestedModel,
         )
 
-        _messages.value = _messages.value + userMsg + assistantPlaceholder
-        onMessagesChanged(_messages.value)
-        _uiState.value = AiUiState.Streaming
+        var runMessages = _messages.value + userMsg + assistantPlaceholder
+        fun syncUiMessages(forcePublish: Boolean = true) {
+            if (shouldPublishToUi() && (forcePublish || _messages.value.any { it.id == assistantMsgId })) {
+                _messages.value = runMessages
+            }
+        }
+        syncUiMessages(forcePublish = true)
+        onMessagesChanged(runMessages)
+        if (shouldPublishToUi()) {
+            _uiState.value = AiUiState.Streaming
+        }
 
         val promptWithContext = buildPrompt(
             userPrompt = trimmed,
@@ -152,136 +203,324 @@ class GeminiCodeAssistant {
 
         val accumulatedVisibleText = StringBuilder()
         var totalMessageTokens = 0L
+        var effectiveModelInUse = requestedModel
+        var lastUiEmitMs = 0L
+
+        fun updateRunAssistantMessage(
+            text: String,
+            isStreaming: Boolean,
+            stepList: List<AgentStep>,
+            codeBlocks: List<SuggestedCodeBlock>,
+            totalTokens: Long = 0L,
+            modelUsed: String = effectiveModelInUse,
+            forceEmit: Boolean = false,
+        ) {
+            val nowMs = System.currentTimeMillis()
+            if (isStreaming && !forceEmit && nowMs - lastUiEmitMs < STREAM_UI_THROTTLE_MS) {
+                return
+            }
+            lastUiEmitMs = nowMs
+            runMessages = runMessages.map { msg ->
+                if (msg.id == assistantMsgId) {
+                    msg.copy(
+                        text = text,
+                        isStreaming = isStreaming,
+                        steps = stepList,
+                        codeBlocks = codeBlocks,
+                        modelId = modelUsed,
+                        totalTokens = if (totalTokens > 0L) totalTokens else msg.totalTokens,
+                    )
+                } else {
+                    msg
+                }
+            }
+            syncUiMessages(forcePublish = true)
+        }
 
         fun addOrUpdateStep(step: AgentStep) {
             val idx = steps.indexOfFirst { it.id == step.id }
             if (idx >= 0) steps[idx] = step else steps.add(step)
-            updateAssistantMessage(
-                id = assistantMsgId,
+            updateRunAssistantMessage(
                 text = accumulatedVisibleText.toString(),
                 isStreaming = true,
-                steps = steps.toList(),
+                stepList = steps.toList(),
                 codeBlocks = emptyList(),
                 totalTokens = totalMessageTokens,
+                forceEmit = true,
             )
+        }
+
+        fun finalizeRunFailure(failureDetail: String, errorState: AiUiState.Error) {
+            val finalizedSteps = steps.map { step ->
+                if (step.status == AgentStepStatus.RUNNING) {
+                    step.copy(status = AgentStepStatus.FAILED, detail = failureDetail)
+                } else {
+                    step
+                }
+            }
+            val currentText = accumulatedVisibleText.toString()
+            updateRunAssistantMessage(
+                text = currentText,
+                isStreaming = false,
+                stepList = finalizedSteps,
+                codeBlocks = extractCodeBlocks(currentText),
+                totalTokens = totalMessageTokens,
+                forceEmit = true,
+            )
+            onMessagesChanged(runMessages)
+            if (shouldPublishToUi() && activeRunId == assistantMsgId) {
+                _uiState.value = errorState
+            }
         }
 
         try {
             when (provider) {
                 AiProvider.GEMINI -> runGeminiLoop(
-                    activeModel = activeModel,
+                    initialModel = requestedModel,
                     apiKey = resolvedKey,
+                    thinkingMode = thinkingMode,
                     priorHistory = priorHistory,
                     promptWithContext = promptWithContext,
-                    assistantMsgId = assistantMsgId,
                     steps = steps,
                     accumulatedVisibleText = accumulatedVisibleText,
                     addOrUpdateStep = ::addOrUpdateStep,
+                    onStreamText = { text, usedModel ->
+                        effectiveModelInUse = usedModel
+                        updateRunAssistantMessage(
+                            text = text,
+                            isStreaming = true,
+                            stepList = steps.toList(),
+                            codeBlocks = emptyList(),
+                            totalTokens = totalMessageTokens,
+                            modelUsed = usedModel,
+                            forceEmit = false,
+                        )
+                    },
+                    onFinalizeSuccess = { finalText, finalSteps, tokens, usedModel ->
+                        effectiveModelInUse = usedModel
+                        updateRunAssistantMessage(
+                            text = finalText,
+                            isStreaming = false,
+                            stepList = finalSteps,
+                            codeBlocks = extractCodeBlocks(finalText),
+                            totalTokens = tokens,
+                            modelUsed = usedModel,
+                            forceEmit = true,
+                        )
+                        if (shouldPublishToUi() && activeRunId == assistantMsgId) {
+                            _uiState.value = AiUiState.Idle
+                        }
+                    },
+                    onFinalizeFailure = { detail, errorState ->
+                        finalizeRunFailure(detail, errorState)
+                    },
                     toolExecutor = toolExecutor,
-                    onUsage = { delta, toolCalls ->
+                    onUsage = { usedModel, delta, toolCalls ->
+                        effectiveModelInUse = usedModel
                         totalMessageTokens += delta.totalTokens
-                        onUsageRecorded(provider, activeModel, delta, toolCalls, false)
+                        onUsageRecorded(provider, usedModel, delta, toolCalls, false)
                     },
                 )
                 AiProvider.OPENAI -> runOpenAiLoop(
-                    activeModel = activeModel,
+                    initialModel = requestedModel,
                     apiKey = resolvedKey,
+                    thinkingMode = thinkingMode,
                     priorHistory = priorHistory,
                     promptWithContext = promptWithContext,
-                    assistantMsgId = assistantMsgId,
                     steps = steps,
                     accumulatedVisibleText = accumulatedVisibleText,
                     addOrUpdateStep = ::addOrUpdateStep,
+                    onStreamText = { text, usedModel ->
+                        effectiveModelInUse = usedModel
+                        updateRunAssistantMessage(
+                            text = text,
+                            isStreaming = true,
+                            stepList = steps.toList(),
+                            codeBlocks = emptyList(),
+                            totalTokens = totalMessageTokens,
+                            modelUsed = usedModel,
+                            forceEmit = false,
+                        )
+                    },
+                    onFinalizeSuccess = { finalText, finalSteps, tokens, usedModel ->
+                        effectiveModelInUse = usedModel
+                        updateRunAssistantMessage(
+                            text = finalText,
+                            isStreaming = false,
+                            stepList = finalSteps,
+                            codeBlocks = extractCodeBlocks(finalText),
+                            totalTokens = tokens,
+                            modelUsed = usedModel,
+                            forceEmit = true,
+                        )
+                        if (shouldPublishToUi() && activeRunId == assistantMsgId) {
+                            _uiState.value = AiUiState.Idle
+                        }
+                    },
                     toolExecutor = toolExecutor,
-                    onUsage = { delta, toolCalls ->
+                    onUsage = { usedModel, delta, toolCalls ->
+                        effectiveModelInUse = usedModel
                         totalMessageTokens += delta.totalTokens
-                        onUsageRecorded(provider, activeModel, delta, toolCalls, false)
+                        onUsageRecorded(provider, usedModel, delta, toolCalls, false)
                     },
                 )
                 AiProvider.CLAUDE -> runClaudeLoop(
-                    activeModel = activeModel,
+                    initialModel = requestedModel,
                     apiKey = resolvedKey,
+                    thinkingMode = thinkingMode,
                     priorHistory = priorHistory,
                     promptWithContext = promptWithContext,
-                    assistantMsgId = assistantMsgId,
                     steps = steps,
                     accumulatedVisibleText = accumulatedVisibleText,
                     addOrUpdateStep = ::addOrUpdateStep,
+                    onStreamText = { text, usedModel ->
+                        effectiveModelInUse = usedModel
+                        updateRunAssistantMessage(
+                            text = text,
+                            isStreaming = true,
+                            stepList = steps.toList(),
+                            codeBlocks = emptyList(),
+                            totalTokens = totalMessageTokens,
+                            modelUsed = usedModel,
+                            forceEmit = false,
+                        )
+                    },
+                    onFinalizeSuccess = { finalText, finalSteps, tokens, usedModel ->
+                        effectiveModelInUse = usedModel
+                        updateRunAssistantMessage(
+                            text = finalText,
+                            isStreaming = false,
+                            stepList = finalSteps,
+                            codeBlocks = extractCodeBlocks(finalText),
+                            totalTokens = tokens,
+                            modelUsed = usedModel,
+                            forceEmit = true,
+                        )
+                        if (shouldPublishToUi() && activeRunId == assistantMsgId) {
+                            _uiState.value = AiUiState.Idle
+                        }
+                    },
                     toolExecutor = toolExecutor,
-                    onUsage = { delta, toolCalls ->
+                    onUsage = { usedModel, delta, toolCalls ->
+                        effectiveModelInUse = usedModel
                         totalMessageTokens += delta.totalTokens
-                        onUsageRecorded(provider, activeModel, delta, toolCalls, false)
+                        onUsageRecorded(provider, usedModel, delta, toolCalls, false)
                     },
                 )
             }
-            onMessagesChanged(_messages.value)
+            onMessagesChanged(runMessages)
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "$provider request timed out", e)
-            val msg = "Timed out waiting for $activeModel after ${TURN_TIMEOUT_MS / 1000}s."
-            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), msg, totalMessageTokens)
-            onUsageRecorded(provider, activeModel, TokenUsageDelta(), 0, true)
-            onMessagesChanged(_messages.value)
-            _uiState.value = AiUiState.Error(msg)
+            val msg = "Timed out waiting for $effectiveModelInUse after ${TURN_TIMEOUT_MS / 1000}s. Try Fast mode or Retry."
+            finalizeRunFailure("Timed out", AiUiState.Error(msg, isRetryable = true, isModelOverloaded = true))
+            onUsageRecorded(provider, effectiveModelInUse, TokenUsageDelta(), 0, true)
         } catch (e: SocketTimeoutException) {
-            Log.e(TAG, "Socket timeout talking to $activeModel", e)
-            val msg = "Network timeout reaching $activeModel (${e.message ?: "socket timeout"}). Check your internet connection or switch models."
-            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), "Socket timeout", totalMessageTokens)
-            onUsageRecorded(provider, activeModel, TokenUsageDelta(), 0, true)
-            onMessagesChanged(_messages.value)
-            _uiState.value = AiUiState.Error(msg)
+            Log.e(TAG, "Socket timeout talking to $effectiveModelInUse", e)
+            val msg = "Network timeout reaching $effectiveModelInUse (${e.message ?: "socket timeout"}). Check your internet connection and retry."
+            finalizeRunFailure("Socket timeout", AiUiState.Error(msg, isRetryable = true, isModelOverloaded = true))
+            onUsageRecorded(provider, effectiveModelInUse, TokenUsageDelta(), 0, true)
         } catch (e: CancellationException) {
-            markCancelled()
-            onMessagesChanged(_messages.value)
+            val stoppedByUser = userCancelledRunId == assistantMsgId
+            val isStillCurrentRun = activeRunId == assistantMsgId
+            val detail = when {
+                stoppedByUser -> "Stopped by user"
+                !isStillCurrentRun -> "Superseded by newer request"
+                else -> "Interrupted before completion"
+            }
+            val cleanedSteps = steps.map { step ->
+                if (step.status == AgentStepStatus.RUNNING) {
+                    step.copy(status = AgentStepStatus.FAILED, detail = detail)
+                } else {
+                    step
+                }
+            }
+            val finalText = if (stoppedByUser) {
+                accumulatedVisibleText.toString().ifBlank { "Stopped by user." }
+            } else {
+                accumulatedVisibleText.toString()
+            }
+            runMessages = runMessages.map { msg ->
+                if (msg.id == assistantMsgId) {
+                    msg.copy(
+                        isStreaming = false,
+                        steps = cleanedSteps,
+                        text = finalText,
+                        totalTokens = if (totalMessageTokens > 0L) totalMessageTokens else msg.totalTokens,
+                    )
+                } else {
+                    msg
+                }
+            }
+            syncUiMessages(forcePublish = true)
+            onMessagesChanged(runMessages)
+            if (shouldPublishToUi() && isStillCurrentRun) {
+                _uiState.value = if (stoppedByUser) {
+                    AiUiState.Idle
+                } else {
+                    AiUiState.Error(
+                        message = "Request was interrupted before finishing. Tap Retry to continue.",
+                        isRetryable = true,
+                    )
+                }
+            }
             throw e
         } catch (e: GeminiApiException) {
             Log.e(TAG, "${provider.shortName} API HTTP ${e.httpCode}: ${e.message}", e)
-            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), "API error ${e.httpCode}", totalMessageTokens)
-            onUsageRecorded(provider, activeModel, TokenUsageDelta(), 0, true)
-            onMessagesChanged(_messages.value)
-            val overloaded = e.httpCode == 503 || e.httpCode == 429
+            onUsageRecorded(provider, effectiveModelInUse, TokenUsageDelta(), 0, true)
+            val overloaded = e.httpCode == 503 || e.httpCode == 429 || e.httpCode == 529
             val friendly = when (e.httpCode) {
                 400, 401, 403 -> "${provider.shortName} API error (${e.httpCode}): ${e.message}"
-                404 -> "Model '$activeModel' was not found for this ${provider.shortName} key (404): ${e.message}."
+                404 -> "Model '$effectiveModelInUse' was not found for this ${provider.shortName} key (404): ${e.message}."
                 429 -> "${provider.shortName} rate limit or quota exceeded (429): ${e.message}"
-                503 -> "$activeModel is temporarily overloaded (503): ${e.message}"
+                503, 529 -> "All tried ${provider.shortName} models are overloaded right now (${e.httpCode}): ${e.message}"
                 else -> "${provider.shortName} API error (${e.httpCode}): ${e.message}"
             }
-            _uiState.value = AiUiState.Error(
-                message = friendly,
-                isRetryable = e.httpCode !in listOf(400, 401, 403),
-                isModelOverloaded = overloaded || e.httpCode == 404,
+            finalizeRunFailure(
+                "API error ${e.httpCode}",
+                AiUiState.Error(
+                    message = friendly,
+                    isRetryable = e.httpCode !in listOf(400, 401, 403),
+                    isModelOverloaded = overloaded || e.httpCode == 404,
+                ),
             )
         } catch (e: UnknownHostException) {
             Log.e(TAG, "No network connection", e)
-            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), "Offline", totalMessageTokens)
-            onUsageRecorded(provider, activeModel, TokenUsageDelta(), 0, true)
-            onMessagesChanged(_messages.value)
-            _uiState.value = AiUiState.Error("No internet connection. Check your network and retry.")
+            onUsageRecorded(provider, effectiveModelInUse, TokenUsageDelta(), 0, true)
+            finalizeRunFailure("Offline", AiUiState.Error("No internet connection. Check your network and retry."))
         } catch (e: Exception) {
             Log.e(TAG, "${provider.shortName} generation failed", e)
             val msg = e.localizedMessage?.ifBlank { null } ?: "Failed to reach ${provider.shortName} API."
-            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), msg, totalMessageTokens)
-            onUsageRecorded(provider, activeModel, TokenUsageDelta(), 0, true)
-            onMessagesChanged(_messages.value)
-            _uiState.value = AiUiState.Error(msg)
+            onUsageRecorded(provider, effectiveModelInUse, TokenUsageDelta(), 0, true)
+            finalizeRunFailure(msg, AiUiState.Error(msg))
+        } finally {
+            if (activeRunId == assistantMsgId) {
+                activeRunId = null
+            }
+            if (userCancelledRunId == assistantMsgId) {
+                userCancelledRunId = null
+            }
         }
     }
 
     private suspend fun runGeminiLoop(
-        activeModel: String,
+        initialModel: String,
         apiKey: String,
+        thinkingMode: AiThinkingMode,
         priorHistory: List<ChatMessage>,
         promptWithContext: String,
-        assistantMsgId: String,
         steps: MutableList<AgentStep>,
         accumulatedVisibleText: StringBuilder,
         addOrUpdateStep: (AgentStep) -> Unit,
+        onStreamText: (String, String) -> Unit,
+        onFinalizeSuccess: (String, List<AgentStep>, Long, String) -> Unit,
+        onFinalizeFailure: (String, AiUiState.Error) -> Unit,
         toolExecutor: ProjectToolExecutor,
-        onUsage: (TokenUsageDelta, Int) -> Unit,
+        onUsage: (String, TokenUsageDelta, Int) -> Unit,
     ) {
         val conversationContents = buildInitialContents(priorHistory, promptWithContext)
         var completed = false
         var cumulativeTokens = 0L
+        var activeModel = initialModel
 
         for (turn in 0 until MAX_AGENT_TURNS) {
             coroutineContext.ensureActive()
@@ -290,13 +529,12 @@ class GeminiCodeAssistant {
             addOrUpdateStep(
                 AgentStep(
                     id = thinkStepId,
-                    title = if (turn == 0) "Sending request to $activeModel" else "Analyzing tool results",
-                    detail = "Waiting for Gemini...",
+                    title = if (turn == 0) "Connecting to $activeModel" else "Analyzing tool results ($activeModel)",
+                    detail = "${thinkingMode.badge} • Waiting for Gemini...",
                     status = AgentStepStatus.RUNNING,
                 ),
             )
 
-            val requestJson = buildRequestPayload(conversationContents, activeModel)
             val turnPrefixLength = accumulatedVisibleText.length
             if (accumulatedVisibleText.isNotEmpty() && !accumulatedVisibleText.endsWith("\n")) {
                 accumulatedVisibleText.append("\n\n")
@@ -305,25 +543,27 @@ class GeminiCodeAssistant {
             val turnVisibleText = StringBuilder()
 
             val turnOutcome = withTimeout(TURN_TIMEOUT_MS) {
-                callModelWithRetryAndFallback(
-                    modelId = activeModel,
+                callGeminiWithRetryAndFailover(
+                    primaryModelId = activeModel,
                     apiKey = apiKey,
-                    requestBody = requestJson,
-                    onConnected = {
+                    thinkingMode = thinkingMode,
+                    contents = conversationContents,
+                    onConnected = { connectedModel ->
+                        activeModel = connectedModel
                         addOrUpdateStep(
                             AgentStep(
                                 id = thinkStepId,
-                                title = if (turn == 0) "Streaming from $activeModel" else "Analyzing tool results",
-                                detail = "Connected, streaming response...",
+                                title = if (turn == 0) "Streaming from $connectedModel" else "Analyzing results ($connectedModel)",
+                                detail = "${thinkingMode.badge} • Streaming response...",
                                 status = AgentStepStatus.RUNNING,
                             ),
                         )
                     },
-                    onRetryStatus = { detail ->
+                    onStatusUpdate = { title, detail ->
                         addOrUpdateStep(
                             AgentStep(
                                 id = thinkStepId,
-                                title = "Retrying $activeModel",
+                                title = title,
                                 detail = detail,
                                 status = AgentStepStatus.RUNNING,
                             ),
@@ -334,36 +574,33 @@ class GeminiCodeAssistant {
                         accumulatedVisibleText.clear()
                         accumulatedVisibleText.append(textBeforeTurn)
                         accumulatedVisibleText.append(turnVisibleText)
-                        updateAssistantMessage(
-                            id = assistantMsgId,
-                            text = accumulatedVisibleText.toString(),
-                            isStreaming = true,
-                            steps = steps.toList(),
-                            codeBlocks = emptyList(),
-                        )
+                        onStreamText(accumulatedVisibleText.toString(), activeModel)
                     },
                 )
             }
 
+            if (turnOutcome.usedModel != activeModel) {
+                activeModel = turnOutcome.usedModel
+            }
             if (turnVisibleText.isEmpty()) {
                 accumulatedVisibleText.setLength(turnPrefixLength)
             }
 
             val functionCalls = turnOutcome.functionCalls
             cumulativeTokens += turnOutcome.usage.totalTokens
-            onUsage(turnOutcome.usage, functionCalls.size)
+            onUsage(activeModel, turnOutcome.usage, functionCalls.size)
 
             if (functionCalls.isEmpty()) {
                 val toolCount = steps.count { it.status == AgentStepStatus.COMPLETED && !it.id.startsWith("think_") }
-                addOrUpdateStep(
-                    AgentStep(
-                        id = thinkStepId,
-                        title = if (turn == 0) "Responded via $activeModel" else "Completed task",
-                        detail = if (toolCount > 0) "$toolCount tool(s) • $cumulativeTokens tokens" else "$cumulativeTokens tokens",
-                        status = AgentStepStatus.COMPLETED,
-                        durationMs = System.currentTimeMillis() - turnStart,
-                    ),
+                val failoverSuffix = if (activeModel != initialModel) " (auto-switched from $initialModel)" else ""
+                val completionStep = AgentStep(
+                    id = thinkStepId,
+                    title = if (turn == 0) "Responded via $activeModel" else "Completed task via $activeModel",
+                    detail = (if (toolCount > 0) "$toolCount tool(s) • $cumulativeTokens tokens" else "$cumulativeTokens tokens") + failoverSuffix,
+                    status = AgentStepStatus.COMPLETED,
+                    durationMs = System.currentTimeMillis() - turnStart,
                 )
+                addOrUpdateStep(completionStep)
 
                 val finalText = accumulatedVisibleText.toString().trim()
                 if (finalText.isEmpty() && steps.none { !it.id.startsWith("think_") }) {
@@ -373,28 +610,20 @@ class GeminiCodeAssistant {
                             "Gemini returned no text (finishReason: ${turnOutcome.finishReason})."
                         else -> "Gemini returned an empty response."
                     }
-                    finalizeFailedSteps(assistantMsgId, steps, "", reasonMsg, cumulativeTokens)
-                    _uiState.value = AiUiState.Error(reasonMsg)
+                    onFinalizeFailure(reasonMsg, AiUiState.Error(reasonMsg))
                 } else {
                     val displayText = finalText.ifBlank { "All requested actions finished." }
-                    updateAssistantMessage(
-                        id = assistantMsgId,
-                        text = displayText,
-                        isStreaming = false,
-                        steps = steps.toList(),
-                        codeBlocks = extractCodeBlocks(displayText),
-                        totalTokens = cumulativeTokens,
-                    )
-                    _uiState.value = AiUiState.Idle
+                    onFinalizeSuccess(displayText, steps.toList(), cumulativeTokens, activeModel)
                 }
                 completed = true
                 break
             }
 
+            val failoverNote = if (activeModel != initialModel) " • $activeModel" else ""
             addOrUpdateStep(
                 AgentStep(
                     id = thinkStepId,
-                    title = "Planned ${functionCalls.size} action(s)",
+                    title = "Planned ${functionCalls.size} action(s)$failoverNote",
                     detail = functionCalls.joinToString(", ") { it.name },
                     status = AgentStepStatus.COMPLETED,
                     durationMs = System.currentTimeMillis() - turnStart,
@@ -454,29 +683,25 @@ class GeminiCodeAssistant {
         if (!completed) {
             val summary = accumulatedVisibleText.toString().trim()
                 .ifBlank { "Stopped after reaching the maximum autonomous step limit ($MAX_AGENT_TURNS turns)." }
-            updateAssistantMessage(
-                id = assistantMsgId,
-                text = summary,
-                isStreaming = false,
-                steps = steps.toList(),
-                codeBlocks = extractCodeBlocks(summary),
-            )
-            _uiState.value = AiUiState.Idle
+            onFinalizeSuccess(summary, steps.toList(), cumulativeTokens, activeModel)
         }
     }
 
     private suspend fun runOpenAiLoop(
-        activeModel: String,
+        initialModel: String,
         apiKey: String,
+        thinkingMode: AiThinkingMode,
         priorHistory: List<ChatMessage>,
         promptWithContext: String,
-        assistantMsgId: String,
         steps: MutableList<AgentStep>,
         accumulatedVisibleText: StringBuilder,
         addOrUpdateStep: (AgentStep) -> Unit,
+        onStreamText: (String, String) -> Unit,
+        onFinalizeSuccess: (String, List<AgentStep>, Long, String) -> Unit,
         toolExecutor: ProjectToolExecutor,
-        onUsage: (TokenUsageDelta, Int) -> Unit,
+        onUsage: (String, TokenUsageDelta, Int) -> Unit,
     ) {
+        var activeModel = initialModel
         val openAiMessages = JSONArray().apply {
             put(JSONObject().put("role", "system").put("content", buildSystemInstruction(activeModel)))
             priorHistory.forEach { msg ->
@@ -495,8 +720,8 @@ class GeminiCodeAssistant {
             addOrUpdateStep(
                 AgentStep(
                     id = thinkStepId,
-                    title = if (turn == 0) "Sending to ChatGPT ($activeModel)" else "Analyzing tool output",
-                    detail = "Waiting for OpenAI...",
+                    title = if (turn == 0) "Connecting to ChatGPT ($activeModel)" else "Analyzing tool output ($activeModel)",
+                    detail = "${thinkingMode.badge} • Waiting for OpenAI...",
                     status = AgentStepStatus.RUNNING,
                 ),
             )
@@ -508,41 +733,45 @@ class GeminiCodeAssistant {
             val textBeforeTurn = accumulatedVisibleText.toString()
             val turnText = StringBuilder()
 
-            val outcome = withTimeout(TURN_TIMEOUT_MS) {
-                ProviderApiClient.streamOpenAi(
-                    apiKey = apiKey,
-                    modelId = activeModel,
-                    messages = openAiMessages,
-                    onConnected = {
-                        addOrUpdateStep(
-                            AgentStep(
-                                id = thinkStepId,
-                                title = "Streaming from $activeModel",
-                                detail = "Connected...",
-                                status = AgentStepStatus.RUNNING,
-                            ),
-                        )
+            val (usedModel, outcome) = withTimeout(TURN_TIMEOUT_MS) {
+                callExternalWithRetryAndFailover(
+                    provider = AiProvider.OPENAI,
+                    primaryModelId = activeModel,
+                    onStatusUpdate = { title, detail ->
+                        addOrUpdateStep(AgentStep(id = thinkStepId, title = title, detail = detail, status = AgentStepStatus.RUNNING))
                     },
-                    onTextDelta = { delta ->
-                        turnText.append(delta)
-                        accumulatedVisibleText.clear()
-                        accumulatedVisibleText.append(textBeforeTurn)
-                        accumulatedVisibleText.append(turnText)
-                        updateAssistantMessage(
-                            id = assistantMsgId,
-                            text = accumulatedVisibleText.toString(),
-                            isStreaming = true,
-                            steps = steps.toList(),
-                            codeBlocks = emptyList(),
-                            totalTokens = totalTokens,
-                        )
-                    },
-                )
+                ) { candidate ->
+                    ProviderApiClient.streamOpenAi(
+                        apiKey = apiKey,
+                        modelId = candidate,
+                        messages = openAiMessages,
+                        thinkingMode = thinkingMode,
+                        onConnected = {
+                            activeModel = candidate
+                            addOrUpdateStep(
+                                AgentStep(
+                                    id = thinkStepId,
+                                    title = "Streaming from $candidate",
+                                    detail = "${thinkingMode.badge} • Connected...",
+                                    status = AgentStepStatus.RUNNING,
+                                ),
+                            )
+                        },
+                        onTextDelta = { delta ->
+                            turnText.append(delta)
+                            accumulatedVisibleText.clear()
+                            accumulatedVisibleText.append(textBeforeTurn)
+                            accumulatedVisibleText.append(turnText)
+                            onStreamText(accumulatedVisibleText.toString(), candidate)
+                        },
+                    )
+                }
             }
 
+            activeModel = usedModel
             if (turnText.isEmpty()) accumulatedVisibleText.setLength(turnPrefixLen)
             totalTokens += outcome.usage.totalTokens
-            onUsage(outcome.usage, outcome.openAiToolCalls.size)
+            onUsage(activeModel, outcome.usage, outcome.openAiToolCalls.size)
 
             if (outcome.openAiToolCalls.isEmpty()) {
                 addOrUpdateStep(
@@ -555,15 +784,7 @@ class GeminiCodeAssistant {
                     ),
                 )
                 val finalText = accumulatedVisibleText.toString().trim().ifBlank { "All requested actions finished." }
-                updateAssistantMessage(
-                    id = assistantMsgId,
-                    text = finalText,
-                    isStreaming = false,
-                    steps = steps.toList(),
-                    codeBlocks = extractCodeBlocks(finalText),
-                    totalTokens = totalTokens,
-                )
-                _uiState.value = AiUiState.Idle
+                onFinalizeSuccess(finalText, steps.toList(), totalTokens, activeModel)
                 completed = true
                 break
             }
@@ -624,23 +845,25 @@ class GeminiCodeAssistant {
 
         if (!completed) {
             val summary = accumulatedVisibleText.toString().trim().ifBlank { "Reached max step limit ($MAX_AGENT_TURNS turns)." }
-            updateAssistantMessage(assistantMsgId, summary, false, steps.toList(), extractCodeBlocks(summary), totalTokens)
-            _uiState.value = AiUiState.Idle
+            onFinalizeSuccess(summary, steps.toList(), totalTokens, activeModel)
         }
     }
 
     private suspend fun runClaudeLoop(
-        activeModel: String,
+        initialModel: String,
         apiKey: String,
+        thinkingMode: AiThinkingMode,
         priorHistory: List<ChatMessage>,
         promptWithContext: String,
-        assistantMsgId: String,
         steps: MutableList<AgentStep>,
         accumulatedVisibleText: StringBuilder,
         addOrUpdateStep: (AgentStep) -> Unit,
+        onStreamText: (String, String) -> Unit,
+        onFinalizeSuccess: (String, List<AgentStep>, Long, String) -> Unit,
         toolExecutor: ProjectToolExecutor,
-        onUsage: (TokenUsageDelta, Int) -> Unit,
+        onUsage: (String, TokenUsageDelta, Int) -> Unit,
     ) {
+        var activeModel = initialModel
         val systemText = buildSystemInstruction(activeModel)
         val claudeMessages = JSONArray().apply {
             priorHistory.forEach { msg ->
@@ -659,8 +882,8 @@ class GeminiCodeAssistant {
             addOrUpdateStep(
                 AgentStep(
                     id = thinkStepId,
-                    title = if (turn == 0) "Sending to Claude ($activeModel)" else "Analyzing tool results",
-                    detail = "Waiting for Anthropic...",
+                    title = if (turn == 0) "Connecting to Claude ($activeModel)" else "Analyzing tool results ($activeModel)",
+                    detail = "${thinkingMode.badge} • Waiting for Anthropic...",
                     status = AgentStepStatus.RUNNING,
                 ),
             )
@@ -672,42 +895,46 @@ class GeminiCodeAssistant {
             val textBeforeTurn = accumulatedVisibleText.toString()
             val turnText = StringBuilder()
 
-            val outcome = withTimeout(TURN_TIMEOUT_MS) {
-                ProviderApiClient.streamClaude(
-                    apiKey = apiKey,
-                    modelId = activeModel,
-                    systemInstruction = systemText,
-                    messages = claudeMessages,
-                    onConnected = {
-                        addOrUpdateStep(
-                            AgentStep(
-                                id = thinkStepId,
-                                title = "Streaming from $activeModel",
-                                detail = "Connected...",
-                                status = AgentStepStatus.RUNNING,
-                            ),
-                        )
+            val (usedModel, outcome) = withTimeout(TURN_TIMEOUT_MS) {
+                callExternalWithRetryAndFailover(
+                    provider = AiProvider.CLAUDE,
+                    primaryModelId = activeModel,
+                    onStatusUpdate = { title, detail ->
+                        addOrUpdateStep(AgentStep(id = thinkStepId, title = title, detail = detail, status = AgentStepStatus.RUNNING))
                     },
-                    onTextDelta = { delta ->
-                        turnText.append(delta)
-                        accumulatedVisibleText.clear()
-                        accumulatedVisibleText.append(textBeforeTurn)
-                        accumulatedVisibleText.append(turnText)
-                        updateAssistantMessage(
-                            id = assistantMsgId,
-                            text = accumulatedVisibleText.toString(),
-                            isStreaming = true,
-                            steps = steps.toList(),
-                            codeBlocks = emptyList(),
-                            totalTokens = totalTokens,
-                        )
-                    },
-                )
+                ) { candidate ->
+                    ProviderApiClient.streamClaude(
+                        apiKey = apiKey,
+                        modelId = candidate,
+                        systemInstruction = systemText,
+                        messages = claudeMessages,
+                        thinkingMode = thinkingMode,
+                        onConnected = {
+                            activeModel = candidate
+                            addOrUpdateStep(
+                                AgentStep(
+                                    id = thinkStepId,
+                                    title = "Streaming from $candidate",
+                                    detail = "${thinkingMode.badge} • Connected...",
+                                    status = AgentStepStatus.RUNNING,
+                                ),
+                            )
+                        },
+                        onTextDelta = { delta ->
+                            turnText.append(delta)
+                            accumulatedVisibleText.clear()
+                            accumulatedVisibleText.append(textBeforeTurn)
+                            accumulatedVisibleText.append(turnText)
+                            onStreamText(accumulatedVisibleText.toString(), candidate)
+                        },
+                    )
+                }
             }
 
+            activeModel = usedModel
             if (turnText.isEmpty()) accumulatedVisibleText.setLength(turnPrefixLen)
             totalTokens += outcome.usage.totalTokens
-            onUsage(outcome.usage, outcome.claudeToolUses.size)
+            onUsage(activeModel, outcome.usage, outcome.claudeToolUses.size)
 
             if (outcome.claudeToolUses.isEmpty()) {
                 addOrUpdateStep(
@@ -720,15 +947,7 @@ class GeminiCodeAssistant {
                     ),
                 )
                 val finalText = accumulatedVisibleText.toString().trim().ifBlank { "All requested actions finished." }
-                updateAssistantMessage(
-                    id = assistantMsgId,
-                    text = finalText,
-                    isStreaming = false,
-                    steps = steps.toList(),
-                    codeBlocks = extractCodeBlocks(finalText),
-                    totalTokens = totalTokens,
-                )
-                _uiState.value = AiUiState.Idle
+                onFinalizeSuccess(finalText, steps.toList(), totalTokens, activeModel)
                 completed = true
                 break
             }
@@ -778,39 +997,164 @@ class GeminiCodeAssistant {
 
         if (!completed) {
             val summary = accumulatedVisibleText.toString().trim().ifBlank { "Reached max step limit ($MAX_AGENT_TURNS turns)." }
-            updateAssistantMessage(assistantMsgId, summary, false, steps.toList(), extractCodeBlocks(summary), totalTokens)
-            _uiState.value = AiUiState.Idle
+            onFinalizeSuccess(summary, steps.toList(), totalTokens, activeModel)
         }
     }
 
-    private suspend fun callModelWithRetryAndFallback(
-        modelId: String,
-        apiKey: String,
-        requestBody: String,
-        onConnected: () -> Unit,
-        onRetryStatus: (String) -> Unit,
-        onTextDelta: (String) -> Unit,
-    ): TurnStreamOutcome {
-        val backoffMs = longArrayOf(1_500L, 3_000L, 5_000L)
-        var attempt = 0
-        while (true) {
-            coroutineContext.ensureActive()
-            try {
-                return callModelWithSseFallback(
-                    modelId = modelId,
-                    apiKey = apiKey,
-                    requestBody = requestBody,
-                    onConnected = onConnected,
-                    onFallback = { onRetryStatus("SSE timed out, trying standard request...") },
-                    onTextDelta = onTextDelta,
-                )
-            } catch (e: GeminiApiException) {
-                if (!isTransientHttpStatus(e.httpCode) || attempt >= backoffMs.size) throw e
-                val waitMs = backoffMs[attempt++]
-                onRetryStatus("High demand (${e.httpCode}) — retrying in ${waitMs / 1000.0}s ($attempt/${backoffMs.size})...")
-                delay(waitMs)
+    private suspend fun callExternalWithRetryAndFailover(
+        provider: AiProvider,
+        primaryModelId: String,
+        onStatusUpdate: (String, String) -> Unit,
+        invoke: suspend (String) -> ExternalTurnOutcome,
+    ): Pair<String, ExternalTurnOutcome> {
+        val candidates = AiModelsCatalog.fallbackChain(provider, primaryModelId)
+        var lastError: Throwable? = null
+
+        for ((index, candidate) in candidates.withIndex()) {
+            val hasNextCandidate = index < candidates.lastIndex
+            var attemptsOnCandidate = 0
+            while (attemptsOnCandidate < 2) {
+                coroutineContext.ensureActive()
+                attemptsOnCandidate++
+                try {
+                    val outcome = invoke(candidate)
+                    return candidate to outcome
+                } catch (e: GeminiApiException) {
+                    lastError = e
+                    val canRetrySame = isTransientHttpStatus(e.httpCode) && attemptsOnCandidate == 1
+                    if (canRetrySame) {
+                        onStatusUpdate(
+                            "Retrying $candidate",
+                            "HTTP ${e.httpCode} — quick retry before failover...",
+                        )
+                        delay(400L)
+                        continue
+                    }
+                    if (shouldFailoverHttpStatus(e.httpCode) && hasNextCandidate) {
+                        val nextModel = candidates[index + 1]
+                        onStatusUpdate(
+                            "Switching model (${e.httpCode})",
+                            "$candidate returned ${e.httpCode} — failing over to $nextModel...",
+                        )
+                        break
+                    }
+                    throw e
+                } catch (e: SocketTimeoutException) {
+                    lastError = e
+                    if (hasNextCandidate) {
+                        val nextModel = candidates[index + 1]
+                        onStatusUpdate(
+                            "Timeout on $candidate",
+                            "Timed out — switching to $nextModel...",
+                        )
+                        break
+                    }
+                    throw e
+                }
             }
         }
+        throw lastError ?: GeminiApiException(503, "All ${provider.shortName} fallback models are currently unavailable.")
+    }
+
+    private suspend fun callGeminiWithRetryAndFailover(
+        primaryModelId: String,
+        apiKey: String,
+        thinkingMode: AiThinkingMode,
+        contents: JSONArray,
+        onConnected: (String) -> Unit,
+        onStatusUpdate: (String, String) -> Unit,
+        onTextDelta: (String) -> Unit,
+    ): TurnStreamOutcome {
+        val candidates = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, primaryModelId)
+        var lastError: Throwable? = null
+
+        for ((index, candidate) in candidates.withIndex()) {
+            val hasNextCandidate = index < candidates.lastIndex
+            var includeThinkingConfig = true
+            var attemptsOnCandidate = 0
+
+            while (attemptsOnCandidate < 2) {
+                coroutineContext.ensureActive()
+                attemptsOnCandidate++
+                val requestBody = buildRequestPayload(
+                    contents = contents,
+                    modelId = candidate,
+                    thinkingMode = thinkingMode,
+                    includeThinkingConfig = includeThinkingConfig,
+                )
+                try {
+                    val outcome = callModelWithSseFallback(
+                        modelId = candidate,
+                        apiKey = apiKey,
+                        requestBody = requestBody,
+                        onConnected = { onConnected(candidate) },
+                        onFallback = {
+                            onStatusUpdate(
+                                "Retrying $candidate",
+                                "SSE timed out, trying direct response...",
+                            )
+                        },
+                        onTextDelta = onTextDelta,
+                    )
+                    return outcome.copy(usedModel = candidate)
+                } catch (e: GeminiApiException) {
+                    lastError = e
+                    val isThinkingConfigError = e.httpCode == 400 &&
+                        includeThinkingConfig &&
+                        e.message.orEmpty().let { msg ->
+                            msg.contains("thinking", ignoreCase = true) ||
+                                msg.contains("thinkingLevel", ignoreCase = true) ||
+                                msg.contains("thinkingBudget", ignoreCase = true)
+                        }
+                    if (isThinkingConfigError) {
+                        includeThinkingConfig = false
+                        continue
+                    }
+
+                    if (e.httpCode == 404 && hasNextCandidate) {
+                        val nextModel = candidates[index + 1]
+                        onStatusUpdate(
+                            "Model unavailable (404)",
+                            "$candidate not found — switching to $nextModel...",
+                        )
+                        break
+                    }
+
+                    val canRetrySame = isTransientHttpStatus(e.httpCode) && attemptsOnCandidate == 1
+                    if (canRetrySame) {
+                        val nextLabel = if (hasNextCandidate) " (failover ready)" else ""
+                        onStatusUpdate(
+                            "High demand (${e.httpCode}) on $candidate",
+                            "Quick retry in 0.4s$nextLabel...",
+                        )
+                        delay(400L)
+                        continue
+                    }
+
+                    if (shouldFailoverHttpStatus(e.httpCode) && hasNextCandidate) {
+                        val nextModel = candidates[index + 1]
+                        onStatusUpdate(
+                            "503/Overload — switching model",
+                            "$candidate busy (${e.httpCode}) → switching to $nextModel...",
+                        )
+                        break
+                    }
+                    throw e
+                } catch (e: SocketTimeoutException) {
+                    lastError = e
+                    if (hasNextCandidate) {
+                        val nextModel = candidates[index + 1]
+                        onStatusUpdate(
+                            "$candidate timed out",
+                            "Switching to $nextModel...",
+                        )
+                        break
+                    }
+                    throw e
+                }
+            }
+        }
+        throw lastError ?: GeminiApiException(503, "All Gemini models are experiencing high demand right now.")
     }
 
     private suspend fun callModelWithSseFallback(
@@ -838,34 +1182,10 @@ class GeminiCodeAssistant {
             )
         } catch (e: SocketTimeoutException) {
             if (receivedAnyBytes) throw e
-            Log.w(TAG, "SSE timed out before receiving response; retrying non-streaming generateContent", e)
+            Log.w(TAG, "SSE timed out before receiving response for $modelId; retrying non-streaming generateContent", e)
             onFallback()
             generateContentUnary(modelId, apiKey, requestBody, onTextDelta)
         }
-    }
-
-    private fun finalizeFailedSteps(
-        assistantMsgId: String,
-        steps: MutableList<AgentStep>,
-        currentText: String,
-        failureDetail: String,
-        totalTokens: Long,
-    ) {
-        val updated = steps.map { step ->
-            if (step.status == AgentStepStatus.RUNNING) {
-                step.copy(status = AgentStepStatus.FAILED, detail = failureDetail)
-            } else {
-                step
-            }
-        }
-        updateAssistantMessage(
-            id = assistantMsgId,
-            text = currentText,
-            isStreaming = false,
-            steps = updated,
-            codeBlocks = extractCodeBlocks(currentText),
-            totalTokens = totalTokens,
-        )
     }
 
     private suspend fun executeToolCall(
@@ -1026,6 +1346,7 @@ class GeminiCodeAssistant {
                 blockReason = blockReason,
                 finishReason = finishReason,
                 usage = latestUsage.copy(latencyMs = System.currentTimeMillis() - startedAt),
+                usedModel = modelId,
             )
         } finally {
             cancelHandle?.dispose()
@@ -1098,6 +1419,7 @@ class GeminiCodeAssistant {
                 blockReason = parsed.blockReason,
                 finishReason = parsed.finishReason,
                 usage = parsed.usage.copy(latencyMs = System.currentTimeMillis() - startedAt),
+                usedModel = modelId,
             )
         } finally {
             cancelHandle?.dispose()
@@ -1130,21 +1452,30 @@ class GeminiCodeAssistant {
     private fun buildSystemInstruction(modelId: String): String = """
         You are an autonomous coding agent powered by $modelId inside DroidForge Studio, an offline-capable Android Java IDE, APK/AAB builder, and live UI previewer.
 
-        Execution rules:
+        Execution rules (prioritize speed & accuracy):
         - Act autonomously WITHOUT asking the user for permission before reading, creating, editing, or deleting files, or building the APK/AAB.
-        - You have full read and write access to EVERY file in the active project via your tools: list_files, read_file, write_file, edit_file, delete_file, search_files, build_apk, and build_aab.
-        - Always inspect existing files with read_file / list_files before modifying unfamiliar code.
-        - Prefer edit_file for targeted changes and write_file for creating new files or full rewrites. Changes are immediately saved and opened in the user's editor and live Emulator preview.
-        - After making code or XML changes, call build_apk to verify compilation (ECJ + DEX + ApkSigner). If build_apk reports compiler errors, fix them immediately and re-run build_apk until it succeeds.
+        - Key project files (active tab, MainActivity, AndroidManifest, values XML) are already pre-loaded in the prompt. Do NOT waste turns calling list_files or read_file on files already included below—jump straight to edit_file or write_file!
+        - Batch independent tool calls together in a single turn whenever possible.
+        - You have full access via tools: list_files, read_file, write_file, edit_file, delete_file, search_files, build_apk, and build_aab.
+        - Prefer edit_file for targeted edits and write_file for new files or full rewrites.
+        - After modifying Java, XML, or Manifest files, call build_apk to verify compilation. If build_apk reports errors, fix them immediately and rebuild. Skip build_apk for pure Q&A.
         - Do NOT use AndroidX, Jetpack Compose, Kotlin syntax, or external Gradle dependencies. Use classic Android SDK APIs (android.app.Activity, android.os.Bundle, android.view.*, android.widget.*, android.graphics.*, android.content.*, android.webkit.*, java.*).
         - Compiles Java 8 (.java), AndroidManifest.xml, res/values/strings.xml, and res/values/colors.xml into R.java and resources.arsc / resources.pb.
-        - In your final summary, state clearly what files you changed and whether the build succeeded.
+        - Keep your final summary concise, stating what files changed and the build status.
     """.trimIndent()
 
     internal fun buildRequestPayload(
         contents: JSONArray,
         modelId: String = GEMINI_MODEL_ID,
+        thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
+        includeThinkingConfig: Boolean = true,
     ): String {
+        val genConfig = JSONObject().put("temperature", 0.3)
+        if (includeThinkingConfig) {
+            buildThinkingConfigJson(modelId, thinkingMode)?.let { cfg ->
+                genConfig.put("thinkingConfig", cfg)
+            }
+        }
         return JSONObject().apply {
             put(
                 "systemInstruction",
@@ -1152,7 +1483,7 @@ class GeminiCodeAssistant {
             )
             put("contents", contents)
             put("tools", buildToolDeclarations())
-            put("generationConfig", JSONObject().put("temperature", 0.3))
+            put("generationConfig", genConfig)
         }.toString()
     }
 
@@ -1181,7 +1512,7 @@ class GeminiCodeAssistant {
         return JSONArray().put(JSONObject().put("functionDeclarations", declarations))
     }
 
-    private fun buildPrompt(
+    internal fun buildPrompt(
         userPrompt: String,
         projectName: String,
         packageName: String,
@@ -1201,32 +1532,51 @@ class GeminiCodeAssistant {
                 appendLine("${d.severity.name} ${d.filePath}:${d.line} -> ${d.message}")
             }
         }
+
+        // Pre-inline key files so the agent can edit on Turn 1 instead of wasting 2-3 round trips.
+        val priorityFiles = linkedListOfFilesForContext(activeFile, allFiles)
+        var budget = PRELOAD_CONTEXT_MAX_CHARS
+        if (priorityFiles.isNotEmpty()) {
+            appendLine()
+            appendLine("=== Pre-loaded Project Files ===")
+            for (file in priorityFiles) {
+                if (budget <= 400) break
+                val snippet = if (file.content.length <= budget) {
+                    file.content
+                } else {
+                    file.content.take(budget) + "\n... [truncated; call read_file for full file]"
+                }
+                appendLine("--- ${file.relativePath} ---")
+                appendLine(snippet.trimEnd())
+                budget -= snippet.length
+            }
+        }
+
         appendLine()
         appendLine("User request:")
         appendLine(userPrompt)
     }
 
-    private fun updateAssistantMessage(
-        id: String,
-        text: String,
-        isStreaming: Boolean,
-        steps: List<AgentStep>,
-        codeBlocks: List<SuggestedCodeBlock>,
-        totalTokens: Long = 0L,
-    ) {
-        _messages.value = _messages.value.map { msg ->
-            if (msg.id == id) {
-                msg.copy(
-                    text = text,
-                    isStreaming = isStreaming,
-                    steps = steps,
-                    codeBlocks = codeBlocks,
-                    totalTokens = if (totalTokens > 0L) totalTokens else msg.totalTokens,
-                )
-            } else {
-                msg
+    private fun linkedListOfFilesForContext(
+        activeFile: ProjectFile?,
+        allFiles: List<ProjectFile>,
+    ): List<ProjectFile> {
+        val seen = LinkedHashSet<String>()
+        val ordered = mutableListOf<ProjectFile>()
+        fun addIfPresent(file: ProjectFile?) {
+            if (file != null && seen.add(file.relativePath)) {
+                ordered.add(file)
             }
         }
+        addIfPresent(activeFile)
+        addIfPresent(allFiles.find { it.relativePath.endsWith("MainActivity.java") })
+        addIfPresent(allFiles.find { it.relativePath == "AndroidManifest.xml" })
+        addIfPresent(allFiles.find { it.relativePath == "res/values/strings.xml" })
+        addIfPresent(allFiles.find { it.relativePath == "res/values/colors.xml" })
+        allFiles.filter { it.relativePath.endsWith(".java") || it.relativePath.endsWith(".xml") }
+            .take(4)
+            .forEach { addIfPresent(it) }
+        return ordered
     }
 
     internal data class ParsedFunctionCall(
@@ -1240,6 +1590,7 @@ class GeminiCodeAssistant {
         val blockReason: String?,
         val finishReason: String?,
         val usage: TokenUsageDelta = TokenUsageDelta(),
+        val usedModel: String = GEMINI_MODEL_ID,
     )
 
     internal data class SseParseResult(
@@ -1269,7 +1620,46 @@ class GeminiCodeAssistant {
         }
 
         internal fun isTransientHttpStatus(httpCode: Int): Boolean {
-            return httpCode == 500 || httpCode == 502 || httpCode == 503 || httpCode == 504
+            return httpCode == 408 ||
+                httpCode == 429 ||
+                httpCode == 500 ||
+                httpCode == 502 ||
+                httpCode == 503 ||
+                httpCode == 504 ||
+                httpCode == 529
+        }
+
+        internal fun shouldFailoverHttpStatus(httpCode: Int): Boolean {
+            return httpCode == 404 || isTransientHttpStatus(httpCode)
+        }
+
+        internal fun buildThinkingConfigJson(
+            modelId: String,
+            mode: AiThinkingMode,
+        ): JSONObject? {
+            val id = modelId.lowercase()
+            // Legacy 2.0 / 1.5 / 1.0 models do not support thinkingConfig
+            if (id.contains("2.0") || id.contains("1.5") || id.contains("1.0")) {
+                return null
+            }
+            // Gemini 2.5 series uses integer thinkingBudget (never thinkingLevel)
+            if (id.contains("2.5")) {
+                val isPro = id.contains("pro")
+                val budget = when (mode) {
+                    AiThinkingMode.FAST -> if (isPro) 256 else 0
+                    AiThinkingMode.BALANCED -> if (isPro) 2048 else 1024
+                    AiThinkingMode.DEEP -> 8192
+                }
+                return JSONObject().put("thinkingBudget", budget)
+            }
+            // Gemini 3+ series uses thinkingLevel presets
+            val isPro = id.contains("pro") || id.contains("hydrogen")
+            val level = when (mode) {
+                AiThinkingMode.FAST -> if (isPro) "low" else "minimal"
+                AiThinkingMode.BALANCED -> "medium"
+                AiThinkingMode.DEEP -> "high"
+            }
+            return JSONObject().put("thinkingLevel", level)
         }
 
         internal fun appendRawPart(target: MutableList<JSONObject>, incoming: JSONObject) {
