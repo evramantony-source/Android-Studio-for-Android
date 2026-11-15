@@ -346,9 +346,43 @@ fun CodeEditor(
             }
         }
 
+        // Compact Editor Status Strip
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainer,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 3.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "${language.name} • ${lines.size} lines",
+                    fontFamily = JetBrainsMonoFontFamily,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                val cursorOffset = textValue.selection.start.coerceIn(0, textValue.text.length)
+                val lineStart = textValue.text.lastIndexOf('\n', (cursorOffset - 1).coerceAtLeast(0))
+                val colNum = if (lineStart < 0) cursorOffset + 1 else cursorOffset - lineStart
+                Text(
+                    text = "Ln $currentLine, Col $colNum",
+                    fontFamily = JetBrainsMonoFontFamily,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (currentLine in errorLineNumbers) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                )
+            }
+        }
+
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-        // Symbol & Action Accessory Bar
+        // Symbol & Android Quick-Snippet Accessory Bar
         Surface(
             color = MaterialTheme.colorScheme.surfaceContainerLow,
             modifier = Modifier.fillMaxWidth(),
@@ -416,6 +450,19 @@ fun CodeEditor(
                     "." to { insertSnippet(".") },
                     "//" to { insertSnippet("// ") },
                     "<>" to { insertSnippet("<>", cursorBackOffset = 1) },
+                    "Toast" to {
+                        insertSnippet(
+                            "android.widget.Toast.makeText(this, \"\", android.widget.Toast.LENGTH_SHORT).show();",
+                            cursorBackOffset = 46,
+                        )
+                    },
+                    "Log" to { insertSnippet("android.util.Log.d(\"App\", \"\");", cursorBackOffset = 3) },
+                    "Btn" to {
+                        insertSnippet(
+                            "Button btn = new Button(this);\nbtn.setText(\"Tap\");\nbtn.setOnClickListener(v -> {\n    \n});",
+                            cursorBackOffset = 4,
+                        )
+                    },
                 )
                 symbolChips.forEach { (label, action) ->
                     Surface(

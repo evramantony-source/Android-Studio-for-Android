@@ -33,60 +33,6 @@ private const val CONNECT_TIMEOUT_MS = 30_000
 private const val READ_TIMEOUT_MS = 180_000
 private const val TURN_TIMEOUT_MS = 180_000L
 
-data class SuggestedCodeBlock(
-    val language: String,
-    val suggestedPath: String?,
-    val code: String,
-)
-
-enum class AgentStepStatus {
-    RUNNING,
-    COMPLETED,
-    FAILED,
-}
-
-data class AgentStep(
-    val id: String,
-    val title: String,
-    val detail: String = "",
-    val status: AgentStepStatus = AgentStepStatus.RUNNING,
-)
-
-data class ChatMessage(
-    val id: String,
-    val isUser: Boolean,
-    val text: String,
-    val isStreaming: Boolean = false,
-    val steps: List<AgentStep> = emptyList(),
-    val codeBlocks: List<SuggestedCodeBlock> = emptyList(),
-)
-
-sealed interface AiUiState {
-    data object Idle : AiUiState
-    data object Streaming : AiUiState
-    data class Error(
-        val message: String,
-        val isRetryable: Boolean = true,
-        val isModelOverloaded: Boolean = false,
-    ) : AiUiState
-}
-
-data class AgentToolResult(
-    val success: Boolean,
-    val stepDetail: String,
-    val payload: JSONObject,
-)
-
-interface ProjectToolExecutor {
-    suspend fun listFiles(): AgentToolResult
-    suspend fun readFile(path: String): AgentToolResult
-    suspend fun writeFile(path: String, content: String): AgentToolResult
-    suspend fun editFile(path: String, oldText: String, newText: String): AgentToolResult
-    suspend fun deleteFile(path: String): AgentToolResult
-    suspend fun searchFiles(query: String): AgentToolResult
-    suspend fun buildApk(): AgentToolResult
-}
-
 internal class GeminiApiException(
     val httpCode: Int,
     message: String,
@@ -99,6 +45,11 @@ class GeminiCodeAssistant {
 
     private val _uiState = MutableStateFlow<AiUiState>(AiUiState.Idle)
     val uiState: StateFlow<AiUiState> = _uiState.asStateFlow()
+
+    fun setMessages(restored: List<ChatMessage>) {
+        _messages.value = restored
+        _uiState.value = AiUiState.Idle
+    }
 
     fun clearConversation() {
         _messages.value = emptyList()
@@ -138,22 +89,29 @@ class GeminiCodeAssistant {
         userPrompt: String,
         apiKey: String,
         modelId: String = GEMINI_MODEL_ID,
+        provider: AiProvider = AiProvider.GEMINI,
         projectName: String,
         packageName: String,
         activeFile: ProjectFile?,
         allFiles: List<ProjectFile>,
         diagnostics: List<BuildDiagnostic>,
         toolExecutor: ProjectToolExecutor,
+        onUsageRecorded: (provider: AiProvider, modelId: String, delta: TokenUsageDelta, toolCount: Int, failed: Boolean) -> Unit = { _, _, _, _, _ -> },
+        onMessagesChanged: (List<ChatMessage>) -> Unit = {},
     ) {
         val trimmed = userPrompt.trim()
         if (trimmed.isEmpty()) return
 
-        val activeModel = modelId.trim().removePrefix("models/").ifBlank { GEMINI_MODEL_ID }
+        val activeModel = modelId.trim().removePrefix("models/").ifBlank { provider.defaultModelId }
+        val resolvedKey = when (provider) {
+            AiProvider.GEMINI -> resolveApiKey(apiKey)
+            AiProvider.OPENAI, AiProvider.CLAUDE -> apiKey.trim()
+        }
 
-        val resolvedKey = resolveApiKey(apiKey)
         if (resolvedKey.isEmpty()) {
             _uiState.value = AiUiState.Error(
-                "Gemini API key is not configured. Tap the Key button above to enter your API key, or set GEMINI_API_KEY in AI Studio Secrets / GitHub Secrets.",
+                "${provider.shortName} API key is not configured. Tap the Key icon above to add your ${provider.displayName} key.",
+                isRetryable = false,
             )
             return
         }
@@ -175,9 +133,12 @@ class GeminiCodeAssistant {
             text = "",
             isStreaming = true,
             steps = emptyList(),
+            providerName = provider.shortName,
+            modelId = activeModel,
         )
 
         _messages.value = _messages.value + userMsg + assistantPlaceholder
+        onMessagesChanged(_messages.value)
         _uiState.value = AiUiState.Streaming
 
         val promptWithContext = buildPrompt(
@@ -189,239 +150,101 @@ class GeminiCodeAssistant {
             diagnostics = diagnostics,
         )
 
-        val conversationContents = buildInitialContents(
-            history = priorHistory,
-            latestPromptWithContext = promptWithContext,
-        )
-
         val accumulatedVisibleText = StringBuilder()
+        var totalMessageTokens = 0L
 
         fun addOrUpdateStep(step: AgentStep) {
             val idx = steps.indexOfFirst { it.id == step.id }
-            if (idx >= 0) {
-                steps[idx] = step
-            } else {
-                steps.add(step)
-            }
+            if (idx >= 0) steps[idx] = step else steps.add(step)
             updateAssistantMessage(
                 id = assistantMsgId,
                 text = accumulatedVisibleText.toString(),
                 isStreaming = true,
                 steps = steps.toList(),
                 codeBlocks = emptyList(),
+                totalTokens = totalMessageTokens,
             )
         }
 
         try {
-            var completed = false
-            for (turn in 0 until MAX_AGENT_TURNS) {
-                coroutineContext.ensureActive()
-
-                val thinkStepId = "think_$turn"
-                addOrUpdateStep(
-                    AgentStep(
-                        id = thinkStepId,
-                        title = if (turn == 0) "Sending request to $activeModel" else "Analyzing tool results",
-                        detail = "Waiting for model...",
-                        status = AgentStepStatus.RUNNING,
-                    ),
-                )
-
-                val requestJson = buildRequestPayload(
-                    contents = conversationContents,
-                    modelId = activeModel,
-                )
-                val turnPrefixLength = accumulatedVisibleText.length
-                if (accumulatedVisibleText.isNotEmpty() && !accumulatedVisibleText.endsWith("\n")) {
-                    accumulatedVisibleText.append("\n\n")
-                }
-                val textBeforeTurn = accumulatedVisibleText.toString()
-                val turnVisibleText = StringBuilder()
-
-                val turnOutcome = withTimeout(TURN_TIMEOUT_MS) {
-                    callModelWithRetryAndFallback(
-                        modelId = activeModel,
-                        apiKey = resolvedKey,
-                        requestBody = requestJson,
-                        onConnected = {
-                            addOrUpdateStep(
-                                AgentStep(
-                                    id = thinkStepId,
-                                    title = if (turn == 0) "Streaming from $activeModel" else "Analyzing tool results",
-                                    detail = "Connected, receiving response...",
-                                    status = AgentStepStatus.RUNNING,
-                                ),
-                            )
-                        },
-                        onRetryStatus = { detail ->
-                            addOrUpdateStep(
-                                AgentStep(
-                                    id = thinkStepId,
-                                    title = "Retrying $activeModel",
-                                    detail = detail,
-                                    status = AgentStepStatus.RUNNING,
-                                ),
-                            )
-                        },
-                        onTextDelta = { delta ->
-                            turnVisibleText.append(delta)
-                            accumulatedVisibleText.clear()
-                            accumulatedVisibleText.append(textBeforeTurn)
-                            accumulatedVisibleText.append(turnVisibleText)
-                            updateAssistantMessage(
-                                id = assistantMsgId,
-                                text = accumulatedVisibleText.toString(),
-                                isStreaming = true,
-                                steps = steps.toList(),
-                                codeBlocks = emptyList(),
-                            )
-                        },
-                    )
-                }
-
-                // Roll back trailing blank spacing if this turn produced no visible text
-                if (turnVisibleText.isEmpty()) {
-                    accumulatedVisibleText.setLength(turnPrefixLength)
-                }
-
-                val functionCalls = turnOutcome.functionCalls
-                if (functionCalls.isEmpty()) {
-                    val toolActionCount = steps.count { it.status == AgentStepStatus.COMPLETED && !it.id.startsWith("think_") }
-                    addOrUpdateStep(
-                        AgentStep(
-                            id = thinkStepId,
-                            title = if (turn == 0) "Responded via $activeModel" else "Completed task",
-                            detail = if (toolActionCount > 0) "$toolActionCount action(s) executed" else "Done",
-                            status = AgentStepStatus.COMPLETED,
-                        ),
-                    )
-
-                    val finalText = accumulatedVisibleText.toString().trim()
-                    if (finalText.isEmpty() && steps.none { !it.id.startsWith("think_") }) {
-                        val reasonMsg = when {
-                            !turnOutcome.blockReason.isNullOrBlank() ->
-                                "Response blocked by Gemini (${turnOutcome.blockReason})."
-                            !turnOutcome.finishReason.isNullOrBlank() && turnOutcome.finishReason != "STOP" ->
-                                "Gemini returned no text (finishReason: ${turnOutcome.finishReason})."
-                            else -> "Gemini returned an empty response."
-                        }
-                        finalizeFailedSteps(assistantMsgId, steps, "", reasonMsg)
-                        _uiState.value = AiUiState.Error(reasonMsg)
-                    } else {
-                        val displayText = finalText.ifBlank { "All requested actions finished." }
-                        updateAssistantMessage(
-                            id = assistantMsgId,
-                            text = displayText,
-                            isStreaming = false,
-                            steps = steps.toList(),
-                            codeBlocks = extractCodeBlocks(displayText),
-                        )
-                        _uiState.value = AiUiState.Idle
-                    }
-                    completed = true
-                    break
-                }
-
-                // Model requested one or more autonomous tool calls
-                addOrUpdateStep(
-                    AgentStep(
-                        id = thinkStepId,
-                        title = if (turn == 0) "Planned ${functionCalls.size} action(s)" else "Next: ${functionCalls.size} action(s)",
-                        detail = functionCalls.joinToString(", ") { it.name },
-                        status = AgentStepStatus.COMPLETED,
-                    ),
-                )
-
-                // Preserve exact model parts (including thoughtSignature) in conversation history
-                conversationContents.put(
-                    JSONObject().apply {
-                        put("role", "model")
-                        put("parts", turnOutcome.modelParts)
+            when (provider) {
+                AiProvider.GEMINI -> runGeminiLoop(
+                    activeModel = activeModel,
+                    apiKey = resolvedKey,
+                    priorHistory = priorHistory,
+                    promptWithContext = promptWithContext,
+                    assistantMsgId = assistantMsgId,
+                    steps = steps,
+                    accumulatedVisibleText = accumulatedVisibleText,
+                    addOrUpdateStep = ::addOrUpdateStep,
+                    toolExecutor = toolExecutor,
+                    onUsage = { delta, toolCalls ->
+                        totalMessageTokens += delta.totalTokens
+                        onUsageRecorded(provider, activeModel, delta, toolCalls, false)
                     },
                 )
-
-                val functionResponseParts = JSONArray()
-                for ((callIdx, call) in functionCalls.withIndex()) {
-                    coroutineContext.ensureActive()
-                    val stepId = "tool_${turn}_$callIdx"
-                    val stepTitle = describeToolCall(call)
-
-                    addOrUpdateStep(
-                        AgentStep(
-                            id = stepId,
-                            title = stepTitle,
-                            detail = "Running...",
-                            status = AgentStepStatus.RUNNING,
-                        ),
-                    )
-
-                    val toolResult = executeToolCall(call, toolExecutor)
-
-                    addOrUpdateStep(
-                        AgentStep(
-                            id = stepId,
-                            title = stepTitle,
-                            detail = toolResult.stepDetail,
-                            status = if (toolResult.success) AgentStepStatus.COMPLETED else AgentStepStatus.FAILED,
-                        ),
-                    )
-
-                    functionResponseParts.put(
-                        JSONObject().apply {
-                            put(
-                                "functionResponse",
-                                JSONObject().apply {
-                                    put("name", call.name)
-                                    put("response", toolResult.payload)
-                                },
-                            )
-                        },
-                    )
-                }
-
-                conversationContents.put(
-                    JSONObject().apply {
-                        put("role", "user")
-                        put("parts", functionResponseParts)
+                AiProvider.OPENAI -> runOpenAiLoop(
+                    activeModel = activeModel,
+                    apiKey = resolvedKey,
+                    priorHistory = priorHistory,
+                    promptWithContext = promptWithContext,
+                    assistantMsgId = assistantMsgId,
+                    steps = steps,
+                    accumulatedVisibleText = accumulatedVisibleText,
+                    addOrUpdateStep = ::addOrUpdateStep,
+                    toolExecutor = toolExecutor,
+                    onUsage = { delta, toolCalls ->
+                        totalMessageTokens += delta.totalTokens
+                        onUsageRecorded(provider, activeModel, delta, toolCalls, false)
+                    },
+                )
+                AiProvider.CLAUDE -> runClaudeLoop(
+                    activeModel = activeModel,
+                    apiKey = resolvedKey,
+                    priorHistory = priorHistory,
+                    promptWithContext = promptWithContext,
+                    assistantMsgId = assistantMsgId,
+                    steps = steps,
+                    accumulatedVisibleText = accumulatedVisibleText,
+                    addOrUpdateStep = ::addOrUpdateStep,
+                    toolExecutor = toolExecutor,
+                    onUsage = { delta, toolCalls ->
+                        totalMessageTokens += delta.totalTokens
+                        onUsageRecorded(provider, activeModel, delta, toolCalls, false)
                     },
                 )
             }
-
-            if (!completed) {
-                val summary = accumulatedVisibleText.toString().trim()
-                    .ifBlank { "Stopped after reaching the maximum autonomous step limit ($MAX_AGENT_TURNS turns)." }
-                updateAssistantMessage(
-                    id = assistantMsgId,
-                    text = summary,
-                    isStreaming = false,
-                    steps = steps.toList(),
-                    codeBlocks = extractCodeBlocks(summary),
-                )
-                _uiState.value = AiUiState.Idle
-            }
+            onMessagesChanged(_messages.value)
         } catch (e: TimeoutCancellationException) {
-            Log.e(TAG, "Gemini request timed out", e)
+            Log.e(TAG, "$provider request timed out", e)
             val msg = "Timed out waiting for $activeModel after ${TURN_TIMEOUT_MS / 1000}s."
-            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), msg)
+            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), msg, totalMessageTokens)
+            onUsageRecorded(provider, activeModel, TokenUsageDelta(), 0, true)
+            onMessagesChanged(_messages.value)
             _uiState.value = AiUiState.Error(msg)
         } catch (e: SocketTimeoutException) {
-            Log.e(TAG, "Socket timeout talking to Gemini ($activeModel)", e)
-            val msg = "Network timeout reaching $activeModel (${e.message ?: "socket timeout"}). Check your internet connection or tap the Key icon to switch/verify the model."
-            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), "Socket timeout")
+            Log.e(TAG, "Socket timeout talking to $activeModel", e)
+            val msg = "Network timeout reaching $activeModel (${e.message ?: "socket timeout"}). Check your internet connection or switch models."
+            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), "Socket timeout", totalMessageTokens)
+            onUsageRecorded(provider, activeModel, TokenUsageDelta(), 0, true)
+            onMessagesChanged(_messages.value)
             _uiState.value = AiUiState.Error(msg)
         } catch (e: CancellationException) {
             markCancelled()
+            onMessagesChanged(_messages.value)
             throw e
         } catch (e: GeminiApiException) {
-            Log.e(TAG, "Gemini API HTTP ${e.httpCode}: ${e.message}", e)
-            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), "API error ${e.httpCode}")
+            Log.e(TAG, "${provider.shortName} API HTTP ${e.httpCode}: ${e.message}", e)
+            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), "API error ${e.httpCode}", totalMessageTokens)
+            onUsageRecorded(provider, activeModel, TokenUsageDelta(), 0, true)
+            onMessagesChanged(_messages.value)
             val overloaded = e.httpCode == 503 || e.httpCode == 429
             val friendly = when (e.httpCode) {
-                400, 401, 403 -> "Gemini API error (${e.httpCode}): ${e.message}"
-                404 -> "Model '$activeModel' was not found for this API key (404): ${e.message}. Tap Switch Model to pick another."
-                429 -> "Gemini API rate limit or quota exceeded (429): ${e.message}"
+                400, 401, 403 -> "${provider.shortName} API error (${e.httpCode}): ${e.message}"
+                404 -> "Model '$activeModel' was not found for this ${provider.shortName} key (404): ${e.message}."
+                429 -> "${provider.shortName} rate limit or quota exceeded (429): ${e.message}"
                 503 -> "$activeModel is temporarily overloaded (503): ${e.message}"
-                else -> "Gemini API error (${e.httpCode}): ${e.message}"
+                else -> "${provider.shortName} API error (${e.httpCode}): ${e.message}"
             }
             _uiState.value = AiUiState.Error(
                 message = friendly,
@@ -429,14 +252,534 @@ class GeminiCodeAssistant {
                 isModelOverloaded = overloaded || e.httpCode == 404,
             )
         } catch (e: UnknownHostException) {
-            Log.e(TAG, "No network connection for Gemini", e)
-            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), "Offline")
-            _uiState.value = AiUiState.Error("Unable to reach generativelanguage.googleapis.com. Check your internet connection.")
+            Log.e(TAG, "No network connection", e)
+            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), "Offline", totalMessageTokens)
+            onUsageRecorded(provider, activeModel, TokenUsageDelta(), 0, true)
+            onMessagesChanged(_messages.value)
+            _uiState.value = AiUiState.Error("No internet connection. Check your network and retry.")
         } catch (e: Exception) {
-            Log.e(TAG, "Gemini generation failed", e)
-            val msg = e.localizedMessage?.ifBlank { null } ?: "Failed to reach Gemini API."
-            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), msg)
+            Log.e(TAG, "${provider.shortName} generation failed", e)
+            val msg = e.localizedMessage?.ifBlank { null } ?: "Failed to reach ${provider.shortName} API."
+            finalizeFailedSteps(assistantMsgId, steps, accumulatedVisibleText.toString(), msg, totalMessageTokens)
+            onUsageRecorded(provider, activeModel, TokenUsageDelta(), 0, true)
+            onMessagesChanged(_messages.value)
             _uiState.value = AiUiState.Error(msg)
+        }
+    }
+
+    private suspend fun runGeminiLoop(
+        activeModel: String,
+        apiKey: String,
+        priorHistory: List<ChatMessage>,
+        promptWithContext: String,
+        assistantMsgId: String,
+        steps: MutableList<AgentStep>,
+        accumulatedVisibleText: StringBuilder,
+        addOrUpdateStep: (AgentStep) -> Unit,
+        toolExecutor: ProjectToolExecutor,
+        onUsage: (TokenUsageDelta, Int) -> Unit,
+    ) {
+        val conversationContents = buildInitialContents(priorHistory, promptWithContext)
+        var completed = false
+        var cumulativeTokens = 0L
+
+        for (turn in 0 until MAX_AGENT_TURNS) {
+            coroutineContext.ensureActive()
+            val turnStart = System.currentTimeMillis()
+            val thinkStepId = "think_$turn"
+            addOrUpdateStep(
+                AgentStep(
+                    id = thinkStepId,
+                    title = if (turn == 0) "Sending request to $activeModel" else "Analyzing tool results",
+                    detail = "Waiting for Gemini...",
+                    status = AgentStepStatus.RUNNING,
+                ),
+            )
+
+            val requestJson = buildRequestPayload(conversationContents, activeModel)
+            val turnPrefixLength = accumulatedVisibleText.length
+            if (accumulatedVisibleText.isNotEmpty() && !accumulatedVisibleText.endsWith("\n")) {
+                accumulatedVisibleText.append("\n\n")
+            }
+            val textBeforeTurn = accumulatedVisibleText.toString()
+            val turnVisibleText = StringBuilder()
+
+            val turnOutcome = withTimeout(TURN_TIMEOUT_MS) {
+                callModelWithRetryAndFallback(
+                    modelId = activeModel,
+                    apiKey = apiKey,
+                    requestBody = requestJson,
+                    onConnected = {
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = thinkStepId,
+                                title = if (turn == 0) "Streaming from $activeModel" else "Analyzing tool results",
+                                detail = "Connected, streaming response...",
+                                status = AgentStepStatus.RUNNING,
+                            ),
+                        )
+                    },
+                    onRetryStatus = { detail ->
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = thinkStepId,
+                                title = "Retrying $activeModel",
+                                detail = detail,
+                                status = AgentStepStatus.RUNNING,
+                            ),
+                        )
+                    },
+                    onTextDelta = { delta ->
+                        turnVisibleText.append(delta)
+                        accumulatedVisibleText.clear()
+                        accumulatedVisibleText.append(textBeforeTurn)
+                        accumulatedVisibleText.append(turnVisibleText)
+                        updateAssistantMessage(
+                            id = assistantMsgId,
+                            text = accumulatedVisibleText.toString(),
+                            isStreaming = true,
+                            steps = steps.toList(),
+                            codeBlocks = emptyList(),
+                        )
+                    },
+                )
+            }
+
+            if (turnVisibleText.isEmpty()) {
+                accumulatedVisibleText.setLength(turnPrefixLength)
+            }
+
+            val functionCalls = turnOutcome.functionCalls
+            cumulativeTokens += turnOutcome.usage.totalTokens
+            onUsage(turnOutcome.usage, functionCalls.size)
+
+            if (functionCalls.isEmpty()) {
+                val toolCount = steps.count { it.status == AgentStepStatus.COMPLETED && !it.id.startsWith("think_") }
+                addOrUpdateStep(
+                    AgentStep(
+                        id = thinkStepId,
+                        title = if (turn == 0) "Responded via $activeModel" else "Completed task",
+                        detail = if (toolCount > 0) "$toolCount tool(s) • $cumulativeTokens tokens" else "$cumulativeTokens tokens",
+                        status = AgentStepStatus.COMPLETED,
+                        durationMs = System.currentTimeMillis() - turnStart,
+                    ),
+                )
+
+                val finalText = accumulatedVisibleText.toString().trim()
+                if (finalText.isEmpty() && steps.none { !it.id.startsWith("think_") }) {
+                    val reasonMsg = when {
+                        !turnOutcome.blockReason.isNullOrBlank() -> "Response blocked by Gemini (${turnOutcome.blockReason})."
+                        !turnOutcome.finishReason.isNullOrBlank() && turnOutcome.finishReason != "STOP" ->
+                            "Gemini returned no text (finishReason: ${turnOutcome.finishReason})."
+                        else -> "Gemini returned an empty response."
+                    }
+                    finalizeFailedSteps(assistantMsgId, steps, "", reasonMsg, cumulativeTokens)
+                    _uiState.value = AiUiState.Error(reasonMsg)
+                } else {
+                    val displayText = finalText.ifBlank { "All requested actions finished." }
+                    updateAssistantMessage(
+                        id = assistantMsgId,
+                        text = displayText,
+                        isStreaming = false,
+                        steps = steps.toList(),
+                        codeBlocks = extractCodeBlocks(displayText),
+                        totalTokens = cumulativeTokens,
+                    )
+                    _uiState.value = AiUiState.Idle
+                }
+                completed = true
+                break
+            }
+
+            addOrUpdateStep(
+                AgentStep(
+                    id = thinkStepId,
+                    title = "Planned ${functionCalls.size} action(s)",
+                    detail = functionCalls.joinToString(", ") { it.name },
+                    status = AgentStepStatus.COMPLETED,
+                    durationMs = System.currentTimeMillis() - turnStart,
+                ),
+            )
+
+            conversationContents.put(
+                JSONObject().apply {
+                    put("role", "model")
+                    put("parts", turnOutcome.modelParts)
+                },
+            )
+
+            val functionResponseParts = JSONArray()
+            for ((callIdx, call) in functionCalls.withIndex()) {
+                coroutineContext.ensureActive()
+                val stepId = "tool_${turn}_$callIdx"
+                val stepTitle = describeToolCall(call.name, call.args)
+                val stepStart = System.currentTimeMillis()
+
+                addOrUpdateStep(
+                    AgentStep(
+                        id = stepId,
+                        title = stepTitle,
+                        detail = "Executing ${call.name}...",
+                        status = AgentStepStatus.RUNNING,
+                        toolName = call.name,
+                    ),
+                )
+
+                val toolResult = executeToolCall(call, toolExecutor)
+                addOrUpdateStep(
+                    AgentStep(
+                        id = stepId,
+                        title = stepTitle,
+                        detail = toolResult.stepDetail,
+                        status = if (toolResult.success) AgentStepStatus.COMPLETED else AgentStepStatus.FAILED,
+                        expandedOutput = toolResult.detailedOutput,
+                        durationMs = System.currentTimeMillis() - stepStart,
+                        toolName = call.name,
+                    ),
+                )
+
+                functionResponseParts.put(
+                    JSONObject().put(
+                        "functionResponse",
+                        JSONObject().put("name", call.name).put("response", toolResult.payload),
+                    ),
+                )
+            }
+
+            conversationContents.put(
+                JSONObject().put("role", "user").put("parts", functionResponseParts),
+            )
+        }
+
+        if (!completed) {
+            val summary = accumulatedVisibleText.toString().trim()
+                .ifBlank { "Stopped after reaching the maximum autonomous step limit ($MAX_AGENT_TURNS turns)." }
+            updateAssistantMessage(
+                id = assistantMsgId,
+                text = summary,
+                isStreaming = false,
+                steps = steps.toList(),
+                codeBlocks = extractCodeBlocks(summary),
+            )
+            _uiState.value = AiUiState.Idle
+        }
+    }
+
+    private suspend fun runOpenAiLoop(
+        activeModel: String,
+        apiKey: String,
+        priorHistory: List<ChatMessage>,
+        promptWithContext: String,
+        assistantMsgId: String,
+        steps: MutableList<AgentStep>,
+        accumulatedVisibleText: StringBuilder,
+        addOrUpdateStep: (AgentStep) -> Unit,
+        toolExecutor: ProjectToolExecutor,
+        onUsage: (TokenUsageDelta, Int) -> Unit,
+    ) {
+        val openAiMessages = JSONArray().apply {
+            put(JSONObject().put("role", "system").put("content", buildSystemInstruction(activeModel)))
+            priorHistory.forEach { msg ->
+                put(JSONObject().put("role", if (msg.isUser) "user" else "assistant").put("content", msg.text))
+            }
+            put(JSONObject().put("role", "user").put("content", promptWithContext))
+        }
+
+        var totalTokens = 0L
+        var completed = false
+
+        for (turn in 0 until MAX_AGENT_TURNS) {
+            coroutineContext.ensureActive()
+            val turnStart = System.currentTimeMillis()
+            val thinkStepId = "think_$turn"
+            addOrUpdateStep(
+                AgentStep(
+                    id = thinkStepId,
+                    title = if (turn == 0) "Sending to ChatGPT ($activeModel)" else "Analyzing tool output",
+                    detail = "Waiting for OpenAI...",
+                    status = AgentStepStatus.RUNNING,
+                ),
+            )
+
+            val turnPrefixLen = accumulatedVisibleText.length
+            if (accumulatedVisibleText.isNotEmpty() && !accumulatedVisibleText.endsWith("\n")) {
+                accumulatedVisibleText.append("\n\n")
+            }
+            val textBeforeTurn = accumulatedVisibleText.toString()
+            val turnText = StringBuilder()
+
+            val outcome = withTimeout(TURN_TIMEOUT_MS) {
+                ProviderApiClient.streamOpenAi(
+                    apiKey = apiKey,
+                    modelId = activeModel,
+                    messages = openAiMessages,
+                    onConnected = {
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = thinkStepId,
+                                title = "Streaming from $activeModel",
+                                detail = "Connected...",
+                                status = AgentStepStatus.RUNNING,
+                            ),
+                        )
+                    },
+                    onTextDelta = { delta ->
+                        turnText.append(delta)
+                        accumulatedVisibleText.clear()
+                        accumulatedVisibleText.append(textBeforeTurn)
+                        accumulatedVisibleText.append(turnText)
+                        updateAssistantMessage(
+                            id = assistantMsgId,
+                            text = accumulatedVisibleText.toString(),
+                            isStreaming = true,
+                            steps = steps.toList(),
+                            codeBlocks = emptyList(),
+                            totalTokens = totalTokens,
+                        )
+                    },
+                )
+            }
+
+            if (turnText.isEmpty()) accumulatedVisibleText.setLength(turnPrefixLen)
+            totalTokens += outcome.usage.totalTokens
+            onUsage(outcome.usage, outcome.openAiToolCalls.size)
+
+            if (outcome.openAiToolCalls.isEmpty()) {
+                addOrUpdateStep(
+                    AgentStep(
+                        id = thinkStepId,
+                        title = "Responded via $activeModel",
+                        detail = "${outcome.usage.totalTokens} tokens",
+                        status = AgentStepStatus.COMPLETED,
+                        durationMs = System.currentTimeMillis() - turnStart,
+                    ),
+                )
+                val finalText = accumulatedVisibleText.toString().trim().ifBlank { "All requested actions finished." }
+                updateAssistantMessage(
+                    id = assistantMsgId,
+                    text = finalText,
+                    isStreaming = false,
+                    steps = steps.toList(),
+                    codeBlocks = extractCodeBlocks(finalText),
+                    totalTokens = totalTokens,
+                )
+                _uiState.value = AiUiState.Idle
+                completed = true
+                break
+            }
+
+            addOrUpdateStep(
+                AgentStep(
+                    id = thinkStepId,
+                    title = "Planned ${outcome.openAiToolCalls.size} action(s)",
+                    detail = outcome.openAiToolCalls.joinToString(", ") { it.name },
+                    status = AgentStepStatus.COMPLETED,
+                    durationMs = System.currentTimeMillis() - turnStart,
+                ),
+            )
+
+            val assistantMsg = JSONObject().put("role", "assistant")
+            if (outcome.text.isNotEmpty()) assistantMsg.put("content", outcome.text)
+            val tcArray = JSONArray()
+            outcome.openAiToolCalls.forEach { tc ->
+                tcArray.put(
+                    JSONObject()
+                        .put("id", tc.id)
+                        .put("type", "function")
+                        .put("function", JSONObject().put("name", tc.name).put("arguments", tc.argsJson)),
+                )
+            }
+            assistantMsg.put("tool_calls", tcArray)
+            openAiMessages.put(assistantMsg)
+
+            for ((idx, tc) in outcome.openAiToolCalls.withIndex()) {
+                coroutineContext.ensureActive()
+                val argsObj = runCatching { JSONObject(tc.argsJson) }.getOrElse { JSONObject() }
+                val stepId = "tool_${turn}_$idx"
+                val stepTitle = describeToolCall(tc.name, argsObj)
+                val stepStart = System.currentTimeMillis()
+                addOrUpdateStep(
+                    AgentStep(id = stepId, title = stepTitle, detail = "Running...", status = AgentStepStatus.RUNNING, toolName = tc.name),
+                )
+                val result = executeToolCall(ParsedFunctionCall(tc.name, argsObj), toolExecutor)
+                addOrUpdateStep(
+                    AgentStep(
+                        id = stepId,
+                        title = stepTitle,
+                        detail = result.stepDetail,
+                        status = if (result.success) AgentStepStatus.COMPLETED else AgentStepStatus.FAILED,
+                        expandedOutput = result.detailedOutput,
+                        durationMs = System.currentTimeMillis() - stepStart,
+                        toolName = tc.name,
+                    ),
+                )
+                openAiMessages.put(
+                    JSONObject()
+                        .put("role", "tool")
+                        .put("tool_call_id", tc.id)
+                        .put("content", result.payload.toString()),
+                )
+            }
+        }
+
+        if (!completed) {
+            val summary = accumulatedVisibleText.toString().trim().ifBlank { "Reached max step limit ($MAX_AGENT_TURNS turns)." }
+            updateAssistantMessage(assistantMsgId, summary, false, steps.toList(), extractCodeBlocks(summary), totalTokens)
+            _uiState.value = AiUiState.Idle
+        }
+    }
+
+    private suspend fun runClaudeLoop(
+        activeModel: String,
+        apiKey: String,
+        priorHistory: List<ChatMessage>,
+        promptWithContext: String,
+        assistantMsgId: String,
+        steps: MutableList<AgentStep>,
+        accumulatedVisibleText: StringBuilder,
+        addOrUpdateStep: (AgentStep) -> Unit,
+        toolExecutor: ProjectToolExecutor,
+        onUsage: (TokenUsageDelta, Int) -> Unit,
+    ) {
+        val systemText = buildSystemInstruction(activeModel)
+        val claudeMessages = JSONArray().apply {
+            priorHistory.forEach { msg ->
+                put(JSONObject().put("role", if (msg.isUser) "user" else "assistant").put("content", msg.text))
+            }
+            put(JSONObject().put("role", "user").put("content", promptWithContext))
+        }
+
+        var totalTokens = 0L
+        var completed = false
+
+        for (turn in 0 until MAX_AGENT_TURNS) {
+            coroutineContext.ensureActive()
+            val turnStart = System.currentTimeMillis()
+            val thinkStepId = "think_$turn"
+            addOrUpdateStep(
+                AgentStep(
+                    id = thinkStepId,
+                    title = if (turn == 0) "Sending to Claude ($activeModel)" else "Analyzing tool results",
+                    detail = "Waiting for Anthropic...",
+                    status = AgentStepStatus.RUNNING,
+                ),
+            )
+
+            val turnPrefixLen = accumulatedVisibleText.length
+            if (accumulatedVisibleText.isNotEmpty() && !accumulatedVisibleText.endsWith("\n")) {
+                accumulatedVisibleText.append("\n\n")
+            }
+            val textBeforeTurn = accumulatedVisibleText.toString()
+            val turnText = StringBuilder()
+
+            val outcome = withTimeout(TURN_TIMEOUT_MS) {
+                ProviderApiClient.streamClaude(
+                    apiKey = apiKey,
+                    modelId = activeModel,
+                    systemInstruction = systemText,
+                    messages = claudeMessages,
+                    onConnected = {
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = thinkStepId,
+                                title = "Streaming from $activeModel",
+                                detail = "Connected...",
+                                status = AgentStepStatus.RUNNING,
+                            ),
+                        )
+                    },
+                    onTextDelta = { delta ->
+                        turnText.append(delta)
+                        accumulatedVisibleText.clear()
+                        accumulatedVisibleText.append(textBeforeTurn)
+                        accumulatedVisibleText.append(turnText)
+                        updateAssistantMessage(
+                            id = assistantMsgId,
+                            text = accumulatedVisibleText.toString(),
+                            isStreaming = true,
+                            steps = steps.toList(),
+                            codeBlocks = emptyList(),
+                            totalTokens = totalTokens,
+                        )
+                    },
+                )
+            }
+
+            if (turnText.isEmpty()) accumulatedVisibleText.setLength(turnPrefixLen)
+            totalTokens += outcome.usage.totalTokens
+            onUsage(outcome.usage, outcome.claudeToolUses.size)
+
+            if (outcome.claudeToolUses.isEmpty()) {
+                addOrUpdateStep(
+                    AgentStep(
+                        id = thinkStepId,
+                        title = "Responded via $activeModel",
+                        detail = "${outcome.usage.totalTokens} tokens",
+                        status = AgentStepStatus.COMPLETED,
+                        durationMs = System.currentTimeMillis() - turnStart,
+                    ),
+                )
+                val finalText = accumulatedVisibleText.toString().trim().ifBlank { "All requested actions finished." }
+                updateAssistantMessage(
+                    id = assistantMsgId,
+                    text = finalText,
+                    isStreaming = false,
+                    steps = steps.toList(),
+                    codeBlocks = extractCodeBlocks(finalText),
+                    totalTokens = totalTokens,
+                )
+                _uiState.value = AiUiState.Idle
+                completed = true
+                break
+            }
+
+            addOrUpdateStep(
+                AgentStep(
+                    id = thinkStepId,
+                    title = "Planned ${outcome.claudeToolUses.size} action(s)",
+                    detail = outcome.claudeToolUses.joinToString(", ") { it.name },
+                    status = AgentStepStatus.COMPLETED,
+                    durationMs = System.currentTimeMillis() - turnStart,
+                ),
+            )
+
+            claudeMessages.put(JSONObject().put("role", "assistant").put("content", outcome.claudeAssistantBlocks))
+            val resultBlocks = JSONArray()
+            for ((idx, tu) in outcome.claudeToolUses.withIndex()) {
+                coroutineContext.ensureActive()
+                val stepId = "tool_${turn}_$idx"
+                val stepTitle = describeToolCall(tu.name, tu.input)
+                val stepStart = System.currentTimeMillis()
+                addOrUpdateStep(
+                    AgentStep(id = stepId, title = stepTitle, detail = "Running...", status = AgentStepStatus.RUNNING, toolName = tu.name),
+                )
+                val result = executeToolCall(ParsedFunctionCall(tu.name, tu.input), toolExecutor)
+                addOrUpdateStep(
+                    AgentStep(
+                        id = stepId,
+                        title = stepTitle,
+                        detail = result.stepDetail,
+                        status = if (result.success) AgentStepStatus.COMPLETED else AgentStepStatus.FAILED,
+                        expandedOutput = result.detailedOutput,
+                        durationMs = System.currentTimeMillis() - stepStart,
+                        toolName = tu.name,
+                    ),
+                )
+                resultBlocks.put(
+                    JSONObject()
+                        .put("type", "tool_result")
+                        .put("tool_use_id", tu.id)
+                        .put("content", result.payload.toString())
+                        .put("is_error", !result.success),
+                )
+            }
+            claudeMessages.put(JSONObject().put("role", "user").put("content", resultBlocks))
+        }
+
+        if (!completed) {
+            val summary = accumulatedVisibleText.toString().trim().ifBlank { "Reached max step limit ($MAX_AGENT_TURNS turns)." }
+            updateAssistantMessage(assistantMsgId, summary, false, steps.toList(), extractCodeBlocks(summary), totalTokens)
+            _uiState.value = AiUiState.Idle
         }
     }
 
@@ -458,18 +801,13 @@ class GeminiCodeAssistant {
                     apiKey = apiKey,
                     requestBody = requestBody,
                     onConnected = onConnected,
-                    onFallback = {
-                        onRetryStatus("SSE timed out, trying standard request...")
-                    },
+                    onFallback = { onRetryStatus("SSE timed out, trying standard request...") },
                     onTextDelta = onTextDelta,
                 )
             } catch (e: GeminiApiException) {
-                if (!isTransientHttpStatus(e.httpCode) || attempt >= backoffMs.size) {
-                    throw e
-                }
-                val waitMs = backoffMs[attempt]
-                attempt++
-                onRetryStatus("High demand (${e.httpCode}) — retrying in ${waitMs / 1000.0}s (${attempt}/${backoffMs.size})...")
+                if (!isTransientHttpStatus(e.httpCode) || attempt >= backoffMs.size) throw e
+                val waitMs = backoffMs[attempt++]
+                onRetryStatus("High demand (${e.httpCode}) — retrying in ${waitMs / 1000.0}s ($attempt/${backoffMs.size})...")
                 delay(waitMs)
             }
         }
@@ -502,12 +840,7 @@ class GeminiCodeAssistant {
             if (receivedAnyBytes) throw e
             Log.w(TAG, "SSE timed out before receiving response; retrying non-streaming generateContent", e)
             onFallback()
-            generateContentUnary(
-                modelId = modelId,
-                apiKey = apiKey,
-                requestBody = requestBody,
-                onText = onTextDelta,
-            )
+            generateContentUnary(modelId, apiKey, requestBody, onTextDelta)
         }
     }
 
@@ -516,6 +849,7 @@ class GeminiCodeAssistant {
         steps: MutableList<AgentStep>,
         currentText: String,
         failureDetail: String,
+        totalTokens: Long,
     ) {
         val updated = steps.map { step ->
             if (step.status == AgentStepStatus.RUNNING) {
@@ -530,6 +864,7 @@ class GeminiCodeAssistant {
             isStreaming = false,
             steps = updated,
             codeBlocks = extractCodeBlocks(currentText),
+            totalTokens = totalTokens,
         )
     }
 
@@ -552,7 +887,8 @@ class GeminiCodeAssistant {
                 )
                 "delete_file" -> executor.deleteFile(call.args.optString("path"))
                 "search_files" -> executor.searchFiles(call.args.optString("query"))
-                "build_apk" -> executor.buildApk()
+                "build_apk" -> executor.buildApk(isRelease = call.args.optBoolean("release", false))
+                "build_aab" -> executor.buildAab()
                 else -> AgentToolResult(
                     success = false,
                     stepDetail = "Unknown tool '${call.name}'",
@@ -570,17 +906,18 @@ class GeminiCodeAssistant {
         }
     }
 
-    private fun describeToolCall(call: ParsedFunctionCall): String {
-        val path = call.args.optString("path").ifBlank { "file" }
-        return when (call.name) {
+    private fun describeToolCall(name: String, args: JSONObject): String {
+        val path = args.optString("path").ifBlank { "file" }
+        return when (name) {
             "list_files" -> "Listing project files"
             "read_file" -> "Reading $path"
             "write_file" -> "Writing $path"
             "edit_file" -> "Editing $path"
             "delete_file" -> "Deleting $path"
-            "search_files" -> "Searching '${call.args.optString("query").take(28)}'"
-            "build_apk" -> "Building APK (ECJ + DX + ApkSigner)"
-            else -> "Running ${call.name}"
+            "search_files" -> "Searching '${args.optString("query").take(28)}'"
+            "build_apk" -> if (args.optBoolean("release", false)) "Building Release APK" else "Building Debug APK"
+            "build_aab" -> "Building Signed App Bundle (.aab)"
+            else -> "Running $name"
         }
     }
 
@@ -591,6 +928,7 @@ class GeminiCodeAssistant {
         onConnected: () -> Unit,
         onTextDelta: (String) -> Unit,
     ): TurnStreamOutcome = withContext(Dispatchers.IO) {
+        val startedAt = System.currentTimeMillis()
         val endpoint = "$GEMINI_API_BASE/$modelId:streamGenerateContent?alt=sse"
         val bodyBytes = requestBody.toByteArray(Charsets.UTF_8)
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
@@ -607,15 +945,14 @@ class GeminiCodeAssistant {
         }
 
         val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
-            if (cause != null) {
-                Thread { runCatching { connection.disconnect() } }.start()
-            }
+            if (cause != null) Thread { runCatching { connection.disconnect() } }.start()
         }
 
         val assembledParts = mutableListOf<JSONObject>()
         val functionCalls = mutableListOf<ParsedFunctionCall>()
         var blockReason: String? = null
         var finishReason: String? = null
+        var latestUsage = TokenUsageDelta()
 
         fun handlePayload(payload: String, status: Int) {
             val parsed = parseSsePayload(payload)
@@ -624,23 +961,19 @@ class GeminiCodeAssistant {
             }
             if (!parsed.blockReason.isNullOrBlank()) blockReason = parsed.blockReason
             if (!parsed.finishReason.isNullOrBlank()) finishReason = parsed.finishReason
-
+            if (parsed.usage.totalTokens > 0L || parsed.usage.inputTokens > 0L) {
+                latestUsage = parsed.usage
+            }
             if (parsed.text.isNotEmpty()) {
                 onTextDelta(parsed.text)
             }
-
             parsed.rawParts.forEach { rawPart ->
                 appendRawPart(assembledParts, rawPart)
                 val fc = rawPart.optJSONObject("functionCall")
                 if (fc != null) {
                     val fnName = fc.optString("name")
                     if (fnName.isNotBlank()) {
-                        functionCalls.add(
-                            ParsedFunctionCall(
-                                name = fnName,
-                                args = fc.optJSONObject("args") ?: JSONObject(),
-                            ),
-                        )
+                        functionCalls.add(ParsedFunctionCall(fnName, fc.optJSONObject("args") ?: JSONObject()))
                     }
                 }
             }
@@ -651,7 +984,6 @@ class GeminiCodeAssistant {
                 os.write(bodyBytes)
                 os.flush()
             }
-
             val status = connection.responseCode
             if (status !in 200..299) {
                 val errStream = connection.errorStream ?: connection.inputStream
@@ -661,7 +993,6 @@ class GeminiCodeAssistant {
                 }
                 throw GeminiApiException(status, parsedMsg)
             }
-
             onConnected()
 
             BufferedReader(InputStreamReader(connection.inputStream, Charsets.UTF_8)).use { reader ->
@@ -678,18 +1009,14 @@ class GeminiCodeAssistant {
                             if (dataBuffer.isNotEmpty()) {
                                 val payload = dataBuffer.toString().trim()
                                 dataBuffer.clear()
-                                if (payload.isNotEmpty() && payload != "[DONE]") {
-                                    handlePayload(payload, status)
-                                }
+                                if (payload.isNotEmpty() && payload != "[DONE]") handlePayload(payload, status)
                             }
                         }
                     }
                 }
                 if (dataBuffer.isNotEmpty()) {
                     val payload = dataBuffer.toString().trim()
-                    if (payload.isNotEmpty() && payload != "[DONE]") {
-                        handlePayload(payload, status)
-                    }
+                    if (payload.isNotEmpty() && payload != "[DONE]") handlePayload(payload, status)
                 }
             }
 
@@ -698,6 +1025,7 @@ class GeminiCodeAssistant {
                 functionCalls = functionCalls,
                 blockReason = blockReason,
                 finishReason = finishReason,
+                usage = latestUsage.copy(latencyMs = System.currentTimeMillis() - startedAt),
             )
         } finally {
             cancelHandle?.dispose()
@@ -711,6 +1039,7 @@ class GeminiCodeAssistant {
         requestBody: String,
         onText: (String) -> Unit,
     ): TurnStreamOutcome = withContext(Dispatchers.IO) {
+        val startedAt = System.currentTimeMillis()
         val endpoint = "$GEMINI_API_BASE/$modelId:generateContent"
         val bodyBytes = requestBody.toByteArray(Charsets.UTF_8)
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
@@ -727,9 +1056,7 @@ class GeminiCodeAssistant {
         }
 
         val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
-            if (cause != null) {
-                Thread { runCatching { connection.disconnect() } }.start()
-            }
+            if (cause != null) Thread { runCatching { connection.disconnect() } }.start()
         }
 
         try {
@@ -737,25 +1064,20 @@ class GeminiCodeAssistant {
                 os.write(bodyBytes)
                 os.flush()
             }
-
             val status = connection.responseCode
             val stream = if (status in 200..299) connection.inputStream else (connection.errorStream ?: connection.inputStream)
             val rawResponse = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-
             if (status !in 200..299) {
                 val parsedMsg = extractApiErrorMessage(rawResponse).ifBlank {
                     connection.responseMessage.orEmpty().ifBlank { "HTTP $status" }
                 }
                 throw GeminiApiException(status, parsedMsg)
             }
-
             val parsed = parseSsePayload(rawResponse)
             if (parsed.errorMessage != null) {
                 throw GeminiApiException(parsed.errorCode ?: status, parsed.errorMessage)
             }
-            if (parsed.text.isNotEmpty()) {
-                onText(parsed.text)
-            }
+            if (parsed.text.isNotEmpty()) onText(parsed.text)
 
             val assembledParts = mutableListOf<JSONObject>()
             val functionCalls = mutableListOf<ParsedFunctionCall>()
@@ -765,12 +1087,7 @@ class GeminiCodeAssistant {
                 if (fc != null) {
                     val fnName = fc.optString("name")
                     if (fnName.isNotBlank()) {
-                        functionCalls.add(
-                            ParsedFunctionCall(
-                                name = fnName,
-                                args = fc.optJSONObject("args") ?: JSONObject(),
-                            ),
-                        )
+                        functionCalls.add(ParsedFunctionCall(fnName, fc.optJSONObject("args") ?: JSONObject()))
                     }
                 }
             }
@@ -780,6 +1097,7 @@ class GeminiCodeAssistant {
                 functionCalls = functionCalls,
                 blockReason = parsed.blockReason,
                 finishReason = parsed.finishReason,
+                usage = parsed.usage.copy(latencyMs = System.currentTimeMillis() - startedAt),
             )
         } finally {
             cancelHandle?.dispose()
@@ -809,166 +1127,58 @@ class GeminiCodeAssistant {
         return contentsArray
     }
 
+    private fun buildSystemInstruction(modelId: String): String = """
+        You are an autonomous coding agent powered by $modelId inside DroidForge Studio, an offline-capable Android Java IDE, APK/AAB builder, and live UI previewer.
+
+        Execution rules:
+        - Act autonomously WITHOUT asking the user for permission before reading, creating, editing, or deleting files, or building the APK/AAB.
+        - You have full read and write access to EVERY file in the active project via your tools: list_files, read_file, write_file, edit_file, delete_file, search_files, build_apk, and build_aab.
+        - Always inspect existing files with read_file / list_files before modifying unfamiliar code.
+        - Prefer edit_file for targeted changes and write_file for creating new files or full rewrites. Changes are immediately saved and opened in the user's editor and live Emulator preview.
+        - After making code or XML changes, call build_apk to verify compilation (ECJ + DEX + ApkSigner). If build_apk reports compiler errors, fix them immediately and re-run build_apk until it succeeds.
+        - Do NOT use AndroidX, Jetpack Compose, Kotlin syntax, or external Gradle dependencies. Use classic Android SDK APIs (android.app.Activity, android.os.Bundle, android.view.*, android.widget.*, android.graphics.*, android.content.*, android.webkit.*, java.*).
+        - Compiles Java 8 (.java), AndroidManifest.xml, res/values/strings.xml, and res/values/colors.xml into R.java and resources.arsc / resources.pb.
+        - In your final summary, state clearly what files you changed and whether the build succeeded.
+    """.trimIndent()
+
     internal fun buildRequestPayload(
         contents: JSONArray,
         modelId: String = GEMINI_MODEL_ID,
     ): String {
-        val systemInstructionText = """
-            You are an autonomous coding agent powered by $modelId inside DroidForge Studio, an offline-capable Android Java IDE and APK builder.
-
-            Execution rules:
-            - Act autonomously WITHOUT asking the user for permission before reading, creating, editing, or deleting files, or building the APK.
-            - You have full read and write access to EVERY file in the active project via your tools: list_files, read_file, write_file, edit_file, delete_file, search_files, and build_apk.
-            - Always inspect existing files with read_file / list_files before modifying unfamiliar code.
-            - Prefer edit_file for targeted changes and write_file for creating new files or full rewrites. Changes are immediately saved and opened in the user's editor.
-            - After making code or XML changes, call build_apk to verify compilation (ECJ + DEX + ApkSigner). If build_apk reports compiler errors, fix them immediately and re-run build_apk until it succeeds.
-            - Do NOT use AndroidX, Jetpack Compose, Kotlin syntax, or external Gradle dependencies. Use classic Android SDK APIs (android.app.Activity, android.os.Bundle, android.view.*, android.widget.*, android.graphics.*, android.content.*, android.webkit.*, java.*).
-            - Compiles Java 8 (.java), AndroidManifest.xml, res/values/strings.xml, and res/values/colors.xml into R.java and resources.arsc.
-            - In your final summary to the user, briefly state what files you changed and whether the APK build passed.
-        """.trimIndent()
-
         return JSONObject().apply {
             put(
                 "systemInstruction",
-                JSONObject().put(
-                    "parts",
-                    JSONArray().put(JSONObject().put("text", systemInstructionText)),
-                ),
+                JSONObject().put("parts", JSONArray().put(JSONObject().put("text", buildSystemInstruction(modelId)))),
             )
             put("contents", contents)
             put("tools", buildToolDeclarations())
-            put(
-                "generationConfig",
-                JSONObject().put("temperature", 0.3),
-            )
+            put("generationConfig", JSONObject().put("temperature", 0.3))
         }.toString()
     }
 
     private fun buildToolDeclarations(): JSONArray {
-        fun stringProp(desc: String) = JSONObject().apply {
-            put("type", "STRING")
-            put("description", desc)
-        }
-
         val declarations = JSONArray().apply {
-            put(
-                JSONObject().apply {
-                    put("name", "list_files")
-                    put("description", "Lists all file paths in the active Android project.")
-                    put(
-                        "parameters",
-                        JSONObject().apply {
-                            put("type", "OBJECT")
-                            put("properties", JSONObject())
-                        },
-                    )
-                },
-            )
-            put(
-                JSONObject().apply {
-                    put("name", "read_file")
-                    put("description", "Reads the complete text content of any file in the active project.")
-                    put(
-                        "parameters",
-                        JSONObject().apply {
-                            put("type", "OBJECT")
-                            put(
-                                "properties",
-                                JSONObject().put(
-                                    "path",
-                                    stringProp("Relative file path inside the project, e.g. src/com/example/counter/MainActivity.java, AndroidManifest.xml, res/values/strings.xml"),
-                                ),
-                            )
-                            put("required", JSONArray().put("path"))
-                        },
-                    )
-                },
-            )
-            put(
-                JSONObject().apply {
-                    put("name", "write_file")
-                    put("description", "Creates a new file or completely overwrites an existing file in the project immediately without confirmation.")
-                    put(
-                        "parameters",
-                        JSONObject().apply {
-                            put("type", "OBJECT")
-                            put(
-                                "properties",
-                                JSONObject()
-                                    .put("path", stringProp("Relative file path to create or overwrite."))
-                                    .put("content", stringProp("Complete file text content to write.")),
-                            )
-                            put("required", JSONArray().put("path").put("content"))
-                        },
-                    )
-                },
-            )
-            put(
-                JSONObject().apply {
-                    put("name", "edit_file")
-                    put("description", "Replaces an exact text snippet inside an existing project file immediately without confirmation.")
-                    put(
-                        "parameters",
-                        JSONObject().apply {
-                            put("type", "OBJECT")
-                            put(
-                                "properties",
-                                JSONObject()
-                                    .put("path", stringProp("Relative file path to edit."))
-                                    .put("old_text", stringProp("Exact existing text snippet to find and replace."))
-                                    .put("new_text", stringProp("Replacement text snippet.")),
-                            )
-                            put("required", JSONArray().put("path").put("old_text").put("new_text"))
-                        },
-                    )
-                },
-            )
-            put(
-                JSONObject().apply {
-                    put("name", "delete_file")
-                    put("description", "Deletes a file from the active project immediately without confirmation.")
-                    put(
-                        "parameters",
-                        JSONObject().apply {
-                            put("type", "OBJECT")
-                            put("properties", JSONObject().put("path", stringProp("Relative file path to delete.")))
-                            put("required", JSONArray().put("path"))
-                        },
-                    )
-                },
-            )
-            put(
-                JSONObject().apply {
-                    put("name", "search_files")
-                    put("description", "Searches for text across all files in the active project and returns matching lines.")
-                    put(
-                        "parameters",
-                        JSONObject().apply {
-                            put("type", "OBJECT")
-                            put("properties", JSONObject().put("query", stringProp("Case-insensitive text query to search for.")))
-                            put("required", JSONArray().put("query"))
-                        },
-                    )
-                },
-            )
-            put(
-                JSONObject().apply {
-                    put("name", "build_apk")
-                    put("description", "Compiles the active project into a signed APK using the on-device toolchain and returns compiler diagnostics.")
-                    put(
-                        "parameters",
-                        JSONObject().apply {
-                            put("type", "OBJECT")
-                            put("properties", JSONObject())
-                        },
-                    )
-                },
-            )
+            ProviderApiClient.buildSharedToolSpecs().forEach { (name, desc, schema) ->
+                val upperSchema = JSONObject(schema.toString()).apply {
+                    put("type", "OBJECT")
+                    optJSONObject("properties")?.let { props ->
+                        props.keys().forEach { k ->
+                            props.optJSONObject(k)?.let { propObj ->
+                                val t = propObj.optString("type", "string").uppercase()
+                                propObj.put("type", t)
+                            }
+                        }
+                    }
+                }
+                put(
+                    JSONObject()
+                        .put("name", name)
+                        .put("description", desc)
+                        .put("parameters", upperSchema),
+                )
+            }
         }
-
-        return JSONArray().put(
-            JSONObject().put("functionDeclarations", declarations),
-        )
+        return JSONArray().put(JSONObject().put("functionDeclarations", declarations))
     }
 
     private fun buildPrompt(
@@ -1002,6 +1212,7 @@ class GeminiCodeAssistant {
         isStreaming: Boolean,
         steps: List<AgentStep>,
         codeBlocks: List<SuggestedCodeBlock>,
+        totalTokens: Long = 0L,
     ) {
         _messages.value = _messages.value.map { msg ->
             if (msg.id == id) {
@@ -1010,6 +1221,7 @@ class GeminiCodeAssistant {
                     isStreaming = isStreaming,
                     steps = steps,
                     codeBlocks = codeBlocks,
+                    totalTokens = if (totalTokens > 0L) totalTokens else msg.totalTokens,
                 )
             } else {
                 msg
@@ -1027,6 +1239,7 @@ class GeminiCodeAssistant {
         val functionCalls: List<ParsedFunctionCall>,
         val blockReason: String?,
         val finishReason: String?,
+        val usage: TokenUsageDelta = TokenUsageDelta(),
     )
 
     internal data class SseParseResult(
@@ -1036,6 +1249,7 @@ class GeminiCodeAssistant {
         val finishReason: String? = null,
         val errorMessage: String? = null,
         val errorCode: Int? = null,
+        val usage: TokenUsageDelta = TokenUsageDelta(),
     )
 
     internal companion object {
@@ -1098,12 +1312,28 @@ class GeminiCodeAssistant {
                     )
                 }
 
+                val usageObj = root.optJSONObject("usageMetadata")
+                val usage = if (usageObj != null) {
+                    val input = usageObj.optLong("promptTokenCount", 0L)
+                    val output = usageObj.optLong("candidatesTokenCount", 0L)
+                    val thoughts = usageObj.optLong("thoughtsTokenCount", 0L)
+                    val total = usageObj.optLong("totalTokenCount", input + output + thoughts)
+                    TokenUsageDelta(
+                        inputTokens = input,
+                        outputTokens = output,
+                        thinkingTokens = thoughts,
+                        totalTokens = total,
+                    )
+                } else {
+                    TokenUsageDelta()
+                }
+
                 val promptFeedback = root.optJSONObject("promptFeedback")
                 val blockReason = promptFeedback?.optString("blockReason")?.takeIf { it.isNotBlank() }
 
                 val candidates = root.optJSONArray("candidates")
                 if (candidates == null || candidates.length() == 0) {
-                    return SseParseResult(blockReason = blockReason)
+                    return SseParseResult(blockReason = blockReason, usage = usage)
                 }
 
                 val firstCandidate = candidates.optJSONObject(0)
@@ -1117,9 +1347,7 @@ class GeminiCodeAssistant {
                         rawPartsList.add(JSONObject(part.toString()))
                         if (part.optBoolean("thought", false)) continue
                         val partText = part.optString("text", "")
-                        if (partText.isNotEmpty()) {
-                            textBuilder.append(partText)
-                        }
+                        if (partText.isNotEmpty()) textBuilder.append(partText)
                     }
                 }
                 SseParseResult(
@@ -1127,6 +1355,7 @@ class GeminiCodeAssistant {
                     rawParts = rawPartsList,
                     blockReason = blockReason,
                     finishReason = finishReason,
+                    usage = usage,
                 )
             }.getOrElse {
                 SseParseResult()
@@ -1151,11 +1380,7 @@ class GeminiCodeAssistant {
                 } else {
                     rawCode
                 }
-                SuggestedCodeBlock(
-                    language = lang,
-                    suggestedPath = pathHint,
-                    code = cleanedCode,
-                )
+                SuggestedCodeBlock(language = lang, suggestedPath = pathHint, code = cleanedCode)
             }.toList()
         }
     }

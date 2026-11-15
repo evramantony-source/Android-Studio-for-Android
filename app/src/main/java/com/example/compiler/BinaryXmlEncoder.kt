@@ -35,7 +35,7 @@ object BinaryXmlEncoder {
     private const val XMLNS_NS = "http://www.w3.org/2000/xmlns/"
 
     // Standard android.R.attr resource IDs used in AndroidManifest.xml
-    private val ANDROID_ATTR_IDS: Map<String, Int> = mapOf(
+    internal val ANDROID_ATTR_IDS: Map<String, Int> = mapOf(
         "theme" to 0x01010000,
         "label" to 0x01010001,
         "icon" to 0x01010002,

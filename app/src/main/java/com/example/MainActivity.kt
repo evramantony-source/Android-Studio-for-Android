@@ -26,12 +26,22 @@ class MainActivity : ComponentActivity() {
             val openTabs by viewModel.openTabs.collectAsStateWithLifecycle()
             val activeFilePath by viewModel.activeFilePath.collectAsStateWithLifecycle()
             val isBuilding by viewModel.isBuilding.collectAsStateWithLifecycle()
+            val selectedBuildVariant by viewModel.selectedBuildVariant.collectAsStateWithLifecycle()
+            val releaseSigningConfig by viewModel.releaseSigningConfig.collectAsStateWithLifecycle()
             val buildLogs by viewModel.liveLogs.collectAsStateWithLifecycle()
             val lastBuildResult by viewModel.lastBuildResult.collectAsStateWithLifecycle()
             val jumpToLine by viewModel.jumpToLine.collectAsStateWithLifecycle()
             val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
-            val customGeminiApiKey by viewModel.customGeminiApiKey.collectAsStateWithLifecycle()
-            val geminiModelId by viewModel.geminiModelId.collectAsStateWithLifecycle()
+
+            val activeProvider by viewModel.activeProvider.collectAsStateWithLifecycle()
+            val providerApiKeys by viewModel.providerApiKeys.collectAsStateWithLifecycle()
+            val providerModels by viewModel.providerModels.collectAsStateWithLifecycle()
+            val liveModels by viewModel.liveModels.collectAsStateWithLifecycle()
+            val isFetchingModels by viewModel.isFetchingModels.collectAsStateWithLifecycle()
+            val aiUsageSummary by viewModel.aiUsageSummary.collectAsStateWithLifecycle()
+            val chatThreads by viewModel.chatThreads.collectAsStateWithLifecycle()
+            val activeThreadId by viewModel.activeThreadId.collectAsStateWithLifecycle()
+            val splitSideThreadId by viewModel.splitSideThreadId.collectAsStateWithLifecycle()
             val aiMessages by viewModel.aiMessages.collectAsStateWithLifecycle()
             val aiState by viewModel.aiState.collectAsStateWithLifecycle()
 
@@ -41,10 +51,26 @@ class MainActivity : ComponentActivity() {
                     ProjectsScreen(
                         projects = projects,
                         editorSettings = editorSettings,
+                        activeProvider = activeProvider,
+                        providerApiKeys = providerApiKeys,
+                        providerModels = providerModels,
+                        liveModels = liveModels,
+                        isFetchingModels = isFetchingModels,
+                        aiUsageSummary = aiUsageSummary,
+                        releaseSigningConfig = releaseSigningConfig,
+                        statusBanner = statusBanner,
+                        onClearStatusBanner = viewModel::clearStatusBanner,
                         onOpenProject = viewModel::openProject,
                         onCreateProject = viewModel::createProject,
                         onDeleteProject = viewModel::deleteProject,
                         onUpdateSettings = viewModel::updateEditorSettings,
+                        onSelectModel = viewModel::selectModel,
+                        onSaveProviderConfig = viewModel::saveProviderConfig,
+                        onRefreshLiveModels = viewModel::refreshLiveModels,
+                        onResetAiUsage = viewModel::resetAiUsage,
+                        onGenerateKeystore = viewModel::generateReleaseKeystore,
+                        onImportKeystore = viewModel::importKeystoreFromUri,
+                        onClearKeystore = viewModel::clearReleaseKeystore,
                     )
                 } else {
                     IdeWorkspaceScreen(
@@ -54,12 +80,21 @@ class MainActivity : ComponentActivity() {
                         activeFilePath = activeFilePath,
                         editorSettings = editorSettings,
                         isBuilding = isBuilding,
+                        selectedBuildVariant = selectedBuildVariant,
+                        releaseSigningConfig = releaseSigningConfig,
                         buildLogs = buildLogs,
                         lastBuildResult = lastBuildResult,
                         jumpToLine = jumpToLine,
                         statusBanner = statusBanner,
-                        customGeminiApiKey = customGeminiApiKey,
-                        geminiModelId = geminiModelId,
+                        activeProvider = activeProvider,
+                        providerApiKeys = providerApiKeys,
+                        providerModels = providerModels,
+                        liveModels = liveModels,
+                        isFetchingModels = isFetchingModels,
+                        aiUsageSummary = aiUsageSummary,
+                        chatThreads = chatThreads,
+                        activeThreadId = activeThreadId,
+                        splitSideThreadId = splitSideThreadId,
                         aiMessages = aiMessages,
                         aiState = aiState,
                         onSelectFile = viewModel::openFile,
@@ -67,15 +102,31 @@ class MainActivity : ComponentActivity() {
                         onCreateFile = viewModel::createNewFile,
                         onDeleteFile = viewModel::deleteFile,
                         onUpdateContent = viewModel::updateActiveFileContent,
+                        onSelectBuildVariant = viewModel::selectBuildVariant,
                         onBuildApk = viewModel::buildApk,
+                        onGenerateKeystore = viewModel::generateReleaseKeystore,
+                        onImportKeystore = viewModel::importKeystoreFromUri,
+                        onClearKeystore = viewModel::clearReleaseKeystore,
+                        onSearchWorkspace = viewModel::searchWorkspace,
+                        onJumpToFileAndLine = viewModel::jumpToFileAndLine,
                         onJumpToDiagnostic = viewModel::jumpToDiagnostic,
                         onClearJump = viewModel::clearJumpRequest,
                         onExportApkUri = viewModel::exportApkToUri,
+                        onExportProjectZipUri = viewModel::exportProjectZipToUri,
                         onClearStatusBanner = viewModel::clearStatusBanner,
+                        onSelectProvider = viewModel::selectProvider,
+                        onSelectModel = viewModel::selectModel,
+                        onSaveProviderConfig = viewModel::saveProviderConfig,
+                        onRefreshLiveModels = viewModel::refreshLiveModels,
+                        onResetAiUsage = viewModel::resetAiUsage,
+                        onSelectChatThread = viewModel::selectChatThread,
+                        onCreateSideChat = viewModel::createSideChat,
+                        onRenameChatThread = viewModel::renameChatThread,
+                        onDeleteChatThread = viewModel::deleteChatThread,
+                        onSetSplitSideThread = viewModel::setSplitSideThread,
                         onAskGemini = viewModel::askGemini,
                         onRetryGemini = viewModel::retryLastGeminiPrompt,
                         onStopGemini = viewModel::cancelGemini,
-                        onSaveGeminiConfig = viewModel::saveGeminiConfig,
                         onApplyGeminiCode = viewModel::applySuggestedCode,
                         onClearAiChat = viewModel::clearAiChat,
                         onUpdateSettings = viewModel::updateEditorSettings,

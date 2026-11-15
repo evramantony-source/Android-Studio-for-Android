@@ -114,6 +114,7 @@ class GeminiCodeAssistantTest {
         assertTrue(payload.contains("\"write_file\""))
         assertTrue(payload.contains("\"edit_file\""))
         assertTrue(payload.contains("\"build_apk\""))
+        assertTrue(payload.contains("\"build_aab\""))
     }
 
     @Test
@@ -132,5 +133,114 @@ class GeminiCodeAssistantTest {
         val parsed = GeminiCodeAssistant.parseSsePayload(json)
         assertEquals(503, parsed.errorCode)
         assertEquals("high demand", parsed.errorMessage)
+    }
+
+    @Test
+    fun catalogIncludesAllProvidersGemini3ClaudeAndOpenAiModels() {
+        val gemini = com.example.ai.AiModelsCatalog.modelsFor(com.example.ai.AiProvider.GEMINI)
+        val openai = com.example.ai.AiModelsCatalog.modelsFor(com.example.ai.AiProvider.OPENAI)
+        val claude = com.example.ai.AiModelsCatalog.modelsFor(com.example.ai.AiProvider.CLAUDE)
+        assertTrue(gemini.any { it.id == "gemini-4-hydrogen" })
+        assertTrue(gemini.any { it.id == "gemini-3.8-flash" })
+        assertTrue(gemini.any { it.id == "gemini-3.1-pro-preview" })
+        assertTrue(gemini.any { it.id == "gemini-3-pro-preview" })
+        assertTrue(gemini.any { it.id == "gemini-3-flash-preview" })
+        assertTrue(gemini.any { it.id == "gemini-2.5-pro" })
+        assertTrue(openai.any { it.id == "gpt-6-astra" })
+        assertTrue(openai.any { it.id == "gpt-5" })
+        assertTrue(openai.any { it.id == "gpt-4.1" })
+        assertTrue(openai.any { it.id == "o4-mini" })
+        assertTrue(openai.any { it.id == "o3-pro" })
+        assertTrue(claude.any { it.id == "claude-opus-5-5" })
+        assertTrue(claude.any { it.id == "claude-sonnet-4-5" })
+        assertTrue(claude.any { it.id == "claude-3-7-sonnet-latest" })
+        assertTrue(claude.any { it.id == "claude-3-haiku-20240307" })
+    }
+
+    @Test
+    fun aiUsageSummaryRoundTripsJsonWithCostAndQuota() {
+        val estCost = com.example.ai.AiModelsCatalog.estimateCostUsd(
+            modelId = "claude-sonnet-4-5",
+            inputTokens = 10_000L,
+            outputTokens = 2_000L,
+        )
+        assertTrue(estCost > 0.0)
+        val summary = com.example.ai.AiUsageSummary(
+            byProvider = mapOf(
+                com.example.ai.AiProvider.GEMINI to com.example.ai.ProviderUsageStats(
+                    provider = com.example.ai.AiProvider.GEMINI,
+                    requests = 4,
+                    failedRequests = 1,
+                    toolCalls = 7,
+                    inputTokens = 1200,
+                    outputTokens = 450,
+                    thinkingTokens = 300,
+                    totalTokens = 1950,
+                    estimatedCostUsd = estCost,
+                    lastLatencyMs = 820,
+                    lastModelId = "gemini-3.8-flash",
+                    remainingQuotaNote = "Req left: 99 • Tok left: 190000",
+                ),
+            ),
+            byModel = mapOf("gemini-3.8-flash" to 1950L),
+            lastUpdatedMillis = 123456L,
+        )
+        val decoded = com.example.ai.AiUsageSummary.fromJson(summary.toJson())
+        assertEquals(1950L, decoded.totalTokens)
+        assertEquals(4L, decoded.totalRequests)
+        assertEquals(7L, decoded.totalToolCalls)
+        assertEquals(300L, decoded.totalThinkingTokens)
+        assertEquals(estCost, decoded.totalEstimatedCostUsd, 0.00001)
+        assertEquals("Req left: 99 • Tok left: 190000", decoded.byProvider[com.example.ai.AiProvider.GEMINI]?.remainingQuotaNote)
+        assertEquals(1950L, decoded.byModel["gemini-3.8-flash"])
+    }
+
+    @Test
+    fun projectChatStorePersistsMainAndSideThreadsWithStepDetails() = kotlinx.coroutines.runBlocking {
+        val dir = java.nio.file.Files.createTempDirectory("chat_store_test").toFile()
+        try {
+            val mainThread = com.example.ai.ProjectChatStore.createMainThread().copy(
+                messages = listOf(
+                    ChatMessage(
+                        id = "u1",
+                        isUser = true,
+                        text = "Build release AAB",
+                    ),
+                    ChatMessage(
+                        id = "a1",
+                        isUser = false,
+                        text = "Built cleanly.",
+                        providerName = "Gemini",
+                        modelId = "gemini-4-hydrogen",
+                        totalTokens = 640L,
+                        steps = listOf(
+                            com.example.ai.AgentStep(
+                                id = "s1",
+                                title = "Build AAB",
+                                detail = "Release AAB built in 140ms",
+                                status = com.example.ai.AgentStepStatus.COMPLETED,
+                                expandedOutput = "BundleConfig.pb\nbase/dex/classes.dex",
+                                durationMs = 140L,
+                                toolName = "build_aab",
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            val sideThread = com.example.ai.ProjectChatStore.createSideThread(1, "UI Polish").copy(
+                messages = listOf(ChatMessage(id = "su1", isUser = true, text = "Check colors")),
+            )
+
+            com.example.ai.ProjectChatStore.saveThreads(dir, listOf(mainThread, sideThread))
+            val restored = com.example.ai.ProjectChatStore.loadThreads(dir)
+            assertEquals(2, restored.size)
+            assertEquals("Main Agent", restored[0].title)
+            assertEquals("UI Polish", restored[1].title)
+            assertEquals(640L, restored[0].messages[1].totalTokens)
+            assertEquals("BundleConfig.pb\nbase/dex/classes.dex", restored[0].messages[1].steps[0].expandedOutput)
+            assertEquals(140L, restored[0].messages[1].steps[0].durationMs)
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 }

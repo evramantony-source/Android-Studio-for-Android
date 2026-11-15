@@ -29,6 +29,8 @@ object ResourceTableCompiler {
         val resourceIds: Map<String, Int>,
         val stringCount: Int,
         val colorCount: Int,
+        val strings: List<Pair<String, String>> = emptyList(),
+        val colors: List<Pair<String, Int>> = emptyList(),
     )
 
     private data class StringEntry(val name: String, val value: String)
@@ -75,6 +77,8 @@ object ResourceTableCompiler {
             resourceIds = resourceIds,
             stringCount = strings.size,
             colorCount = colors.size,
+            strings = strings.map { it.name to it.value },
+            colors = colors.map { it.name to it.argb },
         )
     }
 

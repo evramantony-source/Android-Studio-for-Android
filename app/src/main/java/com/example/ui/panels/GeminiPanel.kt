@@ -19,22 +19,27 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AddComment
+import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.StopCircle
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -56,18 +61,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.ai.AgentStep
 import com.example.ai.AgentStepStatus
+import com.example.ai.AiModelOption
+import com.example.ai.AiProvider
 import com.example.ai.AiUiState
+import com.example.ai.AiUsageSummary
 import com.example.ai.ChatMessage
-import com.example.ai.GEMINI_MODEL_ID
 import com.example.ai.GeminiCodeAssistant
+import com.example.ai.ProjectChatThread
 import com.example.ai.SuggestedCodeBlock
 import com.example.model.BuildDiagnostic
 import com.example.ui.theme.JetBrainsMonoFontFamily
@@ -75,26 +82,49 @@ import com.example.ui.theme.JetBrainsMonoFontFamily
 @Composable
 fun GeminiPanel(
     activeFileName: String?,
-    customApiKey: String,
-    geminiModelId: String,
+    activeProvider: AiProvider,
+    providerApiKeys: Map<AiProvider, String>,
+    providerModels: Map<AiProvider, String>,
+    liveModels: List<AiModelOption>,
+    isFetchingModels: Boolean,
+    aiUsageSummary: AiUsageSummary,
+    chatThreads: List<ProjectChatThread>,
+    activeThreadId: String,
     diagnostics: List<BuildDiagnostic>,
     messages: List<ChatMessage>,
     aiState: AiUiState,
+    showSplitSideChat: Boolean = false,
+    onToggleSplitSideChat: (() -> Unit)? = null,
+    onSelectProvider: (AiProvider) -> Unit,
+    onSelectModel: (AiProvider, String) -> Unit,
+    onSaveProviderConfig: (AiProvider, String, String) -> Unit,
+    onRefreshLiveModels: (AiProvider) -> Unit,
+    onResetAiUsage: () -> Unit,
+    onSelectChatThread: (String) -> Unit,
+    onCreateSideChat: (String) -> Unit,
+    onRenameChatThread: (String, String) -> Unit,
+    onDeleteChatThread: (String) -> Unit,
     onSendPrompt: (String) -> Unit,
     onRetryGemini: () -> Unit,
     onStopGemini: () -> Unit,
-    onSaveGeminiConfig: (apiKey: String, modelId: String) -> Unit,
     onApplyCode: (SuggestedCodeBlock) -> Unit,
     onClearChat: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var promptInput by remember { mutableStateOf("") }
-    var showApiKeyDialog by remember { mutableStateOf(false) }
+    var showKeysDialog by remember { mutableStateOf(false) }
+    var showModelMenuDialog by remember { mutableStateOf(false) }
+    var showUsageDialog by remember { mutableStateOf(false) }
+    var renameThreadTarget by remember { mutableStateOf<ProjectChatThread?>(null) }
     val listState = rememberLazyListState()
 
-    val hasEffectiveKey = remember(customApiKey) {
-        GeminiCodeAssistant.resolveApiKey(customApiKey).isNotEmpty()
+    val currentModelId = providerModels[activeProvider].orEmpty().ifBlank { activeProvider.defaultModelId }
+    val hasEffectiveKey = remember(activeProvider, providerApiKeys) {
+        when (activeProvider) {
+            AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
+            else -> providerApiKeys[activeProvider].orEmpty().isNotBlank()
+        }
     }
 
     LaunchedEffect(messages.size, messages.lastOrNull()?.text?.length, messages.lastOrNull()?.steps?.size) {
@@ -109,11 +139,11 @@ fun GeminiPanel(
         modifier = modifier.fillMaxSize(),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Header
+            // Top Header
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
@@ -123,49 +153,202 @@ fun GeminiPanel(
                     modifier = Modifier.size(20.dp),
                 )
                 Spacer(Modifier.width(8.dp))
-                Column(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { showModelMenuDialog = true }
+                        .testTag("open_model_menu_button"),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            text = "${activeProvider.shortName} Agent",
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Icon(
+                            Icons.Default.ArrowDropDown,
+                            contentDescription = "Choose AI model",
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                     Text(
-                        text = "Gemini Agent",
-                        style = MaterialTheme.typography.titleMedium,
-                    )
-                    Text(
-                        text = if (hasEffectiveKey) {
-                            geminiModelId
-                        } else {
-                            "$geminiModelId • Key needed"
-                        },
+                        text = if (hasEffectiveKey) currentModelId else "$currentModelId • Key needed",
+                        fontFamily = JetBrainsMonoFontFamily,
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (hasEffectiveKey) {
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                        } else {
-                            MaterialTheme.colorScheme.error
-                        },
+                        color = if (hasEffectiveKey) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
                 IconButton(
-                    onClick = { showApiKeyDialog = true },
+                    onClick = { showUsageDialog = true },
+                    modifier = Modifier.testTag("ai_usage_button"),
+                ) {
+                    Icon(Icons.Default.Analytics, contentDescription = "AI usage and tokens")
+                }
+                IconButton(
+                    onClick = { showKeysDialog = true },
                     modifier = Modifier.testTag("gemini_api_key_button"),
                 ) {
                     Icon(
                         Icons.Default.Key,
-                        contentDescription = "Configure Gemini API key",
-                        tint = if (hasEffectiveKey) {
-                            MaterialTheme.colorScheme.primary
-                        } else {
-                            MaterialTheme.colorScheme.error
-                        },
+                        contentDescription = "Configure AI provider keys",
+                        tint = if (hasEffectiveKey) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                     )
+                }
+                if (onToggleSplitSideChat != null) {
+                    IconButton(
+                        onClick = onToggleSplitSideChat,
+                        modifier = Modifier.testTag("toggle_split_side_chat_button"),
+                    ) {
+                        Icon(
+                            Icons.Default.Forum,
+                            contentDescription = "Toggle split side chat",
+                            tint = if (showSplitSideChat) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
                 }
                 if (messages.isNotEmpty()) {
                     IconButton(onClick = onClearChat, modifier = Modifier.testTag("gemini_clear_button")) {
-                        Icon(Icons.Default.DeleteSweep, contentDescription = "Clear Gemini chat")
+                        Icon(Icons.Default.DeleteSweep, contentDescription = "Clear active chat")
                     }
                 }
                 IconButton(onClick = onClose, modifier = Modifier.testTag("gemini_close_button")) {
-                    Icon(Icons.Default.Close, contentDescription = "Close Gemini panel")
+                    Icon(Icons.Default.Close, contentDescription = "Close AI panel")
                 }
+            }
+
+            // Provider Switcher Bar (Gemini / ChatGPT / Claude) + Model Pill
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 10.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AiProvider.entries.forEach { provider ->
+                    val ready = when (provider) {
+                        AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
+                        else -> providerApiKeys[provider].orEmpty().isNotBlank()
+                    }
+                    FilterChip(
+                        selected = activeProvider == provider,
+                        onClick = { onSelectProvider(provider) },
+                        label = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(
+                                            if (ready) MaterialTheme.colorScheme.secondary
+                                            else MaterialTheme.colorScheme.outline,
+                                        ),
+                                )
+                                Text(provider.shortName, style = MaterialTheme.typography.labelSmall)
+                            }
+                        },
+                        modifier = Modifier.testTag("provider_chip_${provider.name.lowercase()}"),
+                    )
+                }
+                AssistChip(
+                    onClick = { showModelMenuDialog = true },
+                    label = { Text("Models", style = MaterialTheme.typography.labelSmall) },
+                )
+                AssistChip(
+                    onClick = { showUsageDialog = true },
+                    label = {
+                        Text(
+                            text = "${aiUsageSummary.totalTokens} tok • ${formatUsd(aiUsageSummary.totalEstimatedCostUsd)}",
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(Icons.Default.Analytics, contentDescription = null, modifier = Modifier.size(14.dp))
+                    },
+                    modifier = Modifier.testTag("inline_ai_usage_pill"),
+                )
+            }
+
+            // Persistent Per-Project Chat Threads + Side Chats Strip
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 10.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                chatThreads.forEach { thread ->
+                    val selected = thread.id == activeThreadId
+                    Surface(
+                        onClick = { onSelectChatThread(thread.id) },
+                        color = if (selected) {
+                            MaterialTheme.colorScheme.secondaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainerHigh
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier.testTag("chat_thread_chip_${thread.id}"),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(start = 10.dp, end = if (thread.isMain) 10.dp else 4.dp, top = 5.dp, bottom = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = if (thread.messages.isNotEmpty() && !selected) {
+                                    "${thread.title} (${thread.messages.size})"
+                                } else {
+                                    thread.title
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.onSecondaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (!thread.isMain) {
+                                Icon(
+                                    Icons.Default.Edit,
+                                    contentDescription = "Rename ${thread.title}",
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clickable { renameThreadTarget = thread },
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Delete ${thread.title}",
+                                    modifier = Modifier
+                                        .size(14.dp)
+                                        .clickable { onDeleteChatThread(thread.id) },
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+                AssistChip(
+                    onClick = { onCreateSideChat("") },
+                    label = { Text("Side Chat", style = MaterialTheme.typography.labelSmall) },
+                    leadingIcon = {
+                        Icon(Icons.Default.AddComment, contentDescription = null, modifier = Modifier.size(14.dp))
+                    },
+                    modifier = Modifier.testTag("new_side_chat_button"),
+                )
             }
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -175,13 +358,13 @@ fun GeminiPanel(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 if (diagnostics.isNotEmpty()) {
                     AssistChip(
                         onClick = {
-                            onSendPrompt("Inspect the build errors, edit the broken files directly, and rebuild the APK until it succeeds.")
+                            onSendPrompt("Inspect the build errors, edit the broken files directly, and rebuild until it succeeds.")
                         },
                         label = { Text("Auto-Fix Errors (${diagnostics.size})") },
                         leadingIcon = {
@@ -197,15 +380,15 @@ fun GeminiPanel(
                 )
                 AssistChip(
                     onClick = {
-                        onSendPrompt("Add a dark-themed Settings / About AlertDialog button to MainActivity.java and rebuild the APK.")
+                        onSendPrompt("Build a release APK using build_apk(release=true) and fix any issues.")
                     },
-                    label = { Text("Add Dialog & Build") },
+                    label = { Text("Build Release APK") },
                 )
                 AssistChip(
                     onClick = {
-                        onSendPrompt("Refactor the active Java file cleanly, keep behavior identical, and verify with build_apk.")
+                        onSendPrompt("Build a signed Android App Bundle using build_aab and summarize the bundle contents.")
                     },
-                    label = { Text("Refactor & Build") },
+                    label = { Text("Build AAB") },
                 )
             }
 
@@ -215,7 +398,7 @@ fun GeminiPanel(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp),
+                    .padding(horizontal = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 if (!hasEffectiveKey) {
@@ -232,22 +415,22 @@ fun GeminiPanel(
                                 verticalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 Text(
-                                    text = "Connect Gemini API Key",
+                                    text = "Connect ${activeProvider.displayName} Key",
                                     style = MaterialTheme.typography.titleMedium,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                                 )
                                 Text(
-                                    text = "Add your Google AI Studio Gemini API key to use $geminiModelId autonomously on your device, or set GEMINI_API_KEY in AI Studio / GitHub Secrets.",
+                                    text = "Add your ${activeProvider.shortName} API key (${activeProvider.keyHint}) to run $currentModelId autonomously on your project files.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                                 )
                                 Button(
-                                    onClick = { showApiKeyDialog = true },
+                                    onClick = { showKeysDialog = true },
                                     modifier = Modifier.testTag("open_api_key_dialog_button"),
                                 ) {
                                     Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(18.dp))
                                     Spacer(Modifier.width(6.dp))
-                                    Text("Set API Key")
+                                    Text("Configure Keys")
                                 }
                             }
                         }
@@ -266,12 +449,12 @@ fun GeminiPanel(
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 Text(
-                                    text = "Autonomous Coding Agent ($geminiModelId)",
+                                    text = "${activeProvider.shortName} Autonomous Agent ($currentModelId)",
                                     style = MaterialTheme.typography.titleMedium,
                                     color = MaterialTheme.colorScheme.primary,
                                 )
                                 Text(
-                                    text = "Gemini reads, creates, edits, and deletes any project file automatically without asking permission, compiles the APK to check its work, and shows every step live.",
+                                    text = "Chats are saved per project and never reset. Spin up Side Chats above for parallel questions or refactors, and tap any build/edit step to inspect full logs and diffs.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -324,18 +507,14 @@ fun GeminiPanel(
                                                 onClick = onRetryGemini,
                                                 label = { Text("Retry") },
                                                 leadingIcon = {
-                                                    Icon(
-                                                        Icons.Default.Refresh,
-                                                        contentDescription = null,
-                                                        modifier = Modifier.size(16.dp),
-                                                    )
+                                                    Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                                                 },
                                                 modifier = Modifier.testTag("retry_gemini_button"),
                                             )
                                         }
                                         if (aiState.isModelOverloaded) {
                                             AssistChip(
-                                                onClick = { showApiKeyDialog = true },
+                                                onClick = { showModelMenuDialog = true },
                                                 label = { Text("Switch Model") },
                                                 modifier = Modifier.testTag("switch_model_button"),
                                             )
@@ -362,7 +541,7 @@ fun GeminiPanel(
                 OutlinedTextField(
                     value = promptInput,
                     onValueChange = { promptInput = it },
-                    placeholder = { Text("Tell Gemini what to build or change...") },
+                    placeholder = { Text("Ask ${activeProvider.shortName} to edit or build...") },
                     maxLines = 3,
                     modifier = Modifier
                         .weight(1f)
@@ -376,7 +555,7 @@ fun GeminiPanel(
                     ) {
                         Icon(
                             Icons.Default.StopCircle,
-                            contentDescription = "Stop Gemini agent",
+                            contentDescription = "Stop AI agent",
                             tint = MaterialTheme.colorScheme.error,
                         )
                     }
@@ -384,7 +563,7 @@ fun GeminiPanel(
                     IconButton(
                         onClick = {
                             if (!hasEffectiveKey) {
-                                showApiKeyDialog = true
+                                showKeysDialog = true
                                 return@IconButton
                             }
                             val p = promptInput.trim()
@@ -396,124 +575,206 @@ fun GeminiPanel(
                         enabled = promptInput.isNotBlank(),
                         modifier = Modifier.testTag("gemini_send_button"),
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send prompt to Gemini")
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send prompt")
                     }
                 }
             }
         }
     }
 
-    if (showApiKeyDialog) {
-        GeminiApiKeyDialog(
-            currentCustomKey = customApiKey,
-            currentModelId = geminiModelId,
-            hasBuiltInKey = GeminiCodeAssistant.hasBuiltInApiKey(),
-            onSave = { newKey, newModel ->
-                showApiKeyDialog = false
-                onSaveGeminiConfig(newKey, newModel)
+    if (showKeysDialog) {
+        ProviderKeysDialog(
+            initialProvider = activeProvider,
+            providerApiKeys = providerApiKeys,
+            providerModels = providerModels,
+            onSaveConfig = onSaveProviderConfig,
+            onDismiss = { showKeysDialog = false },
+        )
+    }
+
+    if (showModelMenuDialog) {
+        ModelMenuDialog(
+            activeProvider = activeProvider,
+            providerModels = providerModels,
+            liveModels = liveModels,
+            isFetchingModels = isFetchingModels,
+            onSelectModel = onSelectModel,
+            onRefreshLiveModels = onRefreshLiveModels,
+            onDismiss = { showModelMenuDialog = false },
+        )
+    }
+
+    if (showUsageDialog) {
+        AiUsageDialog(
+            usageSummary = aiUsageSummary,
+            onResetUsage = onResetAiUsage,
+            onDismiss = { showUsageDialog = false },
+        )
+    }
+
+    renameThreadTarget?.let { target ->
+        var titleInput by remember(target.id) { mutableStateOf(target.title) }
+        AlertDialog(
+            onDismissRequest = { renameThreadTarget = null },
+            title = { Text("Rename Side Chat") },
+            text = {
+                OutlinedTextField(
+                    value = titleInput,
+                    onValueChange = { titleInput = it },
+                    singleLine = true,
+                    label = { Text("Chat Title") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
             },
-            onDismiss = { showApiKeyDialog = false },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onRenameChatThread(target.id, titleInput)
+                        renameThreadTarget = null
+                    },
+                ) {
+                    Text("Rename")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { renameThreadTarget = null }) {
+                    Text("Cancel")
+                }
+            },
         )
     }
 }
 
 @Composable
-private fun GeminiApiKeyDialog(
-    currentCustomKey: String,
-    currentModelId: String,
-    hasBuiltInKey: Boolean,
-    onSave: (apiKey: String, modelId: String) -> Unit,
-    onDismiss: () -> Unit,
+fun SideChatSplitPane(
+    threads: List<ProjectChatThread>,
+    activeThreadId: String,
+    splitThread: ProjectChatThread?,
+    activeFileName: String?,
+    onSelectSplitThread: (String) -> Unit,
+    onCreateSideChat: () -> Unit,
+    onSwitchToMainInput: (String) -> Unit,
+    onApplyCode: (SuggestedCodeBlock) -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    var keyInput by remember(currentCustomKey) { mutableStateOf(currentCustomKey) }
-    var modelInput by remember(currentModelId) { mutableStateOf(currentModelId) }
-    var revealKey by remember { mutableStateOf(false) }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = modifier.fillMaxSize(),
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(
+                        Icons.Default.Forum,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Text(
+                        text = splitThread?.title ?: "Side Chat",
+                        style = MaterialTheme.typography.titleSmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(onClick = onCreateSideChat) {
+                    Icon(Icons.Default.AddComment, contentDescription = "New side chat", modifier = Modifier.size(18.dp))
+                }
+                IconButton(onClick = onClose) {
+                    Icon(Icons.Default.Close, contentDescription = "Close split side chat", modifier = Modifier.size(18.dp))
+                }
+            }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Gemini Configuration") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    text = when {
-                        currentCustomKey.isNotBlank() ->
-                            "Using your custom API key saved locally on this device."
-                        hasBuiltInKey ->
-                            "Using the GEMINI_API_KEY configured at build time. Paste a key below to override it."
-                        else ->
-                            "Paste your Google AI Studio Gemini API key below. It stays saved locally on this device."
-                    },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                OutlinedTextField(
-                    value = keyInput,
-                    onValueChange = { keyInput = it },
-                    label = { Text("API Key (AIza...)") },
-                    singleLine = true,
-                    visualTransformation = if (revealKey) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        IconButton(onClick = { revealKey = !revealKey }) {
-                            Icon(
-                                imageVector = if (revealKey) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                contentDescription = if (revealKey) "Hide API key" else "Show API key",
-                            )
-                        }
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("gemini_api_key_input"),
-                )
-                OutlinedTextField(
-                    value = modelInput,
-                    onValueChange = { modelInput = it },
-                    label = { Text("Model ID (default: $GEMINI_MODEL_ID)") },
-                    singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("gemini_model_id_input"),
-                )
+            if (threads.size > 1) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 10.dp, vertical = 2.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    listOf(GEMINI_MODEL_ID, "gemini-2.5-flash", "gemini-2.5-pro").forEach { preset ->
+                    threads.filter { it.id != activeThreadId }.forEach { thread ->
                         FilterChip(
-                            selected = modelInput.trim() == preset,
-                            onClick = { modelInput = preset },
-                            label = { Text(preset, style = MaterialTheme.typography.labelSmall) },
+                            selected = splitThread?.id == thread.id,
+                            onClick = { onSelectSplitThread(thread.id) },
+                            label = { Text(thread.title, style = MaterialTheme.typography.labelSmall) },
                         )
                     }
                 }
             }
-        },
-        confirmButton = {
-            Button(
-                onClick = { onSave(keyInput, modelInput) },
-                modifier = Modifier.testTag("save_gemini_api_key_button"),
-            ) {
-                Text("Save")
-            }
-        },
-        dismissButton = {
-            Row {
-                if (currentCustomKey.isNotBlank()) {
-                    TextButton(onClick = { onSave("", modelInput) }) {
-                        Text("Clear Key")
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            if (splitThread == null) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(16.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text(
+                            text = "Create a Side Chat to compare ideas or keep a separate scratchpad alongside your Main Agent.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Button(onClick = onCreateSideChat) {
+                            Text("Create Side Chat")
+                        }
                     }
                 }
-                TextButton(onClick = onDismiss) {
-                    Text("Cancel")
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(splitThread.messages, key = { it.id }) { msg ->
+                        ChatBubble(
+                            message = msg,
+                            activeFileName = activeFileName,
+                            onApplyCode = onApplyCode,
+                        )
+                    }
+                }
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(10.dp),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    Button(
+                        onClick = { onSwitchToMainInput(splitThread.id) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Reply in ${splitThread.title}")
+                    }
                 }
             }
-        },
-    )
+        }
+    }
 }
 
 @Composable
-private fun ChatBubble(
+fun ChatBubble(
     message: ChatMessage,
     activeFileName: String?,
     onApplyCode: (SuggestedCodeBlock) -> Unit,
@@ -544,6 +805,34 @@ private fun ChatBubble(
                 modifier = Modifier.padding(12.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                if (!message.isUser && (message.providerName.isNotBlank() || message.totalTokens > 0L)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = listOf(message.providerName, message.modelId)
+                                .filter { it.isNotBlank() }
+                                .joinToString(" • "),
+                            fontFamily = JetBrainsMonoFontFamily,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (message.totalTokens > 0L) {
+                            Text(
+                                text = "${message.totalTokens} tok",
+                                fontFamily = JetBrainsMonoFontFamily,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.secondary,
+                            )
+                        }
+                    }
+                }
+
                 if (message.steps.isNotEmpty()) {
                     AgentStepsCard(
                         steps = message.steps,
@@ -560,7 +849,7 @@ private fun ChatBubble(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
                             CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                            Text("Working...", style = MaterialTheme.typography.bodyMedium)
+                            Text("Thinking & inspecting files...", style = MaterialTheme.typography.bodyMedium)
                         }
                     }
                 } else if (message.text.isNotEmpty()) {
@@ -639,6 +928,8 @@ private fun AgentStepsCard(
 ) {
     val activeStep = steps.lastOrNull { it.status == AgentStepStatus.RUNNING }
     val failedCount = steps.count { it.status == AgentStepStatus.FAILED }
+    val totalMs = steps.sumOf { it.durationMs }
+
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         shape = RoundedCornerShape(10.dp),
@@ -679,8 +970,10 @@ private fun AgentStepsCard(
                 Text(
                     text = if (isRunning && activeStep != null) {
                         activeStep.title
+                    } else if (totalMs > 0L) {
+                        "Build & Tool Steps (${steps.size}) • ${totalMs}ms"
                     } else {
-                        "Agent Steps (${steps.size})"
+                        "Build & Tool Steps (${steps.size})"
                     },
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.SemiBold,
@@ -704,55 +997,106 @@ private fun AgentStepsCard(
                 ) {
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     steps.forEach { step ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.Top,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        var detailExpanded by remember(step.id) { mutableStateOf(false) }
+                        val hasInspectableOutput = step.expandedOutput.isNotBlank()
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .let {
+                                    if (hasInspectableOutput) {
+                                        it.clickable { detailExpanded = !detailExpanded }
+                                    } else {
+                                        it
+                                    }
+                                },
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            Box(
-                                modifier = Modifier.padding(top = 2.dp),
-                                contentAlignment = Alignment.Center,
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.Top,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                when (step.status) {
-                                    AgentStepStatus.RUNNING -> CircularProgressIndicator(
-                                        modifier = Modifier.size(13.dp),
-                                        strokeWidth = 2.dp,
-                                    )
-                                    AgentStepStatus.COMPLETED -> Icon(
-                                        Icons.Default.CheckCircle,
-                                        contentDescription = "Completed",
-                                        tint = MaterialTheme.colorScheme.secondary,
-                                        modifier = Modifier.size(14.dp),
-                                    )
-                                    AgentStepStatus.FAILED -> Icon(
-                                        Icons.Default.ErrorOutline,
-                                        contentDescription = "Failed",
-                                        tint = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(14.dp),
-                                    )
+                                Box(
+                                    modifier = Modifier.padding(top = 2.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    when (step.status) {
+                                        AgentStepStatus.RUNNING -> CircularProgressIndicator(
+                                            modifier = Modifier.size(13.dp),
+                                            strokeWidth = 2.dp,
+                                        )
+                                        AgentStepStatus.COMPLETED -> Icon(
+                                            Icons.Default.CheckCircle,
+                                            contentDescription = "Completed",
+                                            tint = MaterialTheme.colorScheme.secondary,
+                                            modifier = Modifier.size(14.dp),
+                                        )
+                                        AgentStepStatus.FAILED -> Icon(
+                                            Icons.Default.ErrorOutline,
+                                            contentDescription = "Failed",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(14.dp),
+                                        )
+                                    }
+                                }
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                    ) {
+                                        Text(
+                                            text = step.title,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Medium,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                        if (step.durationMs > 0L) {
+                                            Text(
+                                                text = "${step.durationMs}ms",
+                                                fontFamily = JetBrainsMonoFontFamily,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary,
+                                            )
+                                        }
+                                    }
+                                    if (step.detail.isNotBlank()) {
+                                        Text(
+                                            text = if (hasInspectableOutput && !detailExpanded) {
+                                                "${step.detail} (tap for details)"
+                                            } else {
+                                                step.detail
+                                            },
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (step.status == AgentStepStatus.FAILED) {
+                                                MaterialTheme.colorScheme.error
+                                            } else {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            },
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
                                 }
                             }
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = step.title,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Medium,
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                                if (step.detail.isNotBlank()) {
+                            AnimatedVisibility(visible = detailExpanded && hasInspectableOutput) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.background,
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 22.dp),
+                                ) {
                                     Text(
-                                        text = step.detail,
+                                        text = step.expandedOutput,
                                         fontFamily = JetBrainsMonoFontFamily,
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = if (step.status == AgentStepStatus.FAILED) {
-                                            MaterialTheme.colorScheme.error
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        },
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
+                                        color = MaterialTheme.colorScheme.onBackground,
+                                        modifier = Modifier.padding(8.dp),
                                     )
                                 }
                             }

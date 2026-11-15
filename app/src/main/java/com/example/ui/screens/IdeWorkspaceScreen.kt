@@ -1,6 +1,7 @@
 package com.example.ui.screens
 
 import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -30,6 +31,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
@@ -37,14 +39,22 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.FolderZip
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
+import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -80,18 +90,32 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import com.example.ai.AiModelOption
+import com.example.ai.AiProvider
 import com.example.ai.AiUiState
+import com.example.ai.AiUsageSummary
 import com.example.ai.ChatMessage
+import com.example.ai.ProjectChatThread
 import com.example.ai.SuggestedCodeBlock
+import com.example.emulator.EmulatorPanel
 import com.example.model.BuildDiagnostic
 import com.example.model.BuildResult
+import com.example.model.BuildVariant
 import com.example.model.EditorSettings
 import com.example.model.FileLanguage
 import com.example.model.ProjectFile
 import com.example.model.ProjectMetadata
+import com.example.model.ProjectSearchHit
+import com.example.model.ReleaseSigningConfig
 import com.example.ui.editor.CodeEditor
+import com.example.ui.panels.AiUsageDialog
 import com.example.ui.panels.BuildPanel
 import com.example.ui.panels.GeminiPanel
+import com.example.ui.panels.ModelMenuDialog
+import com.example.ui.panels.ProjectSearchDialog
+import com.example.ui.panels.ProviderKeysDialog
+import com.example.ui.panels.ReleaseKeystoreDialog
+import com.example.ui.panels.SideChatSplitPane
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import kotlinx.coroutines.launch
 import java.io.File
@@ -105,12 +129,21 @@ fun IdeWorkspaceScreen(
     activeFilePath: String?,
     editorSettings: EditorSettings,
     isBuilding: Boolean,
+    selectedBuildVariant: BuildVariant,
+    releaseSigningConfig: ReleaseSigningConfig,
     buildLogs: List<String>,
     lastBuildResult: BuildResult?,
     jumpToLine: Pair<String, Int>?,
     statusBanner: String?,
-    customGeminiApiKey: String,
-    geminiModelId: String,
+    activeProvider: AiProvider,
+    providerApiKeys: Map<AiProvider, String>,
+    providerModels: Map<AiProvider, String>,
+    liveModels: List<AiModelOption>,
+    isFetchingModels: Boolean,
+    aiUsageSummary: AiUsageSummary,
+    chatThreads: List<ProjectChatThread>,
+    activeThreadId: String,
+    splitSideThreadId: String?,
     aiMessages: List<ChatMessage>,
     aiState: AiUiState,
     onSelectFile: (String) -> Unit,
@@ -118,15 +151,31 @@ fun IdeWorkspaceScreen(
     onCreateFile: (String) -> Unit,
     onDeleteFile: (String) -> Unit,
     onUpdateContent: (String) -> Unit,
-    onBuildApk: () -> Unit,
+    onSelectBuildVariant: (BuildVariant) -> Unit,
+    onBuildApk: (BuildVariant?) -> Unit,
+    onGenerateKeystore: (String, String, String, String) -> Unit,
+    onImportKeystore: (Uri, String, String) -> Unit,
+    onClearKeystore: () -> Unit,
+    onSearchWorkspace: (String) -> List<ProjectSearchHit>,
+    onJumpToFileAndLine: (String, Int) -> Unit,
     onJumpToDiagnostic: (BuildDiagnostic) -> Unit,
     onClearJump: () -> Unit,
-    onExportApkUri: (android.net.Uri) -> Unit,
+    onExportApkUri: (Uri) -> Unit,
+    onExportProjectZipUri: (Uri) -> Unit,
     onClearStatusBanner: () -> Unit,
+    onSelectProvider: (AiProvider) -> Unit,
+    onSelectModel: (AiProvider, String) -> Unit,
+    onSaveProviderConfig: (AiProvider, String, String) -> Unit,
+    onRefreshLiveModels: (AiProvider) -> Unit,
+    onResetAiUsage: () -> Unit,
+    onSelectChatThread: (String) -> Unit,
+    onCreateSideChat: (String) -> Unit,
+    onRenameChatThread: (String, String) -> Unit,
+    onDeleteChatThread: (String) -> Unit,
+    onSetSplitSideThread: (String?) -> Unit,
     onAskGemini: (String) -> Unit,
     onRetryGemini: () -> Unit,
     onStopGemini: () -> Unit,
-    onSaveGeminiConfig: (String, String) -> Unit,
     onApplyGeminiCode: (SuggestedCodeBlock) -> Unit,
     onClearAiChat: () -> Unit,
     onUpdateSettings: ((EditorSettings) -> EditorSettings) -> Unit,
@@ -140,15 +189,34 @@ fun IdeWorkspaceScreen(
 
     var showBuildPanel by remember { mutableStateOf(false) }
     var showGeminiPanel by remember { mutableStateOf(false) }
+    var showEmulatorPanel by remember { mutableStateOf(false) }
+    var showSplitSideChat by remember { mutableStateOf(false) }
+    var showMoreMenu by remember { mutableStateOf(false) }
+
     var showNewFileDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
+    var showSearchDialog by remember { mutableStateOf(false) }
+    var showKeystoreDialog by remember { mutableStateOf(false) }
+    var showModelMenuDialog by remember { mutableStateOf(false) }
+    var showKeysDialog by remember { mutableStateOf(false) }
+    var showUsageDialog by remember { mutableStateOf(false) }
 
     val exportApkLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/vnd.android.package-archive"),
     ) { uri ->
-        if (uri != null) {
-            onExportApkUri(uri)
-        }
+        if (uri != null) onExportApkUri(uri)
+    }
+
+    val exportAabLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri ->
+        if (uri != null) onExportApkUri(uri)
+    }
+
+    val exportZipLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri != null) onExportProjectZipUri(uri)
     }
 
     LaunchedEffect(isBuilding, lastBuildResult) {
@@ -167,30 +235,48 @@ fun IdeWorkspaceScreen(
     BackHandler {
         when {
             drawerState.isOpen -> scope.launch { drawerState.close() }
+            showEmulatorPanel -> showEmulatorPanel = false
             showGeminiPanel -> showGeminiPanel = false
             showBuildPanel -> showBuildPanel = false
             else -> onBackToProjects()
         }
     }
 
-    fun shareBuiltApk(apkPath: String) {
+    fun shareBuiltArtifact(artifactPath: String) {
         runCatching {
-            val file = File(apkPath)
+            val file = File(artifactPath)
+            val isBundle = artifactPath.endsWith(".aab", ignoreCase = true)
             val uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
                 file,
             )
             val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                type = "application/vnd.android.package-archive"
+                type = if (isBundle) "application/octet-stream" else "application/vnd.android.package-archive"
                 putExtra(Intent.EXTRA_STREAM, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
-            context.startActivity(Intent.createChooser(sendIntent, "Share or Open APK"))
+            context.startActivity(
+                Intent.createChooser(sendIntent, if (isBundle) "Share App Bundle (.aab)" else "Share or Open APK"),
+            )
+        }
+    }
+
+    fun launchExportArtifact() {
+        val safeName = project.name.lowercase().replace(Regex("[^a-z0-9]+"), "-")
+        val variant = lastBuildResult?.variant ?: selectedBuildVariant
+        when (variant) {
+            BuildVariant.DEBUG_APK -> exportApkLauncher.launch("$safeName-debug.apk")
+            BuildVariant.RELEASE_APK -> exportApkLauncher.launch("$safeName-release.apk")
+            BuildVariant.RELEASE_AAB -> exportAabLauncher.launch("$safeName-release.aab")
         }
     }
 
     val activeFile = files.find { it.relativePath == activeFilePath }
+    val splitThread = remember(chatThreads, splitSideThreadId, activeThreadId) {
+        chatThreads.find { it.id == splitSideThreadId && it.id != activeThreadId }
+            ?: chatThreads.firstOrNull { it.id != activeThreadId }
+    }
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val isExpanded = maxWidth >= 840.dp
@@ -218,7 +304,7 @@ fun IdeWorkspaceScreen(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    text = project.packageName,
+                                    text = "${project.packageName} • ${selectedBuildVariant.shortLabel}",
                                     fontFamily = JetBrainsMonoFontFamily,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -237,6 +323,26 @@ fun IdeWorkspaceScreen(
                                 }
                             }
                             IconButton(
+                                onClick = { showSearchDialog = true },
+                                modifier = Modifier.testTag("workspace_search_button"),
+                            ) {
+                                Icon(Icons.Default.Search, contentDescription = "Search project files")
+                            }
+                            IconButton(
+                                onClick = {
+                                    val next = !showEmulatorPanel
+                                    showEmulatorPanel = next
+                                    if (!isExpanded && next) showGeminiPanel = false
+                                },
+                                modifier = Modifier.testTag("toggle_emulator_button"),
+                            ) {
+                                Icon(
+                                    Icons.Default.PhoneAndroid,
+                                    contentDescription = "Toggle live emulator",
+                                    tint = if (showEmulatorPanel) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
+                            IconButton(
                                 onClick = { showBuildPanel = !showBuildPanel },
                                 modifier = Modifier.testTag("toggle_console_button"),
                             ) {
@@ -247,20 +353,84 @@ fun IdeWorkspaceScreen(
                                 )
                             }
                             IconButton(
-                                onClick = { showGeminiPanel = !showGeminiPanel },
+                                onClick = {
+                                    val next = !showGeminiPanel
+                                    showGeminiPanel = next
+                                    if (!isExpanded && next) showEmulatorPanel = false
+                                },
                                 modifier = Modifier.testTag("toggle_gemini_button"),
                             ) {
                                 Icon(
                                     Icons.Default.AutoAwesome,
-                                    contentDescription = "Toggle Gemini assistant",
+                                    contentDescription = "Toggle AI agent",
                                     tint = if (showGeminiPanel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
                                 )
                             }
-                            IconButton(onClick = { showSettingsDialog = true }) {
-                                Icon(Icons.Default.Settings, contentDescription = "Editor settings")
+                            Box {
+                                IconButton(
+                                    onClick = { showMoreMenu = true },
+                                    modifier = Modifier.testTag("workspace_more_menu_button"),
+                                ) {
+                                    Icon(Icons.Default.MoreVert, contentDescription = "More tools")
+                                }
+                                DropdownMenu(
+                                    expanded = showMoreMenu,
+                                    onDismissRequest = { showMoreMenu = false },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Choose AI Model") },
+                                        leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            showModelMenuDialog = true
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("AI Provider Keys") },
+                                        leadingIcon = { Icon(Icons.Default.Key, contentDescription = null) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            showKeysDialog = true
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("AI Usage & Tokens") },
+                                        leadingIcon = { Icon(Icons.Default.Analytics, contentDescription = null) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            showUsageDialog = true
+                                        },
+                                    )
+                                    HorizontalDivider()
+                                    DropdownMenuItem(
+                                        text = { Text("Release Keystore Manager") },
+                                        leadingIcon = { Icon(Icons.Default.VerifiedUser, contentDescription = null) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            showKeystoreDialog = true
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Export Project ZIP") },
+                                        leadingIcon = { Icon(Icons.Default.FolderZip, contentDescription = null) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            val safeName = project.name.lowercase().replace(Regex("[^a-z0-9]+"), "-")
+                                            exportZipLauncher.launch("$safeName-source.zip")
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Editor Settings") },
+                                        leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            showSettingsDialog = true
+                                        },
+                                    )
+                                }
                             }
                             Button(
-                                onClick = onBuildApk,
+                                onClick = { onBuildApk(null) },
                                 enabled = !isBuilding,
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = MaterialTheme.colorScheme.secondary,
@@ -280,7 +450,14 @@ fun IdeWorkspaceScreen(
                                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                                 }
                                 Spacer(Modifier.width(4.dp))
-                                Text(if (isBuilding) "Building" else "Build APK")
+                                Text(
+                                    when {
+                                        isBuilding -> "Building"
+                                        selectedBuildVariant == BuildVariant.RELEASE_AAB -> "Build AAB"
+                                        selectedBuildVariant == BuildVariant.RELEASE_APK -> "Release"
+                                        else -> "Build APK"
+                                    },
+                                )
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(
@@ -304,7 +481,7 @@ fun IdeWorkspaceScreen(
                             onCreateFile = { showNewFileDialog = true },
                             onDeleteFile = onDeleteFile,
                             modifier = Modifier
-                                .width(230.dp)
+                                .width(225.dp)
                                 .fillMaxHeight(),
                         )
                         VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
@@ -426,52 +603,113 @@ fun IdeWorkspaceScreen(
                             }
                         }
 
-                        // Collapsible Bottom Build Console & APK Inspector
+                        // Collapsible Bottom Build Console & Package Inspector
                         AnimatedVisibility(visible = showBuildPanel) {
                             Column {
                                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                                 BuildPanel(
                                     isBuilding = isBuilding,
+                                    selectedVariant = selectedBuildVariant,
+                                    releaseSigningConfig = releaseSigningConfig,
                                     logs = buildLogs,
                                     buildResult = lastBuildResult,
-                                    onDiagnosticClick = { diag ->
-                                        onJumpToDiagnostic(diag)
+                                    onSelectVariant = onSelectBuildVariant,
+                                    onTriggerBuild = { variant -> onBuildApk(variant) },
+                                    onOpenKeystoreManager = { showKeystoreDialog = true },
+                                    onOpenEmulator = {
+                                        showEmulatorPanel = true
+                                        if (!isExpanded) showGeminiPanel = false
                                     },
+                                    onDiagnosticClick = onJumpToDiagnostic,
                                     onAskGeminiToFix = {
                                         showGeminiPanel = true
+                                        if (!isExpanded) showEmulatorPanel = false
                                         onAskGemini("Inspect the build errors, edit the affected files directly, and re-run build_apk until the build succeeds.")
                                     },
-                                    onExportApk = {
-                                        val safeName = project.name.lowercase().replace(Regex("[^a-z0-9]+"), "-")
-                                        exportApkLauncher.launch("$safeName-debug.apk")
-                                    },
-                                    onShareApk = { apkPath -> shareBuiltApk(apkPath) },
+                                    onExportArtifact = { launchExportArtifact() },
+                                    onShareArtifact = { path -> shareBuiltArtifact(path) },
                                     onClose = { showBuildPanel = false },
-                                    modifier = Modifier.height(260.dp),
+                                    modifier = Modifier.height(280.dp),
                                 )
                             }
                         }
                     }
 
-                    // Persistent Gemini Side Pane on Expanded Screens
+                    // Persistent Live Android Emulator Pane on Expanded Screens
+                    if (isExpanded && showEmulatorPanel) {
+                        VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        EmulatorPanel(
+                            appName = project.name,
+                            packageName = project.packageName,
+                            files = files,
+                            builtApkPath = lastBuildResult?.apkPath,
+                            onInstallApk = { apkPath -> shareBuiltArtifact(apkPath) },
+                            onClose = { showEmulatorPanel = false },
+                            modifier = Modifier
+                                .width(320.dp)
+                                .fillMaxHeight(),
+                        )
+                    }
+
+                    // Persistent Multi-Provider AI Pane on Expanded Screens
                     if (isExpanded && showGeminiPanel) {
                         VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         GeminiPanel(
                             activeFileName = activeFile?.relativePath,
-                            customApiKey = customGeminiApiKey,
-                            geminiModelId = geminiModelId,
+                            activeProvider = activeProvider,
+                            providerApiKeys = providerApiKeys,
+                            providerModels = providerModels,
+                            liveModels = liveModels,
+                            isFetchingModels = isFetchingModels,
+                            aiUsageSummary = aiUsageSummary,
+                            chatThreads = chatThreads,
+                            activeThreadId = activeThreadId,
                             diagnostics = lastBuildResult?.diagnostics.orEmpty(),
                             messages = aiMessages,
                             aiState = aiState,
+                            showSplitSideChat = showSplitSideChat,
+                            onToggleSplitSideChat = { showSplitSideChat = !showSplitSideChat },
+                            onSelectProvider = onSelectProvider,
+                            onSelectModel = onSelectModel,
+                            onSaveProviderConfig = onSaveProviderConfig,
+                            onRefreshLiveModels = onRefreshLiveModels,
+                            onResetAiUsage = onResetAiUsage,
+                            onSelectChatThread = onSelectChatThread,
+                            onCreateSideChat = onCreateSideChat,
+                            onRenameChatThread = onRenameChatThread,
+                            onDeleteChatThread = onDeleteChatThread,
                             onSendPrompt = onAskGemini,
                             onRetryGemini = onRetryGemini,
                             onStopGemini = onStopGemini,
-                            onSaveGeminiConfig = onSaveGeminiConfig,
                             onApplyCode = onApplyGeminiCode,
                             onClearChat = onClearAiChat,
                             onClose = { showGeminiPanel = false },
                             modifier = Modifier
-                                .width(340.dp)
+                                .width(350.dp)
+                                .fillMaxHeight(),
+                        )
+                    }
+
+                    // Optional Side-by-Side Split Side Chat on Expanded Screens
+                    if (isExpanded && showGeminiPanel && showSplitSideChat) {
+                        VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        SideChatSplitPane(
+                            threads = chatThreads,
+                            activeThreadId = activeThreadId,
+                            splitThread = splitThread,
+                            activeFileName = activeFile?.relativePath,
+                            onSelectSplitThread = onSetSplitSideThread,
+                            onCreateSideChat = {
+                                onCreateSideChat("")
+                                showSplitSideChat = true
+                            },
+                            onSwitchToMainInput = { targetId ->
+                                onSelectChatThread(targetId)
+                            },
+                            onApplyCode = onApplyGeminiCode,
+                            onClose = { showSplitSideChat = false },
+                            modifier = Modifier
+                                .width(300.dp)
                                 .fillMaxHeight(),
                         )
                     }
@@ -505,24 +743,55 @@ fun IdeWorkspaceScreen(
                 content = mainScaffold,
             )
 
-            if (showGeminiPanel) {
+            if (showEmulatorPanel) {
+                val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                ModalBottomSheet(
+                    onDismissRequest = { showEmulatorPanel = false },
+                    sheetState = sheetState,
+                ) {
+                    Box(modifier = Modifier.height(600.dp)) {
+                        EmulatorPanel(
+                            appName = project.name,
+                            packageName = project.packageName,
+                            files = files,
+                            builtApkPath = lastBuildResult?.apkPath,
+                            onInstallApk = { apkPath -> shareBuiltArtifact(apkPath) },
+                            onClose = { showEmulatorPanel = false },
+                        )
+                    }
+                }
+            } else if (showGeminiPanel) {
                 val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
                 ModalBottomSheet(
                     onDismissRequest = { showGeminiPanel = false },
                     sheetState = sheetState,
                 ) {
-                    Box(modifier = Modifier.height(540.dp)) {
+                    Box(modifier = Modifier.height(580.dp)) {
                         GeminiPanel(
                             activeFileName = activeFile?.relativePath,
-                            customApiKey = customGeminiApiKey,
-                            geminiModelId = geminiModelId,
+                            activeProvider = activeProvider,
+                            providerApiKeys = providerApiKeys,
+                            providerModels = providerModels,
+                            liveModels = liveModels,
+                            isFetchingModels = isFetchingModels,
+                            aiUsageSummary = aiUsageSummary,
+                            chatThreads = chatThreads,
+                            activeThreadId = activeThreadId,
                             diagnostics = lastBuildResult?.diagnostics.orEmpty(),
                             messages = aiMessages,
                             aiState = aiState,
+                            onSelectProvider = onSelectProvider,
+                            onSelectModel = onSelectModel,
+                            onSaveProviderConfig = onSaveProviderConfig,
+                            onRefreshLiveModels = onRefreshLiveModels,
+                            onResetAiUsage = onResetAiUsage,
+                            onSelectChatThread = onSelectChatThread,
+                            onCreateSideChat = onCreateSideChat,
+                            onRenameChatThread = onRenameChatThread,
+                            onDeleteChatThread = onDeleteChatThread,
                             onSendPrompt = onAskGemini,
                             onRetryGemini = onRetryGemini,
                             onStopGemini = onStopGemini,
-                            onSaveGeminiConfig = onSaveGeminiConfig,
                             onApplyCode = onApplyGeminiCode,
                             onClearChat = onClearAiChat,
                             onClose = { showGeminiPanel = false },
@@ -549,6 +818,54 @@ fun IdeWorkspaceScreen(
             settings = editorSettings,
             onUpdateSettings = onUpdateSettings,
             onDismiss = { showSettingsDialog = false },
+        )
+    }
+
+    if (showSearchDialog) {
+        ProjectSearchDialog(
+            onSearch = onSearchWorkspace,
+            onJumpToHit = { hit -> onJumpToFileAndLine(hit.relativePath, hit.lineNumber) },
+            onDismiss = { showSearchDialog = false },
+        )
+    }
+
+    if (showKeystoreDialog) {
+        ReleaseKeystoreDialog(
+            signingConfig = releaseSigningConfig,
+            onGenerateKeystore = onGenerateKeystore,
+            onImportKeystore = onImportKeystore,
+            onClearKeystore = onClearKeystore,
+            onDismiss = { showKeystoreDialog = false },
+        )
+    }
+
+    if (showModelMenuDialog) {
+        ModelMenuDialog(
+            activeProvider = activeProvider,
+            providerModels = providerModels,
+            liveModels = liveModels,
+            isFetchingModels = isFetchingModels,
+            onSelectModel = onSelectModel,
+            onRefreshLiveModels = onRefreshLiveModels,
+            onDismiss = { showModelMenuDialog = false },
+        )
+    }
+
+    if (showKeysDialog) {
+        ProviderKeysDialog(
+            initialProvider = activeProvider,
+            providerApiKeys = providerApiKeys,
+            providerModels = providerModels,
+            onSaveConfig = onSaveProviderConfig,
+            onDismiss = { showKeysDialog = false },
+        )
+    }
+
+    if (showUsageDialog) {
+        AiUsageDialog(
+            usageSummary = aiUsageSummary,
+            onResetUsage = onResetAiUsage,
+            onDismiss = { showUsageDialog = false },
         )
     }
 }

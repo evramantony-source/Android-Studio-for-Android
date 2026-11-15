@@ -445,6 +445,235 @@ object TemplateProvider {
                 """.trimIndent() + "\n"
             }
 
+            ProjectTemplate.NOTES_APP -> {
+                files["src/$pkgPath/MainActivity.java"] = """
+                    package $packageName;
+
+                    import android.app.Activity;
+                    import android.graphics.Color;
+                    import android.graphics.Typeface;
+                    import android.graphics.drawable.GradientDrawable;
+                    import android.os.Bundle;
+                    import android.view.View;
+                    import android.widget.Button;
+                    import android.widget.EditText;
+                    import android.widget.LinearLayout;
+                    import android.widget.ScrollView;
+                    import android.widget.TextView;
+                    import android.widget.Toast;
+
+                    public class MainActivity extends Activity {
+
+                        private EditText noteInput;
+                        private LinearLayout notesContainer;
+
+                        @Override
+                        protected void onCreate(Bundle savedInstanceState) {
+                            super.onCreate(savedInstanceState);
+
+                            LinearLayout root = new LinearLayout(this);
+                            root.setOrientation(LinearLayout.VERTICAL);
+                            root.setBackgroundColor(Color.parseColor("#0F172A"));
+                            root.setPadding(36, 48, 36, 36);
+
+                            TextView header = new TextView(this);
+                            header.setText(getString(R.string.app_name));
+                            header.setTextSize(24);
+                            header.setTypeface(Typeface.DEFAULT_BOLD);
+                            header.setTextColor(Color.WHITE);
+                            header.setPadding(0, 0, 0, 24);
+                            root.addView(header);
+
+                            noteInput = new EditText(this);
+                            noteInput.setHint("Write a quick note...");
+                            noteInput.setTextColor(Color.WHITE);
+                            noteInput.setHintTextColor(Color.parseColor("#94A3B8"));
+                            noteInput.setBackgroundColor(Color.parseColor("#1E293B"));
+                            noteInput.setPadding(28, 24, 28, 24);
+                            root.addView(noteInput);
+
+                            Button addBtn = new Button(this);
+                            addBtn.setText("Save Note");
+                            addBtn.setTextColor(Color.WHITE);
+                            GradientDrawable btnBg = new GradientDrawable();
+                            btnBg.setColor(Color.parseColor("#0284C7"));
+                            btnBg.setCornerRadius(20f);
+                            addBtn.setBackground(btnBg);
+                            LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT
+                            );
+                            btnLp.setMargins(0, 20, 0, 24);
+                            addBtn.setLayoutParams(btnLp);
+                            root.addView(addBtn);
+
+                            ScrollView scroll = new ScrollView(this);
+                            notesContainer = new LinearLayout(this);
+                            notesContainer.setOrientation(LinearLayout.VERTICAL);
+                            scroll.addView(notesContainer);
+                            root.addView(scroll);
+
+                            addBtn.setOnClickListener(new View.OnClickListener() {
+                                @Override
+                                public void onClick(View v) {
+                                    String content = noteInput.getText().toString().trim();
+                                    if (content.isEmpty()) return;
+                                    addNoteCard(content);
+                                    noteInput.setText("");
+                                    Toast.makeText(MainActivity.this, "Note saved", Toast.LENGTH_SHORT).show();
+                                }
+                            });
+
+                            setContentView(root);
+                        }
+
+                        private void addNoteCard(String text) {
+                            TextView card = new TextView(this);
+                            card.setText(text);
+                            card.setTextColor(Color.parseColor("#E2E8F0"));
+                            card.setTextSize(15);
+                            card.setPadding(32, 24, 32, 24);
+                            GradientDrawable bg = new GradientDrawable();
+                            bg.setColor(Color.parseColor("#1E293B"));
+                            bg.setCornerRadius(20f);
+                            card.setBackground(bg);
+                            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT
+                            );
+                            lp.setMargins(0, 0, 0, 16);
+                            card.setLayoutParams(lp);
+                            notesContainer.addView(card, 0);
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.STOPWATCH_APP -> {
+                files["src/$pkgPath/MainActivity.java"] = """
+                    package $packageName;
+
+                    import android.app.Activity;
+                    import android.graphics.Color;
+                    import android.graphics.Typeface;
+                    import android.os.Bundle;
+                    import android.os.Handler;
+                    import android.os.Looper;
+                    import android.view.Gravity;
+                    import android.view.View;
+                    import android.widget.Button;
+                    import android.widget.LinearLayout;
+                    import android.widget.TextView;
+
+                    public class MainActivity extends Activity {
+
+                        private final Handler handler = new Handler(Looper.getMainLooper());
+                        private TextView readout;
+                        private TextView lapsView;
+                        private boolean running = false;
+                        private long elapsedMs = 0L;
+                        private long lastTickMs = 0L;
+                        private int lapCount = 0;
+
+                        private final Runnable ticker = new Runnable() {
+                            @Override
+                            public void run() {
+                                if (!running) return;
+                                long now = System.currentTimeMillis();
+                                elapsedMs += (now - lastTickMs);
+                                lastTickMs = now;
+                                updateReadout();
+                                handler.postDelayed(this, 80);
+                            }
+                        };
+
+                        @Override
+                        protected void onCreate(Bundle savedInstanceState) {
+                            super.onCreate(savedInstanceState);
+
+                            LinearLayout root = new LinearLayout(this);
+                            root.setOrientation(LinearLayout.VERTICAL);
+                            root.setGravity(Gravity.CENTER_HORIZONTAL);
+                            root.setBackgroundColor(Color.parseColor("#0B0F17"));
+                            root.setPadding(40, 72, 40, 40);
+
+                            readout = new TextView(this);
+                            readout.setText("00:00.0");
+                            readout.setTextSize(54);
+                            readout.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                            readout.setTextColor(Color.parseColor("#34D399"));
+                            readout.setPadding(0, 32, 0, 40);
+                            root.addView(readout);
+
+                            LinearLayout controls = new LinearLayout(this);
+                            controls.setOrientation(LinearLayout.HORIZONTAL);
+                            controls.setGravity(Gravity.CENTER);
+
+                            Button toggleBtn = new Button(this);
+                            toggleBtn.setText("Start / Pause");
+                            toggleBtn.setOnClickListener(new View.OnClickListener() {
+                                @Override
+                                public void onClick(View v) {
+                                    running = !running;
+                                    if (running) {
+                                        lastTickMs = System.currentTimeMillis();
+                                        handler.post(ticker);
+                                    } else {
+                                        handler.removeCallbacks(ticker);
+                                    }
+                                }
+                            });
+
+                            Button lapBtn = new Button(this);
+                            lapBtn.setText("Lap");
+                            lapBtn.setOnClickListener(new View.OnClickListener() {
+                                @Override
+                                public void onClick(View v) {
+                                    lapCount++;
+                                    String line = "Lap " + lapCount + ": " + readout.getText() + "\n" + lapsView.getText();
+                                    lapsView.setText(line);
+                                }
+                            });
+
+                            Button resetBtn = new Button(this);
+                            resetBtn.setText("Reset");
+                            resetBtn.setOnClickListener(new View.OnClickListener() {
+                                @Override
+                                public void onClick(View v) {
+                                    running = false;
+                                    handler.removeCallbacks(ticker);
+                                    elapsedMs = 0L;
+                                    lapCount = 0;
+                                    lapsView.setText("");
+                                    updateReadout();
+                                }
+                            });
+
+                            controls.addView(toggleBtn);
+                            controls.addView(lapBtn);
+                            controls.addView(resetBtn);
+                            root.addView(controls);
+
+                            lapsView = new TextView(this);
+                            lapsView.setTextColor(Color.parseColor("#94A3B8"));
+                            lapsView.setTypeface(Typeface.MONOSPACE);
+                            lapsView.setPadding(0, 32, 0, 0);
+                            root.addView(lapsView);
+
+                            setContentView(root);
+                        }
+
+                        private void updateReadout() {
+                            long tenths = (elapsedMs / 100) % 10;
+                            long totalSecs = elapsedMs / 1000;
+                            long mins = totalSecs / 60;
+                            long secs = totalSecs % 60;
+                            readout.setText(String.format("%02d:%02d.%d", mins, secs, tenths));
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
             ProjectTemplate.BLANK_ACTIVITY -> {
                 files["src/$pkgPath/MainActivity.java"] = """
                     package $packageName;

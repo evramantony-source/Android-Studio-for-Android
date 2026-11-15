@@ -124,4 +124,115 @@ class OfflineApkBuilderTest {
         assertFalse(result.success)
         assertTrue(result.diagnostics.any { it.severity == DiagnosticSeverity.ERROR && it.line == 8 })
     }
+
+    @Test
+    fun generatesCustomReleaseKeystoreAndBuildsSignedReleaseApkAndAab() {
+        val keystoreFile = File(tempFolder.newFolder("keys"), "release.p12")
+        val signingCfg = com.example.compiler.KeystoreManager.generatePkcs12Keystore(
+            outputFile = keystoreFile,
+            alias = "droidrelease",
+            storePassword = "secret123",
+            keyPassword = "secret123",
+            commonName = "DroidForge Dev",
+            organization = "DroidForge",
+        )
+        assertTrue(keystoreFile.exists())
+        assertTrue(signingCfg.sha256Fingerprint.isNotBlank())
+        assertTrue(signingCfg.sha1Fingerprint.isNotBlank())
+
+        val inspected = com.example.compiler.KeystoreManager.inspectKeystore(
+            keystoreFile = keystoreFile,
+            storePassword = "secret123",
+            preferredAlias = "droidrelease",
+            keyPassword = "secret123",
+        )
+        assertEquals("droidrelease", inspected.alias)
+
+        val projectDir = tempFolder.newFolder("release_notes")
+        val template = ProjectTemplate.NOTES_APP
+        TemplateProvider.generateFiles(template, template.defaultAppName, template.defaultPackage)
+            .forEach { (relPath, content) ->
+                val target = File(projectDir, relPath)
+                target.parentFile?.mkdirs()
+                target.writeText(content)
+            }
+
+        val builder = OfflineApkBuilder()
+
+        // 1. Build Release APK
+        val releaseApkResult = builder.buildWithToolchain(
+            projectDir = projectDir,
+            packageName = template.defaultPackage,
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = keystoreFile,
+            variant = com.example.model.BuildVariant.RELEASE_APK,
+            storePassword = "secret123",
+            keyPassword = "secret123",
+            keyAlias = "droidrelease",
+            usedReleaseKey = true,
+        )
+        assertTrue("Release APK build failed: ${releaseApkResult.logs}", releaseApkResult.success)
+        assertTrue(releaseApkResult.signerSha256.isNotBlank())
+        assertTrue(releaseApkResult.artifactSha256.isNotBlank())
+        val releaseApkFile = File(releaseApkResult.apkPath!!)
+        val apkVerification = ApkVerifier.Builder(releaseApkFile)
+            .setMinCheckedPlatformVersion(24)
+            .build()
+            .verify()
+        assertTrue("Release APK signature invalid: ${apkVerification.errors}", apkVerification.isVerified)
+
+        // 2. Build Signed Release AAB
+        val aabResult = builder.buildWithToolchain(
+            projectDir = projectDir,
+            packageName = template.defaultPackage,
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = keystoreFile,
+            variant = com.example.model.BuildVariant.RELEASE_AAB,
+            storePassword = "secret123",
+            keyPassword = "secret123",
+            keyAlias = "droidrelease",
+            usedReleaseKey = true,
+        )
+        assertTrue("Release AAB build failed: ${aabResult.logs}", aabResult.success)
+        val aabFile = File(aabResult.apkPath!!)
+        assertTrue(aabFile.name.endsWith(".aab"))
+
+        ZipFile(aabFile).use { zip ->
+            assertTrue(zip.getEntry("BundleConfig.pb") != null)
+            assertTrue(zip.getEntry("base/resources.pb") != null)
+            assertTrue(zip.getEntry("base/manifest/AndroidManifest.xml") != null)
+            assertTrue(zip.getEntry("base/dex/classes.dex") != null)
+            assertTrue(zip.getEntry("META-INF/MANIFEST.MF") != null)
+        }
+
+        // Verify JAR PKCS#7 signature entries on .aab
+        java.util.jar.JarFile(aabFile, true).use { jar ->
+            val entries = jar.entries().toList().filter { !it.isDirectory && !it.name.startsWith("META-INF/") }
+            assertTrue(entries.isNotEmpty())
+            entries.forEach { entry ->
+                jar.getInputStream(entry).use { it.readBytes() }
+                assertTrue("Expected code signer on AAB entry ${entry.name}", !entry.certificates.isNullOrEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun emulatorEngineParsesAllStarterTemplates() {
+        ProjectTemplate.entries.forEach { template ->
+            val files = TemplateProvider.generateFiles(template, template.defaultAppName, template.defaultPackage)
+                .map { (path, content) ->
+                    com.example.model.ProjectFile(
+                        relativePath = path,
+                        content = content,
+                        language = if (path.endsWith(".java")) com.example.model.FileLanguage.JAVA else com.example.model.FileLanguage.XML,
+                    )
+                }
+            val parsed = com.example.emulator.EmulatorEngine.parseProject(
+                appName = template.defaultAppName,
+                packageName = template.defaultPackage,
+                files = files,
+            )
+            assertTrue("Expected widgets parsed for ${template.name}", parsed.detectedWidgetsCount > 0)
+        }
+    }
 }

@@ -2,6 +2,7 @@ package com.example.ui.panels
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Archive
@@ -23,12 +25,17 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -52,18 +59,26 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.model.BuildDiagnostic
 import com.example.model.BuildResult
+import com.example.model.BuildVariant
 import com.example.model.DiagnosticSeverity
+import com.example.model.ReleaseSigningConfig
 import com.example.ui.theme.JetBrainsMonoFontFamily
 
 @Composable
 fun BuildPanel(
     isBuilding: Boolean,
+    selectedVariant: BuildVariant,
+    releaseSigningConfig: ReleaseSigningConfig,
     logs: List<String>,
     buildResult: BuildResult?,
+    onSelectVariant: (BuildVariant) -> Unit,
+    onTriggerBuild: (BuildVariant) -> Unit,
+    onOpenKeystoreManager: () -> Unit,
+    onOpenEmulator: () -> Unit,
     onDiagnosticClick: (BuildDiagnostic) -> Unit,
     onAskGeminiToFix: () -> Unit,
-    onExportApk: (String) -> Unit,
-    onShareApk: (String) -> Unit,
+    onExportArtifact: (String) -> Unit,
+    onShareArtifact: (String) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -109,7 +124,7 @@ fun BuildPanel(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 Icon(Icons.Default.Archive, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Text("APK Inspector")
+                                Text("Package Inspector")
                             }
                         },
                         modifier = Modifier.testTag("apk_inspector_tab"),
@@ -118,6 +133,55 @@ fun BuildPanel(
                 IconButton(onClick = onClose, modifier = Modifier.testTag("close_build_panel")) {
                     Icon(Icons.Default.Close, contentDescription = "Close build panel")
                 }
+            }
+
+            // Build Variant Selector + Keystore Status Strip
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                BuildVariant.entries.forEach { variant ->
+                    FilterChip(
+                        selected = selectedVariant == variant,
+                        onClick = { onSelectVariant(variant) },
+                        label = { Text(variant.shortLabel, style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.testTag("build_variant_${variant.name.lowercase()}"),
+                    )
+                }
+                AssistChip(
+                    onClick = onOpenKeystoreManager,
+                    label = {
+                        Text(
+                            text = if (releaseSigningConfig.isConfigured) {
+                                "Key: ${releaseSigningConfig.alias}"
+                            } else {
+                                "Keystore"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Key,
+                            contentDescription = null,
+                            tint = if (releaseSigningConfig.isConfigured) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(15.dp),
+                        )
+                    },
+                    modifier = Modifier.testTag("open_keystore_manager_chip"),
+                )
+                AssistChip(
+                    onClick = { onTriggerBuild(selectedVariant) },
+                    enabled = !isBuilding,
+                    label = { Text("Run ${selectedVariant.shortLabel}", style = MaterialTheme.typography.labelSmall) },
+                    leadingIcon = {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(15.dp))
+                    },
+                )
             }
 
             if (isBuilding) {
@@ -133,12 +197,13 @@ fun BuildPanel(
                     buildResult = buildResult,
                     onDiagnosticClick = onDiagnosticClick,
                     onAskGeminiToFix = onAskGeminiToFix,
-                    onExportApk = onExportApk,
-                    onShareApk = onShareApk,
+                    onExportArtifact = onExportArtifact,
+                    onShareArtifact = onShareArtifact,
+                    onOpenEmulator = onOpenEmulator,
                     modifier = Modifier.weight(1f),
                 )
             } else {
-                ApkInspectorTab(
+                ArtifactInspectorTab(
                     buildResult = buildResult,
                     modifier = Modifier.weight(1f),
                 )
@@ -154,8 +219,9 @@ private fun BuildConsoleTab(
     buildResult: BuildResult?,
     onDiagnosticClick: (BuildDiagnostic) -> Unit,
     onAskGeminiToFix: () -> Unit,
-    onExportApk: (String) -> Unit,
-    onShareApk: (String) -> Unit,
+    onExportArtifact: (String) -> Unit,
+    onShareArtifact: (String) -> Unit,
+    onOpenEmulator: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
@@ -185,9 +251,10 @@ private fun BuildConsoleTab(
                                 MaterialTheme.colorScheme.onErrorContainer
                             },
                         )
+                        val artifactNoun = if (buildResult.variant.isBundle) "AAB" else buildResult.variant.shortLabel
                         Text(
                             text = if (buildResult.success) {
-                                "APK Built (${formatBytes(buildResult.apkSizeBytes)}) in ${buildResult.durationMs}ms"
+                                "$artifactNoun Built (${formatBytes(buildResult.apkSizeBytes)}) in ${buildResult.durationMs}ms"
                             } else {
                                 "Build Failed (${buildResult.diagnostics.size} issue(s))"
                             },
@@ -202,9 +269,12 @@ private fun BuildConsoleTab(
                     }
 
                     if (buildResult.success && buildResult.apkPath != null) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
                             Button(
-                                onClick = { onExportApk(buildResult.apkPath) },
+                                onClick = { onExportArtifact(buildResult.apkPath) },
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = MaterialTheme.colorScheme.secondary,
                                     contentColor = MaterialTheme.colorScheme.onSecondary,
@@ -213,15 +283,23 @@ private fun BuildConsoleTab(
                             ) {
                                 Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("Save APK")
+                                Text(if (buildResult.variant.isBundle) "Save AAB" else "Save APK")
                             }
                             OutlinedButton(
-                                onClick = { onShareApk(buildResult.apkPath) },
+                                onClick = { onShareArtifact(buildResult.apkPath) },
                                 modifier = Modifier.testTag("share_apk_button"),
                             ) {
                                 Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(6.dp))
                                 Text("Share / Open")
+                            }
+                            OutlinedButton(
+                                onClick = onOpenEmulator,
+                                modifier = Modifier.testTag("preview_emulator_after_build"),
+                            ) {
+                                Icon(Icons.Default.PhoneAndroid, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Emulator")
                             }
                         }
                     } else if (!buildResult.success) {
@@ -231,7 +309,7 @@ private fun BuildConsoleTab(
                         ) {
                             Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(6.dp))
-                            Text("Ask Gemini to Fix Errors")
+                            Text("Ask AI to Fix Errors")
                         }
                     }
                 }
@@ -297,7 +375,7 @@ private fun BuildConsoleTab(
             if (logs.isEmpty()) {
                 item {
                     Text(
-                        text = "Tap Build APK in the toolbar to compile Java, generate resources.arsc, dex bytecode, and sign your APK offline.",
+                        text = "Choose Debug APK, Release APK, or Release AAB above and tap Build to compile Java, package binary/proto resources, dex bytecode, and sign offline.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -311,6 +389,7 @@ private fun BuildConsoleTab(
                         color = when {
                             logLine.startsWith("✔") -> MaterialTheme.colorScheme.secondary
                             logLine.startsWith("✖") -> MaterialTheme.colorScheme.error
+                            logLine.startsWith("⚠") -> MaterialTheme.colorScheme.tertiary
                             else -> MaterialTheme.colorScheme.onSurfaceVariant
                         },
                     )
@@ -321,7 +400,7 @@ private fun BuildConsoleTab(
 }
 
 @Composable
-private fun ApkInspectorTab(
+private fun ArtifactInspectorTab(
     buildResult: BuildResult?,
     modifier: Modifier = Modifier,
 ) {
@@ -333,7 +412,7 @@ private fun ApkInspectorTab(
             contentAlignment = Alignment.Center,
         ) {
             Text(
-                text = "Build an APK to inspect its internal DEX, binary manifest, resource table, and v1/v2/v3 signature entries.",
+                text = "Build an APK or AAB to inspect its DEX bytecode, binary/proto resources, SHA-256 digests, and cryptographic signature entries.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -353,34 +432,62 @@ private fun ApkInspectorTab(
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Row(
+                Column(
                     modifier = Modifier.padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Icon(
-                        Icons.Default.VerifiedUser,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.secondary,
-                    )
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Signed APK v1 / v2 / v3",
-                            style = MaterialTheme.typography.labelLarge,
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            Icons.Default.VerifiedUser,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
                         )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (buildResult.variant.isBundle) {
+                                    "Signed App Bundle (.aab) • JAR PKCS#7"
+                                } else {
+                                    "Signed ${buildResult.variant.label} • v1 / v2 / v3"
+                                },
+                                style = MaterialTheme.typography.labelLarge,
+                            )
+                            Text(
+                                text = buildResult.signerSubject.ifBlank { "DroidForge Signing Key" },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                         Text(
-                            text = buildResult.signerSubject.ifBlank { "DroidForge Local Debug Key" },
+                            text = formatBytes(buildResult.apkSizeBytes),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    if (buildResult.signerSha256.isNotBlank()) {
+                        Text(
+                            text = "Signer SHA-256: ${buildResult.signerSha256}",
+                            fontFamily = JetBrainsMonoFontFamily,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
-                    Text(
-                        text = formatBytes(buildResult.apkSizeBytes),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
+                    if (buildResult.artifactSha256.isNotBlank()) {
+                        Text(
+                            text = "Artifact SHA-256: ${buildResult.artifactSha256}",
+                            fontFamily = JetBrainsMonoFontFamily,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
         }

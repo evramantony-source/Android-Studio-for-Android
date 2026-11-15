@@ -6,17 +6,15 @@ import com.android.dx.command.dexer.Main as DxMain
 import com.example.model.ApkEntryInfo
 import com.example.model.BuildDiagnostic
 import com.example.model.BuildResult
+import com.example.model.BuildVariant
 import com.example.model.DiagnosticSeverity
+import com.example.model.ReleaseSigningConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.eclipse.jdt.internal.compiler.batch.Main as EcjMain
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
-import java.security.KeyStore
-import java.security.PrivateKey
-import java.security.cert.X509Certificate
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -28,17 +26,37 @@ class OfflineApkBuilder(
     suspend fun buildProject(
         projectDir: File,
         packageName: String,
+        variant: BuildVariant = BuildVariant.DEBUG_APK,
+        releaseSigning: ReleaseSigningConfig? = null,
         onProgress: (String) -> Unit = {},
     ): BuildResult = withContext(Dispatchers.IO) {
         val ctx = requireNotNull(context) { "Android Context is required for asset extraction" }
         val toolchainDir = File(ctx.filesDir, "toolchain").apply { mkdirs() }
         val stubsJar = ensureAssetExtracted(ctx, "android-stubs.jar", File(toolchainDir, "android-stubs.jar"))
-        val keystoreFile = ensureAssetExtracted(ctx, "debug_signing.p12", File(toolchainDir, "debug_signing.p12"))
+        val debugKeystoreFile = ensureAssetExtracted(ctx, "debug_signing.p12", File(toolchainDir, "debug_signing.p12"))
+
+        val activeSigning = if (variant.isRelease && releaseSigning?.isConfigured == true) {
+            releaseSigning
+        } else {
+            null
+        }
+
+        val keystoreFile = activeSigning?.keystorePath?.let { File(it) }?.takeIf { it.exists() }
+            ?: debugKeystoreFile
+        val storePassword = activeSigning?.storePassword ?: "droidforge"
+        val keyPassword = activeSigning?.keyPassword?.ifBlank { storePassword } ?: "droidforge"
+        val keyAlias = activeSigning?.alias.orEmpty()
+
         buildWithToolchain(
             projectDir = projectDir,
             packageName = packageName,
             stubsJar = stubsJar,
             keystoreFile = keystoreFile,
+            variant = variant,
+            storePassword = storePassword,
+            keyPassword = keyPassword,
+            keyAlias = keyAlias,
+            usedReleaseKey = activeSigning != null && keystoreFile != debugKeystoreFile,
             onProgress = onProgress,
         )
     }
@@ -48,6 +66,11 @@ class OfflineApkBuilder(
         packageName: String,
         stubsJar: File,
         keystoreFile: File,
+        variant: BuildVariant = BuildVariant.DEBUG_APK,
+        storePassword: String = "droidforge",
+        keyPassword: String = "droidforge",
+        keyAlias: String = "",
+        usedReleaseKey: Boolean = false,
         onProgress: (String) -> Unit = {},
     ): BuildResult {
         val startMs = System.currentTimeMillis()
@@ -65,9 +88,17 @@ class OfflineApkBuilder(
             val genDir = File(buildDir, "gen").apply { mkdirs() }
             val classesDir = File(buildDir, "classes").apply { mkdirs() }
             val dexDir = File(buildDir, "dex").apply { mkdirs() }
-            val apkOutDir = File(buildDir, "outputs/apk").apply { mkdirs() }
+            val outDir = File(
+                buildDir,
+                if (variant.isBundle) "outputs/bundle" else "outputs/apk",
+            ).apply { mkdirs() }
 
-            // 1. Compile XML resources -> R.java + resources.arsc
+            log("▶ Target variant: ${variant.label}")
+            if (variant.isRelease && !usedReleaseKey) {
+                log("⚠ No custom Release Keystore selected; using local fallback signing key. Create a Release Keystore in Keystore Manager for Play Store uploads.")
+            }
+
+            // 1. Compile XML resources -> R.java + resources.arsc (+ proto resources for AAB)
             log("[1/5] Compiling resources (strings.xml, colors.xml)...")
             val stringsFile = File(projectDir, "res/values/strings.xml")
             val colorsFile = File(projectDir, "res/values/colors.xml")
@@ -80,8 +111,7 @@ class OfflineApkBuilder(
             File(rFileDir, "R.java").writeText(compiledRes.rJavaSource)
             log("      Generated R.java (${compiledRes.stringCount} strings, ${compiledRes.colorCount} colors) & resources.arsc (${compiledRes.resourcesArsc.size} bytes)")
 
-            // 2. Encode AndroidManifest.xml -> binary AXML
-            log("[2/5] Encoding binary AndroidManifest.xml (AXML)...")
+            // 2. Encode AndroidManifest.xml -> binary AXML (or proto XmlNode for AAB)
             val manifestFile = File(projectDir, "AndroidManifest.xml")
             if (!manifestFile.exists()) {
                 diagnostics.add(
@@ -89,16 +119,34 @@ class OfflineApkBuilder(
                 )
                 return BuildResult(
                     success = false,
+                    variant = variant,
                     durationMs = System.currentTimeMillis() - startMs,
                     logs = logs,
                     diagnostics = diagnostics,
                 )
             }
-            val manifestBytes = BinaryXmlEncoder.encodeManifest(
-                xmlText = manifestFile.readText(),
-                resourceIds = compiledRes.resourceIds,
-            )
-            log("      Binary AXML encoded (${manifestBytes.size} bytes)")
+            val rawManifestXml = manifestFile.readText()
+            val preparedManifestXml = if (variant.isRelease) {
+                stripDebuggableFlag(rawManifestXml)
+            } else {
+                rawManifestXml
+            }
+
+            val manifestBytes = if (variant.isBundle) {
+                log("[2/5] Encoding Proto AndroidManifest.xml & resources.pb for AAB...")
+                ProtobufWriter.encodeProtoXml(
+                    xmlText = preparedManifestXml,
+                    androidAttrIds = BinaryXmlEncoder.ANDROID_ATTR_IDS,
+                    resourceIds = compiledRes.resourceIds,
+                )
+            } else {
+                log("[2/5] Encoding binary AndroidManifest.xml (AXML)...")
+                BinaryXmlEncoder.encodeManifest(
+                    xmlText = preparedManifestXml,
+                    resourceIds = compiledRes.resourceIds,
+                )
+            }
+            log("      Encoded manifest (${manifestBytes.size} bytes)")
 
             // 3. Compile Java sources via Eclipse JDT (ecj)
             val javaFiles = collectFilesWithExt(File(projectDir, "src"), ".java") +
@@ -109,12 +157,14 @@ class OfflineApkBuilder(
                 )
                 return BuildResult(
                     success = false,
+                    variant = variant,
                     durationMs = System.currentTimeMillis() - startMs,
                     logs = logs,
                     diagnostics = diagnostics,
                 )
             }
-            log("[3/5] Compiling ${javaFiles.size} Java file(s) with Eclipse JDT (Java 8)...")
+            val modeDesc = if (variant.isRelease) "Release (stripped debug symbols)" else "Debug"
+            log("[3/5] Compiling ${javaFiles.size} Java file(s) with Eclipse JDT (Java 8, $modeDesc)...")
 
             val ecjOut = StringWriter()
             val ecjErr = StringWriter()
@@ -123,6 +173,9 @@ class OfflineApkBuilder(
                 add("-proc:none")
                 add("-encoding")
                 add("UTF-8")
+                if (variant.isRelease) {
+                    add("-g:none")
+                }
                 add("-bootclasspath")
                 add(stubsJar.absolutePath)
                 add("-classpath")
@@ -150,6 +203,7 @@ class OfflineApkBuilder(
                 log("✖ Java compilation failed with ${diagnostics.count { it.severity == DiagnosticSeverity.ERROR }} error(s).")
                 return BuildResult(
                     success = false,
+                    variant = variant,
                     durationMs = System.currentTimeMillis() - startMs,
                     logs = logs,
                     diagnostics = diagnostics,
@@ -166,6 +220,9 @@ class OfflineApkBuilder(
                 outName = dexFile.absolutePath
                 fileNames = arrayOf(classesDir.absolutePath)
                 minSdkVersion = 24
+                if (variant.isRelease) {
+                    optimize = true
+                }
                 makeOptionsObjects()
             }
             val dxResult = DxMain.run(dxArgs)
@@ -173,6 +230,7 @@ class OfflineApkBuilder(
                 log("✖ DEX conversion failed (exit code $dxResult).")
                 return BuildResult(
                     success = false,
+                    variant = variant,
                     compiledClassCount = classFiles.size,
                     durationMs = System.currentTimeMillis() - startMs,
                     logs = logs,
@@ -181,43 +239,82 @@ class OfflineApkBuilder(
             }
             log("      Generated classes.dex (${dexFile.length()} bytes)")
 
-            // 5. Package & Sign APK (v1 + v2 + v3)
-            log("[5/5] Packaging & signing APK (Scheme v1/v2/v3)...")
-            val unsignedApk = File(buildDir, "app-unsigned.apk")
-            val signedApk = File(apkOutDir, "app-debug.apk")
-            packageUnsignedApk(
-                outputApk = unsignedApk,
-                resourcesArsc = compiledRes.resourcesArsc,
-                manifestAxml = manifestBytes,
-                classesDex = dexFile.readBytes(),
-                assetsDir = File(projectDir, "assets"),
+            // 5. Package & Sign (APK or AAB)
+            val loadedSigner = KeystoreManager.inspectKeystore(
+                keystoreFile = keystoreFile,
+                storePassword = storePassword,
+                preferredAlias = keyAlias,
+                keyPassword = keyPassword,
             )
 
-            val signerConfig = loadSignerConfig(keystoreFile)
-            ApkSigner.Builder(listOf(signerConfig))
-                .setInputApk(unsignedApk)
-                .setOutputApk(signedApk)
-                .setV1SigningEnabled(true)
-                .setV2SigningEnabled(true)
-                .setV3SigningEnabled(true)
-                .setMinSdkVersion(24)
-                .build()
-                .sign()
+            val finalArtifact = if (variant.isBundle) {
+                log("[5/5] Packaging & signing Android App Bundle (.aab)...")
+                val unsignedAab = File(buildDir, "app-unsigned.aab")
+                val signedAab = File(outDir, "app-release.aab")
+                val bundleConfigBytes = ProtobufWriter.encodeBundleConfig()
+                val resourcesPbBytes = ProtobufWriter.encodeResourceTable(
+                    packageName = packageName,
+                    strings = compiledRes.strings,
+                    colors = compiledRes.colors,
+                )
+                packageUnsignedAab(
+                    outputAab = unsignedAab,
+                    bundleConfigPb = bundleConfigBytes,
+                    resourcesPb = resourcesPbBytes,
+                    manifestPb = manifestBytes,
+                    classesDex = dexFile.readBytes(),
+                    assetsDir = File(projectDir, "assets"),
+                )
+                KeystoreManager.signJarArchive(
+                    unsignedZip = unsignedAab,
+                    signedOutput = signedAab,
+                    signer = loadedSigner,
+                )
+                signedAab
+            } else {
+                val fileName = if (variant.isRelease) "app-release.apk" else "app-debug.apk"
+                log("[5/5] Packaging & signing ${variant.shortLabel} (Scheme v1/v2/v3)...")
+                val unsignedApk = File(buildDir, "app-unsigned.apk")
+                val signedApk = File(outDir, fileName)
+                packageUnsignedApk(
+                    outputApk = unsignedApk,
+                    resourcesArsc = compiledRes.resourcesArsc,
+                    manifestAxml = manifestBytes,
+                    classesDex = dexFile.readBytes(),
+                    assetsDir = File(projectDir, "assets"),
+                )
 
-            val entries = inspectApkEntries(signedApk)
+                val signerConfig = loadedSigner.toApkSignerConfig()
+                ApkSigner.Builder(listOf(signerConfig))
+                    .setInputApk(unsignedApk)
+                    .setOutputApk(signedApk)
+                    .setV1SigningEnabled(true)
+                    .setV2SigningEnabled(true)
+                    .setV3SigningEnabled(true)
+                    .setMinSdkVersion(24)
+                    .build()
+                    .sign()
+                signedApk
+            }
+
+            val entries = inspectZipEntries(finalArtifact)
+            val artifactHash = KeystoreManager.sha256Hex(finalArtifact)
             val elapsed = System.currentTimeMillis() - startMs
-            log("✔ Build succeeded in ${elapsed}ms -> ${signedApk.name} (${signedApk.length()} bytes)")
+            log("✔ ${variant.shortLabel} succeeded in ${elapsed}ms -> ${finalArtifact.name} (${finalArtifact.length()} bytes)")
 
             BuildResult(
                 success = true,
-                apkPath = signedApk.absolutePath,
-                apkSizeBytes = signedApk.length(),
+                variant = variant,
+                apkPath = finalArtifact.absolutePath,
+                apkSizeBytes = finalArtifact.length(),
                 compiledClassCount = classFiles.size,
                 durationMs = elapsed,
                 logs = logs,
                 diagnostics = diagnostics,
                 apkEntries = entries,
-                signerSubject = signerConfig.certificates.firstOrNull()?.subjectX500Principal?.name.orEmpty(),
+                signerSubject = loadedSigner.subject,
+                signerSha256 = loadedSigner.sha256Fingerprint,
+                artifactSha256 = artifactHash,
             )
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException) throw t
@@ -227,9 +324,23 @@ class OfflineApkBuilder(
             )
             BuildResult(
                 success = false,
+                variant = variant,
                 durationMs = System.currentTimeMillis() - startMs,
                 logs = logs,
                 diagnostics = diagnostics,
+            )
+        }
+    }
+
+    private fun stripDebuggableFlag(manifestXml: String): String {
+        val cleaned = manifestXml
+            .replace(Regex("""\s+android:debuggable\s*=\s*"true""""), "")
+        return if (cleaned.contains("android:debuggable")) {
+            cleaned
+        } else {
+            cleaned.replaceFirst(
+                "<application",
+                "<application android:debuggable=\"false\"",
             )
         }
     }
@@ -242,7 +353,6 @@ class OfflineApkBuilder(
         assetsDir: File,
     ) {
         ZipOutputStream(outputApk.outputStream().buffered()).use { zos ->
-            // Write resources.arsc FIRST as STORED; local header is 30 + 14 = 44 bytes (4-byte aligned).
             val arscCrc = CRC32().apply { update(resourcesArsc) }.value
             val arscEntry = ZipEntry("resources.arsc").apply {
                 method = ZipEntry.STORED
@@ -273,17 +383,44 @@ class OfflineApkBuilder(
         }
     }
 
-    private fun loadSignerConfig(keystoreFile: File): ApkSigner.SignerConfig {
-        val ks = KeyStore.getInstance("PKCS12")
-        keystoreFile.inputStream().use { ks.load(it, "droidforge".toCharArray()) }
-        val alias = ks.aliases().nextElement()
-        val key = ks.getKey(alias, "droidforge".toCharArray()) as PrivateKey
-        val chain = ks.getCertificateChain(alias).map { it as X509Certificate }
-        return ApkSigner.SignerConfig.Builder("DROIDFORGE", key, chain).build()
+    private fun packageUnsignedAab(
+        outputAab: File,
+        bundleConfigPb: ByteArray,
+        resourcesPb: ByteArray,
+        manifestPb: ByteArray,
+        classesDex: ByteArray,
+        assetsDir: File,
+    ) {
+        ZipOutputStream(outputAab.outputStream().buffered()).use { zos ->
+            zos.putNextEntry(ZipEntry("BundleConfig.pb"))
+            zos.write(bundleConfigPb)
+            zos.closeEntry()
+
+            zos.putNextEntry(ZipEntry("base/manifest/AndroidManifest.xml"))
+            zos.write(manifestPb)
+            zos.closeEntry()
+
+            zos.putNextEntry(ZipEntry("base/resources.pb"))
+            zos.write(resourcesPb)
+            zos.closeEntry()
+
+            zos.putNextEntry(ZipEntry("base/dex/classes.dex"))
+            zos.write(classesDex)
+            zos.closeEntry()
+
+            if (assetsDir.exists() && assetsDir.isDirectory) {
+                assetsDir.walkTopDown().filter { it.isFile }.forEach { file ->
+                    val rel = file.relativeTo(assetsDir).invariantSeparatorsPath
+                    zos.putNextEntry(ZipEntry("base/assets/$rel"))
+                    file.inputStream().use { it.copyTo(zos) }
+                    zos.closeEntry()
+                }
+            }
+        }
     }
 
-    private fun inspectApkEntries(apkFile: File): List<ApkEntryInfo> {
-        return ZipFile(apkFile).use { zip ->
+    private fun inspectZipEntries(zipFile: File): List<ApkEntryInfo> {
+        return ZipFile(zipFile).use { zip ->
             zip.entries().asSequence().map { entry ->
                 ApkEntryInfo(
                     name = entry.name,
@@ -339,7 +476,6 @@ class OfflineApkBuilder(
                         !candidate.startsWith("----------") &&
                         !headerRegex.containsMatchIn(candidate)
                     ) {
-                        // Prefer the final descriptive line after the caret marker
                         message = candidate
                     }
                     if (candidate.startsWith("----------")) break
