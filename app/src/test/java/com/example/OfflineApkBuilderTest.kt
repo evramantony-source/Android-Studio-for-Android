@@ -88,6 +88,172 @@ class OfflineApkBuilderTest {
     }
 
     @Test
+    fun verifiesBuiltApksWithAndroidSdkBuildTools() {
+        val sdkRoot = System.getenv("ANDROID_SDK_ROOT") ?: return
+        val buildToolsDir = File(sdkRoot, "build-tools").listFiles()
+            ?.filter { it.isDirectory }
+            ?.maxByOrNull { it.name } ?: return
+        val aapt2 = File(buildToolsDir, "aapt2").takeIf { it.exists() } ?: return
+        val zipalign = File(buildToolsDir, "zipalign").takeIf { it.exists() } ?: return
+        val apksigner = File(buildToolsDir, "apksigner").takeIf { it.exists() } ?: return
+
+        val debugProjectDir = tempFolder.newFolder("sdk_verify_debug")
+        val releaseProjectDir = tempFolder.newFolder("sdk_verify_release")
+        val template = ProjectTemplate.COUNTER_APP
+        val templateFiles = TemplateProvider.generateFiles(template, template.defaultAppName, template.defaultPackage)
+        listOf(debugProjectDir, releaseProjectDir).forEach { dir ->
+            templateFiles.forEach { (relPath, content) ->
+                val target = File(dir, relPath)
+                target.parentFile?.mkdirs()
+                target.writeText(content)
+            }
+        }
+
+        val builder = OfflineApkBuilder()
+        val debugResult = builder.buildWithToolchain(
+            projectDir = debugProjectDir,
+            packageName = template.defaultPackage,
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = resolveAsset("debug_signing.p12"),
+            variant = com.example.model.BuildVariant.DEBUG_APK,
+        )
+        assertTrue(debugResult.success)
+        val debugApk = File(debugResult.apkPath!!)
+
+        fun runTool(vararg cmd: String): Pair<Int, String> {
+            val proc = ProcessBuilder(*cmd).redirectErrorStream(true).start()
+            val out = proc.inputStream.bufferedReader().readText()
+            val code = proc.waitFor()
+            return code to out
+        }
+
+        val (badgingCode, badgingOut) = runTool(aapt2.absolutePath, "dump", "badging", debugApk.absolutePath)
+        val (xmlCode, xmlOut) = runTool(aapt2.absolutePath, "dump", "xmltree", debugApk.absolutePath, "--file", "AndroidManifest.xml")
+        val (resCode, resOut) = runTool(aapt2.absolutePath, "dump", "resources", debugApk.absolutePath)
+        val (alignCode, alignOut) = runTool(zipalign.absolutePath, "-c", "-v", "4", debugApk.absolutePath)
+        val (signCode, signOut) = runTool(apksigner.absolutePath, "verify", "--verbose", "--print-certs", debugApk.absolutePath)
+
+        val releaseResult = builder.buildWithToolchain(
+            projectDir = releaseProjectDir,
+            packageName = template.defaultPackage,
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = resolveAsset("debug_signing.p12"),
+            variant = com.example.model.BuildVariant.RELEASE_APK,
+        )
+        assertTrue(releaseResult.success)
+        val releaseApk = File(releaseResult.apkPath!!)
+        val (relBadgingCode, relBadgingOut) = runTool(aapt2.absolutePath, "dump", "badging", releaseApk.absolutePath)
+        val (relXmlCode, relXmlOut) = runTool(aapt2.absolutePath, "dump", "xmltree", releaseApk.absolutePath, "--file", "AndroidManifest.xml")
+        val (relAlignCode, relAlignOut) = runTool(zipalign.absolutePath, "-c", "-v", "4", releaseApk.absolutePath)
+        val (relSignCode, relSignOut) = runTool(apksigner.absolutePath, "verify", "--verbose", "--min-sdk-version", "24", releaseApk.absolutePath)
+
+        val report = buildString {
+            appendLine("=== DEBUG BADGING ($badgingCode) ===\n$badgingOut")
+            appendLine("=== DEBUG XMLTREE ($xmlCode) ===\n$xmlOut")
+            appendLine("=== DEBUG RESOURCES ($resCode) ===\n$resOut")
+            appendLine("=== DEBUG ZIPALIGN ($alignCode) ===\n$alignOut")
+            appendLine("=== DEBUG APKSIGNER ($signCode) ===\n$signOut")
+            appendLine("=== RELEASE BADGING ($relBadgingCode) ===\n$relBadgingOut")
+            appendLine("=== RELEASE XMLTREE ($relXmlCode) ===\n$relXmlOut")
+            appendLine("=== RELEASE ZIPALIGN ($relAlignCode) ===\n$relAlignOut")
+            appendLine("=== RELEASE APKSIGNER ($relSignCode) ===\n$relSignOut")
+        }
+        assertTrue(
+            report,
+            badgingCode == 0 && xmlCode == 0 && resCode == 0 && alignCode == 0 && signCode == 0 &&
+                relBadgingCode == 0 && relXmlCode == 0 && relAlignCode == 0 && relSignCode == 0,
+        )
+        assertTrue("Expected Theme.Material.Light.DarkActionBar (0x01030238) in xmltree:\n$xmlOut", xmlOut.contains("0x01030238"))
+        assertTrue("Expected debuggable(0x0101000f)=false in release xmltree:\n$relXmlOut", relXmlOut.contains("debuggable(0x0101000f)=false"))
+    }
+
+    @Test
+    fun normalizesComplexManifestAttributesAndEnumsForSdkParsing() {
+        val projectDir = tempFolder.newFolder("complex_manifest_project")
+        val files = TemplateProvider.generateFiles(
+            template = ProjectTemplate.BLANK_ACTIVITY,
+            appName = "2048",
+            packageName = "com.example.game2048",
+        ).toMutableMap()
+        files["AndroidManifest.xml"] = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+                package="com.example.game2048"
+                android:versionCode="2"
+                android:versionName="2"
+                android:installLocation="auto">
+                <uses-permission android:name="android.permission.INTERNET" />
+                <application
+                    android:allowBackup="true"
+                    android:icon="@mipmap/ic_launcher"
+                    android:roundIcon="@mipmap/ic_launcher_round"
+                    android:label="2048"
+                    android:largeHeap="true"
+                    android:usesCleartextTraffic="true"
+                    android:theme="@style/AppTheme">
+                    <activity
+                        android:name=".MainActivity"
+                        android:exported="true"
+                        android:launchMode="singleTop"
+                        android:screenOrientation="portrait"
+                        android:windowSoftInputMode="adjustResize"
+                        android:configChanges="orientation|screenSize|keyboardHidden">
+                        <intent-filter>
+                            <action android:name="android.intent.action.MAIN" />
+                            <category android:name="android.intent.category.LAUNCHER" />
+                        </intent-filter>
+                    </activity>
+                </application>
+            </manifest>
+        """.trimIndent()
+
+        files.forEach { (relPath, content) ->
+            val target = File(projectDir, relPath)
+            target.parentFile?.mkdirs()
+            target.writeText(content)
+        }
+
+        val result = OfflineApkBuilder().buildWithToolchain(
+            projectDir = projectDir,
+            packageName = "com.example.game2048",
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = resolveAsset("debug_signing.p12"),
+            variant = com.example.model.BuildVariant.RELEASE_APK,
+        )
+        assertTrue("Expected build to succeed cleanly, logs=${result.logs}", result.success)
+        val apkFile = File(result.apkPath!!)
+
+        val verification = ApkVerifier.Builder(apkFile)
+            .setMinCheckedPlatformVersion(24)
+            .build()
+            .verify()
+        assertTrue("Signature failed: ${verification.errors}", verification.isVerified)
+
+        val sdkRoot = System.getenv("ANDROID_SDK_ROOT") ?: return
+        val buildToolsDir = File(sdkRoot, "build-tools").listFiles()
+            ?.filter { it.isDirectory }
+            ?.maxByOrNull { it.name } ?: return
+        val aapt2 = File(buildToolsDir, "aapt2").takeIf { it.exists() } ?: return
+
+        val badgingProc = ProcessBuilder(aapt2.absolutePath, "dump", "badging", apkFile.absolutePath)
+            .redirectErrorStream(true).start()
+        val badgingOut = badgingProc.inputStream.bufferedReader().readText()
+        assertEquals("aapt2 badging failed:\n$badgingOut", 0, badgingProc.waitFor())
+        assertTrue("Expected minSdkVersion 24 in:\n$badgingOut", badgingOut.contains("minSdkVersion:'24'"))
+        assertTrue("Expected targetSdkVersion 35 in:\n$badgingOut", badgingOut.contains("targetSdkVersion:'35'"))
+        assertTrue("Expected numeric app label '2048' preserved in:\n$badgingOut", badgingOut.contains("application-label:'2048'"))
+
+        val xmlProc = ProcessBuilder(aapt2.absolutePath, "dump", "xmltree", apkFile.absolutePath, "--file", "AndroidManifest.xml")
+            .redirectErrorStream(true).start()
+        val xmlOut = xmlProc.inputStream.bufferedReader().readText()
+        assertEquals("aapt2 xmltree failed:\n$xmlOut", 0, xmlProc.waitFor())
+        assertTrue("Expected screenOrientation(0x0101001e)=1 in:\n$xmlOut", xmlOut.contains("screenOrientation(0x0101001e)=1"))
+        assertTrue("Expected launchMode(0x0101001d)=1 in:\n$xmlOut", xmlOut.contains("launchMode(0x0101001d)=1"))
+        assertTrue("Expected configChanges(0x0101001f)=0x000004a0 in:\n$xmlOut", xmlOut.contains("configChanges(0x0101001f)=0x000004a0"))
+        assertTrue("Expected windowSoftInputMode(0x0101022b)=0x00000010 in:\n$xmlOut", xmlOut.contains("windowSoftInputMode(0x0101022b)=0x00000010"))
+    }
+
+    @Test
     fun reportsLineDiagnosticOnJavaSyntaxError() {
         val projectDir = tempFolder.newFolder("broken_project")
         val files = TemplateProvider.generateFiles(

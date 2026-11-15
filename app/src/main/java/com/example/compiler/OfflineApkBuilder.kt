@@ -14,11 +14,20 @@ import kotlinx.coroutines.withContext
 import org.eclipse.jdt.internal.compiler.batch.Main as EcjMain
 import java.io.File
 import java.io.PrintWriter
+import java.io.StringReader
 import java.io.StringWriter
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
+import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.transform.OutputKeys
+import javax.xml.transform.TransformerFactory
+import javax.xml.transform.dom.DOMSource
+import javax.xml.transform.stream.StreamResult
+import org.w3c.dom.Element
+import org.w3c.dom.Node
+import org.xml.sax.InputSource
 
 class OfflineApkBuilder(
     private val context: Context? = null,
@@ -126,11 +135,30 @@ class OfflineApkBuilder(
                 )
             }
             val rawManifestXml = manifestFile.readText()
-            val preparedManifestXml = if (variant.isRelease) {
-                stripDebuggableFlag(rawManifestXml)
-            } else {
-                rawManifestXml
+            val manifestPrep = prepareManifestXml(
+                rawManifestXml = rawManifestXml,
+                packageName = packageName,
+                isRelease = variant.isRelease,
+                resourceIds = compiledRes.resourceIds,
+            )
+            manifestPrep.warnings.forEach { log("⚠ $it") }
+            if (manifestPrep.errors.isNotEmpty()) {
+                manifestPrep.errors.forEach { msg ->
+                    log("✖ AndroidManifest.xml: $msg")
+                    diagnostics.add(
+                        BuildDiagnostic("AndroidManifest.xml", 1, 1, DiagnosticSeverity.ERROR, msg),
+                    )
+                }
+                return BuildResult(
+                    success = false,
+                    variant = variant,
+                    durationMs = System.currentTimeMillis() - startMs,
+                    logs = logs,
+                    diagnostics = diagnostics,
+                )
             }
+            val preparedManifestXml = manifestPrep.xml
+            val manifestMinSdk = manifestPrep.minSdkVersion
 
             val manifestBytes = if (variant.isBundle) {
                 log("[2/5] Encoding Proto AndroidManifest.xml & resources.pb for AAB...")
@@ -146,7 +174,7 @@ class OfflineApkBuilder(
                     resourceIds = compiledRes.resourceIds,
                 )
             }
-            log("      Encoded manifest (${manifestBytes.size} bytes)")
+            log("      Encoded manifest (${manifestBytes.size} bytes, minSdk=$manifestMinSdk)")
 
             // 3. Compile Java sources via Eclipse JDT (ecj)
             val javaFiles = collectFilesWithExt(File(projectDir, "src"), ".java") +
@@ -219,7 +247,7 @@ class OfflineApkBuilder(
             val dxArgs = DxMain.Arguments().apply {
                 outName = dexFile.absolutePath
                 fileNames = arrayOf(classesDir.absolutePath)
-                minSdkVersion = 24
+                minSdkVersion = manifestMinSdk
                 if (variant.isRelease) {
                     optimize = true
                 }
@@ -291,7 +319,7 @@ class OfflineApkBuilder(
                     .setV1SigningEnabled(true)
                     .setV2SigningEnabled(true)
                     .setV3SigningEnabled(true)
-                    .setMinSdkVersion(24)
+                    .setMinSdkVersion(manifestMinSdk)
                     .build()
                     .sign()
                 signedApk
@@ -332,9 +360,161 @@ class OfflineApkBuilder(
         }
     }
 
-    private fun stripDebuggableFlag(manifestXml: String): String {
+    private data class ManifestPreparationResult(
+        val xml: String,
+        val minSdkVersion: Int,
+        val warnings: List<String>,
+        val errors: List<String>,
+    )
+
+    private fun prepareManifestXml(
+        rawManifestXml: String,
+        packageName: String,
+        isRelease: Boolean,
+        resourceIds: Map<String, Int>,
+    ): ManifestPreparationResult {
+        val warnings = mutableListOf<String>()
+        val errors = mutableListOf<String>()
+        val androidNs = "http://schemas.android.com/apk/res/android"
+        var parsedMinSdk = 24
+
+        val serialized = runCatching {
+            val factory = DocumentBuilderFactory.newInstance().apply {
+                isNamespaceAware = true
+            }
+            val doc = factory.newDocumentBuilder().parse(InputSource(StringReader(rawManifestXml.trim())))
+            val manifestEl = doc.documentElement
+
+            if (manifestEl.getAttribute("package").isBlank()) {
+                manifestEl.setAttribute("package", packageName)
+            }
+            if (manifestEl.getAttributeNS(androidNs, "versionCode").isBlank()) {
+                manifestEl.setAttributeNS(androidNs, "android:versionCode", "1")
+            }
+            if (manifestEl.getAttributeNS(androidNs, "versionName").isBlank()) {
+                manifestEl.setAttributeNS(androidNs, "android:versionName", "1.0")
+            }
+
+            // Ensure <uses-sdk> exists so Android 14+ never rejects targetSdk=1
+            val usesSdkNodes = manifestEl.getElementsByTagName("uses-sdk")
+            if (usesSdkNodes.length == 0) {
+                val usesSdk = doc.createElement("uses-sdk")
+                usesSdk.setAttributeNS(androidNs, "android:minSdkVersion", "24")
+                usesSdk.setAttributeNS(androidNs, "android:targetSdkVersion", "35")
+                manifestEl.insertBefore(usesSdk, manifestEl.firstChild)
+                warnings.add("Injected <uses-sdk minSdkVersion=24 targetSdkVersion=35> for Android compatibility.")
+            } else {
+                val el = usesSdkNodes.item(0) as? Element
+                if (el != null) {
+                    val minStr = el.getAttributeNS(androidNs, "minSdkVersion")
+                    parsedMinSdk = minStr.toIntOrNull()?.coerceAtLeast(21) ?: 24
+                    if (minStr.isBlank()) {
+                        el.setAttributeNS(androidNs, "android:minSdkVersion", "24")
+                    }
+                    if (el.getAttributeNS(androidNs, "targetSdkVersion").isBlank()) {
+                        el.setAttributeNS(androidNs, "android:targetSdkVersion", "35")
+                    }
+                }
+            }
+
+            val optionalRefAttrs = setOf(
+                "icon",
+                "roundIcon",
+                "dataExtractionRules",
+                "fullBackupContent",
+                "networkSecurityConfig",
+                "localeConfig",
+            )
+
+            fun visit(el: Element) {
+                if (el.tagName == "application") {
+                    if (isRelease) {
+                        el.setAttributeNS(androidNs, "android:debuggable", "false")
+                    }
+                    val themeAttr = el.getAttributeNS(androidNs, "theme")
+                    if (themeAttr.startsWith("@style/")) {
+                        val key = themeAttr.removePrefix("@")
+                        if (!resourceIds.containsKey(key)) {
+                            el.setAttributeNS(
+                                androidNs,
+                                "android:theme",
+                                "@android:style/Theme.Material.Light.DarkActionBar",
+                            )
+                            warnings.add("Replaced uncompiled manifest theme '$themeAttr' with @android:style/Theme.Material.Light.DarkActionBar.")
+                        }
+                    }
+                }
+
+                val attrsToRemove = mutableListOf<Pair<String?, String>>()
+                val attrsToUpdate = mutableListOf<Triple<String, String, String>>()
+                val named = el.attributes
+                for (i in 0 until named.length) {
+                    val node = named.item(i)
+                    val ns = node.namespaceURI?.takeIf { it.isNotEmpty() }
+                    val local = node.localName ?: node.nodeName.substringAfter(':')
+                    val value = node.nodeValue.orEmpty()
+                    if (ns == androidNs && value.startsWith("@") && !value.startsWith("@android:")) {
+                        val key = value.removePrefix("@")
+                        if (!resourceIds.containsKey(key)) {
+                            if (local in optionalRefAttrs) {
+                                attrsToRemove.add(ns to local)
+                                warnings.add("Removed uncompiled reference android:$local=\"$value\" (not supported without res/ XML or image compilation).")
+                            } else if (value.startsWith("@style/")) {
+                                attrsToUpdate.add(
+                                    Triple(
+                                        "android:$local",
+                                        "@android:style/Theme.Material.Light.DarkActionBar",
+                                        value,
+                                    ),
+                                )
+                            } else {
+                                errors.add("Unresolved resource reference '$value' in android:$local.")
+                            }
+                        }
+                    }
+                }
+                attrsToRemove.forEach { (ns, local) ->
+                    el.removeAttributeNS(ns, local)
+                }
+                attrsToUpdate.forEach { (qName, replacement, original) ->
+                    el.setAttributeNS(androidNs, qName, replacement)
+                    warnings.add("Replaced uncompiled style $qName=\"$original\" with Material Light DarkActionBar.")
+                }
+
+                val children = el.childNodes
+                for (i in 0 until children.length) {
+                    val child = children.item(i)
+                    if (child.nodeType == Node.ELEMENT_NODE) {
+                        visit(child as Element)
+                    }
+                }
+            }
+
+            visit(manifestEl)
+
+            val sw = StringWriter()
+            val transformer = TransformerFactory.newInstance().newTransformer().apply {
+                setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no")
+                setOutputProperty(OutputKeys.ENCODING, "UTF-8")
+            }
+            transformer.transform(DOMSource(doc), StreamResult(sw))
+            sw.toString()
+        }.getOrElse { err ->
+            errors.add("Invalid XML in AndroidManifest.xml: ${err.localizedMessage ?: "syntax error"}")
+            if (isRelease) stripDebuggableFlagFallback(rawManifestXml) else rawManifestXml
+        }
+
+        return ManifestPreparationResult(
+            xml = serialized,
+            minSdkVersion = parsedMinSdk,
+            warnings = warnings,
+            errors = errors,
+        )
+    }
+
+    private fun stripDebuggableFlagFallback(manifestXml: String): String {
         val cleaned = manifestXml
-            .replace(Regex("""\s+android:debuggable\s*=\s*"true""""), "")
+            .replace(Regex("""\s+android:debuggable\s*=\s*["']true["']"""), "")
         return if (cleaned.contains("android:debuggable")) {
             cleaned
         } else {
@@ -433,7 +613,11 @@ class OfflineApkBuilder(
     }
 
     private fun ensureAssetExtracted(ctx: Context, assetName: String, target: File): File {
-        if (!target.exists() || target.length() == 0L) {
+        val expectedLength = runCatching { ctx.assets.openFd(assetName).use { it.length } }.getOrNull()
+        val needsCopy = !target.exists() ||
+            target.length() == 0L ||
+            (expectedLength != null && expectedLength > 0L && target.length() != expectedLength)
+        if (needsCopy) {
             ctx.assets.open(assetName).use { input ->
                 target.outputStream().use { output ->
                     input.copyTo(output)

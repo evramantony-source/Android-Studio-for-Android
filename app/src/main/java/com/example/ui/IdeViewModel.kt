@@ -435,10 +435,19 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
             val saved = withContext(Dispatchers.IO) {
                 runCatching {
                     val src = File(apkPath)
-                    getApplication<Application>().contentResolver.openOutputStream(destinationUri)?.use { out ->
-                        src.inputStream().use { input -> input.copyTo(out) }
+                    if (!src.exists() || src.length() == 0L) return@runCatching false
+                    val resolver = getApplication<Application>().contentResolver
+                    val out = runCatching { resolver.openOutputStream(destinationUri, "wt") }.getOrNull()
+                        ?: resolver.openOutputStream(destinationUri)
+                        ?: return@runCatching false
+                    val copiedBytes = out.use { stream ->
+                        src.inputStream().use { input ->
+                            val count = input.copyTo(stream)
+                            stream.flush()
+                            count
+                        }
                     }
-                    true
+                    copiedBytes == src.length()
                 }.getOrDefault(false)
             }
             _statusBanner.value = if (saved) {
@@ -1036,7 +1045,12 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
             .replace(Regex("[^a-z0-9._]"), "")
             .split('.')
             .filter { it.isNotBlank() }
-            .map { seg -> if (seg.first().isDigit()) "a$seg" else seg }
+            .mapNotNull { seg ->
+                val trimmed = seg.trimStart('_')
+                if (trimmed.isEmpty()) null
+                else if (!trimmed.first().isLetter()) "a$trimmed"
+                else trimmed
+            }
             .joinToString(".")
         return if (cleaned.contains('.')) cleaned else "com.example.${cleaned.ifBlank { "app" }}"
     }

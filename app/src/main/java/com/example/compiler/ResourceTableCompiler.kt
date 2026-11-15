@@ -84,24 +84,24 @@ object ResourceTableCompiler {
 
     private fun parseStrings(xml: String?): List<StringEntry> {
         if (xml.isNullOrBlank()) return emptyList()
-        val list = mutableListOf<StringEntry>()
+        val byName = linkedMapOf<String, StringEntry>()
         val doc = DocumentBuilderFactory.newInstance().newDocumentBuilder()
             .parse(InputSource(StringReader(xml.trim())))
         val nodes = doc.getElementsByTagName("string")
         for (i in 0 until nodes.length) {
             val el = nodes.item(i) as? Element ?: continue
             val name = el.getAttribute("name").trim()
-            val text = el.textContent.orEmpty()
+            val text = unescapeAndroidString(el.textContent.orEmpty())
             if (name.isNotEmpty()) {
-                list.add(StringEntry(name, text))
+                byName[name] = StringEntry(name, text)
             }
         }
-        return list
+        return byName.values.toList()
     }
 
     private fun parseColors(xml: String?): List<ColorEntry> {
         if (xml.isNullOrBlank()) return emptyList()
-        val list = mutableListOf<ColorEntry>()
+        val byName = linkedMapOf<String, ColorEntry>()
         val doc = DocumentBuilderFactory.newInstance().newDocumentBuilder()
             .parse(InputSource(StringReader(xml.trim())))
         val nodes = doc.getElementsByTagName("color")
@@ -110,10 +110,38 @@ object ResourceTableCompiler {
             val name = el.getAttribute("name").trim()
             val text = el.textContent.orEmpty().trim()
             if (name.isNotEmpty()) {
-                parseHexColor(text)?.let { list.add(ColorEntry(name, it)) }
+                parseHexColor(text)?.let { byName[name] = ColorEntry(name, it) }
             }
         }
-        return list
+        return byName.values.toList()
+    }
+
+    private fun unescapeAndroidString(raw: String): String {
+        val trimmed = raw.trim()
+        val unwrapped = if (trimmed.length >= 2 && trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+            trimmed.substring(1, trimmed.length - 1)
+        } else {
+            raw
+        }
+        val sb = StringBuilder(unwrapped.length)
+        var i = 0
+        while (i < unwrapped.length) {
+            val ch = unwrapped[i]
+            if (ch == '\\' && i + 1 < unwrapped.length) {
+                when (unwrapped[i + 1]) {
+                    'n' -> { sb.append('\n'); i += 2 }
+                    't' -> { sb.append('\t'); i += 2 }
+                    '\'' -> { sb.append('\''); i += 2 }
+                    '"' -> { sb.append('"'); i += 2 }
+                    '\\' -> { sb.append('\\'); i += 2 }
+                    else -> { sb.append(unwrapped[i + 1]); i += 2 }
+                }
+            } else {
+                sb.append(ch)
+                i++
+            }
+        }
+        return sb.toString()
     }
 
     private fun parseHexColor(raw: String): Int? {

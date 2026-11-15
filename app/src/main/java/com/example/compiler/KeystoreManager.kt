@@ -289,7 +289,7 @@ object KeystoreManager {
                 derInteger(serial) +
                 algId +
                 nameDer +
-                derSequence(derUtcTime(notBefore) + derUtcTime(notAfter)) +
+                derSequence(derCertTime(notBefore) + derCertTime(notAfter)) +
                 nameDer +
                 keyPair.public.encoded,
         )
@@ -355,11 +355,20 @@ object KeystoreManager {
         return derTag(0x0C, bytes) // UTF8String
     }
 
-    private fun derUtcTime(date: Date): ByteArray {
-        val fmt = SimpleDateFormat("yyMMddHHmmss'Z'", Locale.US).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
+    private fun derCertTime(date: Date): ByteArray {
+        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply { time = date }
+        val year = cal.get(Calendar.YEAR)
+        return if (year >= 2050) {
+            val fmt = SimpleDateFormat("yyyyMMddHHmmss'Z'", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }
+            derTag(0x18, fmt.format(date).toByteArray(Charsets.US_ASCII))
+        } else {
+            val fmt = SimpleDateFormat("yyMMddHHmmss'Z'", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }
+            derTag(0x17, fmt.format(date).toByteArray(Charsets.US_ASCII))
         }
-        return derTag(0x17, fmt.format(date).toByteArray(Charsets.US_ASCII))
     }
 
     private fun derSequence(content: ByteArray): ByteArray = derTag(0x30, content)

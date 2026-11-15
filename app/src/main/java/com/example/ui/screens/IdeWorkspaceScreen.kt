@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
@@ -248,15 +249,18 @@ fun IdeWorkspaceScreen(
     fun shareBuiltArtifact(artifactPath: String) {
         runCatching {
             val file = File(artifactPath)
+            if (!file.exists() || file.length() == 0L) return
             val isBundle = artifactPath.endsWith(".aab", ignoreCase = true)
             val uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
                 file,
             )
+            val mimeType = if (isBundle) "application/octet-stream" else "application/vnd.android.package-archive"
             val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                type = if (isBundle) "application/octet-stream" else "application/vnd.android.package-archive"
+                type = mimeType
                 putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newRawUri(file.name, uri)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
             context.startActivity(
@@ -266,12 +270,19 @@ fun IdeWorkspaceScreen(
     }
 
     fun launchExportArtifact() {
-        val safeName = project.name.lowercase().replace(Regex("[^a-z0-9]+"), "-")
+        val safeName = project.name.lowercase()
+            .replace(Regex("[^a-z0-9]+"), "-")
+            .trim('-')
+            .ifBlank { "app" }
+        val builtPath = lastBuildResult?.apkPath
         val variant = lastBuildResult?.variant ?: selectedBuildVariant
-        when (variant) {
-            BuildVariant.DEBUG_APK -> exportApkLauncher.launch("$safeName-debug.apk")
-            BuildVariant.RELEASE_APK -> exportApkLauncher.launch("$safeName-release.apk")
-            BuildVariant.RELEASE_AAB -> exportAabLauncher.launch("$safeName-release.aab")
+        when {
+            builtPath?.endsWith(".aab", ignoreCase = true) == true || variant == BuildVariant.RELEASE_AAB ->
+                exportAabLauncher.launch("$safeName-release.aab")
+            variant == BuildVariant.RELEASE_APK ->
+                exportApkLauncher.launch("$safeName-release.apk")
+            else ->
+                exportApkLauncher.launch("$safeName-debug.apk")
         }
     }
 
