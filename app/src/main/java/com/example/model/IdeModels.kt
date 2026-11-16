@@ -1,5 +1,52 @@
 package com.example.model
 
+enum class ProjectLanguage(
+    val displayName: String,
+    val extension: String,
+    val badge: String,
+) {
+    JAVA(
+        displayName = "Java",
+        extension = "java",
+        badge = "Java 8",
+    ),
+    KOTLIN(
+        displayName = "Kotlin",
+        extension = "kt",
+        badge = "Kotlin",
+    ),
+}
+
+enum class AndroidMinSdk(
+    val apiLevel: Int,
+    val androidVersion: String,
+    val codename: String,
+) {
+    API_21(21, "Android 5.0", "Lollipop"),
+    API_23(23, "Android 6.0", "Marshmallow"),
+    API_24(24, "Android 7.0", "Nougat"),
+    API_26(26, "Android 8.0", "Oreo"),
+    API_28(28, "Android 9", "Pie"),
+    API_29(29, "Android 10", "Q"),
+    API_30(30, "Android 11", "R"),
+    API_31(31, "Android 12", "S"),
+    API_33(33, "Android 13", "Tiramisu"),
+    API_34(34, "Android 14", "Upside Down Cake"),
+    API_35(35, "Android 15", "Vanilla Ice Cream");
+
+    val shortLabel: String
+        get() = "API $apiLevel ($androidVersion)"
+
+    val compactLabel: String
+        get() = "API $apiLevel"
+
+    companion object {
+        fun fromApiLevel(level: Int): AndroidMinSdk {
+            return entries.minByOrNull { kotlin.math.abs(it.apiLevel - level) } ?: API_24
+        }
+    }
+}
+
 enum class ProjectTemplate(
     val displayName: String,
     val subtitle: String,
@@ -38,7 +85,7 @@ enum class ProjectTemplate(
     ),
     BLANK_ACTIVITY(
         displayName = "Blank Activity",
-        subtitle = "Minimal clean Android Java Activity starter ready for custom code",
+        subtitle = "Minimal clean Android Activity starter ready for custom code",
         defaultAppName = "My App",
         defaultPackage = "com.example.myapp",
     ),
@@ -95,6 +142,8 @@ data class ProjectMetadata(
     val template: ProjectTemplate,
     val createdAtMillis: Long,
     val updatedAtMillis: Long,
+    val language: ProjectLanguage = ProjectLanguage.JAVA,
+    val minSdkVersion: Int = 24,
     val lastBuildSuccess: Boolean? = null,
     val lastApkSizeBytes: Long? = null,
     val lastBuildTimestamp: Long? = null,
@@ -103,6 +152,7 @@ data class ProjectMetadata(
 
 enum class FileLanguage {
     JAVA,
+    KOTLIN,
     XML,
     JSON,
     TEXT,
@@ -112,6 +162,7 @@ data class ProjectFile(
     val relativePath: String,
     val content: String,
     val language: FileLanguage,
+    val isBinary: Boolean = false,
 ) {
     val fileName: String
         get() = relativePath.substringAfterLast('/')
@@ -164,4 +215,15 @@ data class ProjectSearchHit(
     val relativePath: String,
     val lineNumber: Int,
     val previewLine: String,
+)
+
+data class AiAttachment(
+    val id: String,
+    val displayName: String,
+    val mimeType: String,
+    val isImage: Boolean,
+    val sizeBytes: Long,
+    val base64Data: String = "",
+    val textContent: String = "",
+    val previewUriString: String = "",
 )

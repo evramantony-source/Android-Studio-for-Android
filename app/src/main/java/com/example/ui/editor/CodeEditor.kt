@@ -440,30 +440,57 @@ fun CodeEditor(
 
                 Spacer(Modifier.width(4.dp))
 
-                val symbolChips = listOf(
-                    "TAB" to { insertSnippet("    ") },
-                    "{ }" to { insertSnippet("{\n    \n}", cursorBackOffset = 2) },
-                    "( )" to { insertSnippet("()", cursorBackOffset = 1) },
-                    ";" to { insertSnippet(";") },
-                    "=" to { insertSnippet(" = ") },
-                    "\"" to { insertSnippet("\"\"", cursorBackOffset = 1) },
-                    "." to { insertSnippet(".") },
-                    "//" to { insertSnippet("// ") },
-                    "<>" to { insertSnippet("<>", cursorBackOffset = 1) },
-                    "Toast" to {
-                        insertSnippet(
-                            "android.widget.Toast.makeText(this, \"\", android.widget.Toast.LENGTH_SHORT).show();",
-                            cursorBackOffset = 46,
-                        )
-                    },
-                    "Log" to { insertSnippet("android.util.Log.d(\"App\", \"\");", cursorBackOffset = 3) },
-                    "Btn" to {
-                        insertSnippet(
-                            "Button btn = new Button(this);\nbtn.setText(\"Tap\");\nbtn.setOnClickListener(v -> {\n    \n});",
-                            cursorBackOffset = 4,
-                        )
-                    },
-                )
+                val isKotlin = language == FileLanguage.KOTLIN
+                val symbolChips = buildList {
+                    add("TAB" to { insertSnippet("    ") })
+                    add("{ }" to { insertSnippet("{\n    \n}", cursorBackOffset = 2) })
+                    add("( )" to { insertSnippet("()", cursorBackOffset = 1) })
+                    if (isKotlin) {
+                        add("fun" to { insertSnippet("private fun () {\n    \n}", cursorBackOffset = 10) })
+                        add("val" to { insertSnippet("val ") })
+                        add("var" to { insertSnippet("var ") })
+                    } else {
+                        add(";" to { insertSnippet(";") })
+                    }
+                    add("=" to { insertSnippet(" = ") })
+                    add("\"" to { insertSnippet("\"\"", cursorBackOffset = 1) })
+                    add("." to { insertSnippet(".") })
+                    add("//" to { insertSnippet("// ") })
+                    add("<>" to { insertSnippet("<>", cursorBackOffset = 1) })
+                    add(
+                        "Toast" to {
+                            val semi = if (isKotlin) "" else ";"
+                            insertSnippet(
+                                "android.widget.Toast.makeText(this, \"\", android.widget.Toast.LENGTH_SHORT).show()$semi",
+                                cursorBackOffset = if (isKotlin) 45 else 46,
+                            )
+                        },
+                    )
+                    add(
+                        "Log" to {
+                            val semi = if (isKotlin) "" else ";"
+                            insertSnippet(
+                                "android.util.Log.d(\"App\", \"\")$semi",
+                                cursorBackOffset = if (isKotlin) 2 else 3,
+                            )
+                        },
+                    )
+                    add(
+                        "Btn" to {
+                            if (isKotlin) {
+                                insertSnippet(
+                                    "val btn = Button(this)\nbtn.text = \"Tap\"\nbtn.setOnClickListener {\n    \n}",
+                                    cursorBackOffset = 2,
+                                )
+                            } else {
+                                insertSnippet(
+                                    "Button btn = new Button(this);\nbtn.setText(\"Tap\");\nbtn.setOnClickListener(v -> {\n    \n});",
+                                    cursorBackOffset = 4,
+                                )
+                            }
+                        },
+                    )
+                }
                 symbolChips.forEach { (label, action) ->
                     Surface(
                         onClick = action,
@@ -514,7 +541,7 @@ private fun applyAutoIndentOnNewline(incoming: TextFieldValue): TextFieldValue {
 }
 
 private fun simpleIndentFormat(code: String, language: FileLanguage): String {
-    if (language != FileLanguage.JAVA) {
+    if (language != FileLanguage.JAVA && language != FileLanguage.KOTLIN) {
         return code.lines().joinToString("\n") { it.trimEnd() }
     }
     var depth = 0

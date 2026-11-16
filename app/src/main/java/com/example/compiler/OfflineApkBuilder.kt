@@ -37,6 +37,7 @@ class OfflineApkBuilder(
         packageName: String,
         variant: BuildVariant = BuildVariant.DEBUG_APK,
         releaseSigning: ReleaseSigningConfig? = null,
+        targetMinSdk: Int? = null,
         onProgress: (String) -> Unit = {},
     ): BuildResult = withContext(Dispatchers.IO) {
         val ctx = requireNotNull(context) { "Android Context is required for asset extraction" }
@@ -66,6 +67,7 @@ class OfflineApkBuilder(
             keyPassword = keyPassword,
             keyAlias = keyAlias,
             usedReleaseKey = activeSigning != null && keystoreFile != debugKeystoreFile,
+            targetMinSdk = targetMinSdk,
             onProgress = onProgress,
         )
     }
@@ -80,6 +82,7 @@ class OfflineApkBuilder(
         keyPassword: String = "droidforge",
         keyAlias: String = "",
         usedReleaseKey: Boolean = false,
+        targetMinSdk: Int? = null,
         onProgress: (String) -> Unit = {},
     ): BuildResult {
         val startMs = System.currentTimeMillis()
@@ -140,6 +143,7 @@ class OfflineApkBuilder(
                 packageName = packageName,
                 isRelease = variant.isRelease,
                 resourceIds = compiledRes.resourceIds,
+                fallbackMinSdk = targetMinSdk ?: 24,
             )
             manifestPrep.warnings.forEach { log("⚠ $it") }
             if (manifestPrep.errors.isNotEmpty()) {
@@ -176,12 +180,35 @@ class OfflineApkBuilder(
             }
             log("      Encoded manifest (${manifestBytes.size} bytes, minSdk=$manifestMinSdk)")
 
-            // 3. Compile Java sources via Eclipse JDT (ecj)
+            // 3. Transpile optional Kotlin (.kt) files and compile via Eclipse JDT (ecj)
+            val kotlinGenDir = File(buildDir, "kotlin-gen").apply { mkdirs() }
+            val ktFiles = collectFilesWithExt(File(projectDir, "src"), ".kt")
+            val kotlinOriginMap = mutableMapOf<String, Pair<String, Map<Int, Int>>>()
+            if (ktFiles.isNotEmpty()) {
+                log("[3/5] Transpiling ${ktFiles.size} Kotlin (.kt) source(s) -> Java 8...")
+                ktFiles.forEach { ktFile ->
+                    val origRel = ktFile.relativeTo(projectDir).invariantSeparatorsPath
+                    val res = KotlinToJavaTranspiler.transpile(
+                        kotlinSource = ktFile.readText(),
+                        fallbackPackage = packageName,
+                        fileName = ktFile.name,
+                    )
+                    val outJavaFile = File(
+                        File(kotlinGenDir, res.packageName.replace('.', '/')).apply { mkdirs() },
+                        "${res.primaryClassName}.java",
+                    )
+                    outJavaFile.writeText(res.javaSource)
+                    val genRel = outJavaFile.relativeTo(projectDir).invariantSeparatorsPath
+                    kotlinOriginMap[genRel] = origRel to res.lineMap
+                }
+            }
+
             val javaFiles = collectFilesWithExt(File(projectDir, "src"), ".java") +
+                collectFilesWithExt(kotlinGenDir, ".java") +
                 collectFilesWithExt(genDir, ".java")
             if (javaFiles.isEmpty()) {
                 diagnostics.add(
-                    BuildDiagnostic("src", 1, 1, DiagnosticSeverity.ERROR, "No .java source files found in src/."),
+                    BuildDiagnostic("src", 1, 1, DiagnosticSeverity.ERROR, "No .java or .kt source files found in src/."),
                 )
                 return BuildResult(
                     success = false,
@@ -192,7 +219,7 @@ class OfflineApkBuilder(
                 )
             }
             val modeDesc = if (variant.isRelease) "Release (stripped debug symbols)" else "Debug"
-            log("[3/5] Compiling ${javaFiles.size} Java file(s) with Eclipse JDT (Java 8, $modeDesc)...")
+            log("[3/5] Compiling ${javaFiles.size} source unit(s) with Eclipse JDT (Java 8, $modeDesc)...")
 
             val ecjOut = StringWriter()
             val ecjErr = StringWriter()
@@ -221,14 +248,14 @@ class OfflineApkBuilder(
             }.trim()
 
             if (combinedEcjOutput.isNotEmpty()) {
-                diagnostics.addAll(parseEcjDiagnostics(combinedEcjOutput, projectDir))
+                diagnostics.addAll(parseEcjDiagnostics(combinedEcjOutput, projectDir, kotlinOriginMap))
                 combinedEcjOutput.lines().take(30).forEach { line ->
                     if (line.isNotBlank()) log("      $line")
                 }
             }
 
             if (!ecjOk) {
-                log("✖ Java compilation failed with ${diagnostics.count { it.severity == DiagnosticSeverity.ERROR }} error(s).")
+                log("✖ Source compilation failed with ${diagnostics.count { it.severity == DiagnosticSeverity.ERROR }} error(s).")
                 return BuildResult(
                     success = false,
                     variant = variant,
@@ -372,11 +399,13 @@ class OfflineApkBuilder(
         packageName: String,
         isRelease: Boolean,
         resourceIds: Map<String, Int>,
+        fallbackMinSdk: Int = 24,
     ): ManifestPreparationResult {
         val warnings = mutableListOf<String>()
         val errors = mutableListOf<String>()
         val androidNs = "http://schemas.android.com/apk/res/android"
-        var parsedMinSdk = 24
+        val coercedFallback = fallbackMinSdk.coerceIn(21, 35)
+        var parsedMinSdk = coercedFallback
 
         val serialized = runCatching {
             val factory = DocumentBuilderFactory.newInstance().apply {
@@ -399,17 +428,17 @@ class OfflineApkBuilder(
             val usesSdkNodes = manifestEl.getElementsByTagName("uses-sdk")
             if (usesSdkNodes.length == 0) {
                 val usesSdk = doc.createElement("uses-sdk")
-                usesSdk.setAttributeNS(androidNs, "android:minSdkVersion", "24")
+                usesSdk.setAttributeNS(androidNs, "android:minSdkVersion", coercedFallback.toString())
                 usesSdk.setAttributeNS(androidNs, "android:targetSdkVersion", "35")
                 manifestEl.insertBefore(usesSdk, manifestEl.firstChild)
-                warnings.add("Injected <uses-sdk minSdkVersion=24 targetSdkVersion=35> for Android compatibility.")
+                warnings.add("Injected <uses-sdk minSdkVersion=$coercedFallback targetSdkVersion=35> for Android compatibility.")
             } else {
                 val el = usesSdkNodes.item(0) as? Element
                 if (el != null) {
                     val minStr = el.getAttributeNS(androidNs, "minSdkVersion")
-                    parsedMinSdk = minStr.toIntOrNull()?.coerceAtLeast(21) ?: 24
+                    parsedMinSdk = minStr.toIntOrNull()?.coerceAtLeast(21) ?: coercedFallback
                     if (minStr.isBlank()) {
-                        el.setAttributeNS(androidNs, "android:minSdkVersion", "24")
+                        el.setAttributeNS(androidNs, "android:minSdkVersion", coercedFallback.toString())
                     }
                     if (el.getAttributeNS(androidNs, "targetSdkVersion").isBlank()) {
                         el.setAttributeNS(androidNs, "android:targetSdkVersion", "35")
@@ -632,7 +661,11 @@ class OfflineApkBuilder(
         return dir.walkTopDown().filter { it.isFile && it.name.endsWith(ext) }.toList()
     }
 
-    private fun parseEcjDiagnostics(output: String, projectDir: File): List<BuildDiagnostic> {
+    private fun parseEcjDiagnostics(
+        output: String,
+        projectDir: File,
+        kotlinOriginMap: Map<String, Pair<String, Map<Int, Int>>> = emptyMap(),
+    ): List<BuildDiagnostic> {
         val diagnostics = mutableListOf<BuildDiagnostic>()
         val headerRegex = Regex("""^\d+\.\s+(ERROR|WARNING)\s+in\s+(.+?)\s+\(at line (\d+)\)""")
         val lines = output.lines()
@@ -646,10 +679,14 @@ class OfflineApkBuilder(
                     DiagnosticSeverity.WARNING
                 }
                 val rawPath = match.groupValues[2].trim()
-                val relPath = runCatching {
+                val rawRelPath = runCatching {
                     File(rawPath).relativeTo(projectDir).invariantSeparatorsPath
                 }.getOrDefault(File(rawPath).name)
-                val lineNum = match.groupValues[3].toIntOrNull() ?: 1
+                val rawLineNum = match.groupValues[3].toIntOrNull() ?: 1
+
+                val mappedOrigin = kotlinOriginMap[rawRelPath]
+                val finalRelPath = mappedOrigin?.first ?: rawRelPath
+                val finalLineNum = mappedOrigin?.second?.get(rawLineNum) ?: rawLineNum
 
                 var message = "Compilation issue"
                 var lookAhead = idx + 1
@@ -667,8 +704,8 @@ class OfflineApkBuilder(
                 }
                 diagnostics.add(
                     BuildDiagnostic(
-                        filePath = relPath,
-                        line = lineNum,
+                        filePath = finalRelPath,
+                        line = finalLineNum,
                         column = 1,
                         severity = severity,
                         message = message,

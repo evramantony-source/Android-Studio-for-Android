@@ -2,8 +2,10 @@ package com.example.ai
 
 import android.util.Log
 import com.example.BuildConfig
+import com.example.model.AiAttachment
 import com.example.model.BuildDiagnostic
 import com.example.model.ProjectFile
+import com.example.model.ProjectLanguage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -130,6 +132,9 @@ class GeminiCodeAssistant {
         thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
         projectName: String,
         packageName: String,
+        projectLanguage: ProjectLanguage = ProjectLanguage.JAVA,
+        minSdkVersion: Int = 24,
+        attachments: List<AiAttachment> = emptyList(),
         activeFile: ProjectFile?,
         allFiles: List<ProjectFile>,
         diagnostics: List<BuildDiagnostic>,
@@ -138,8 +143,11 @@ class GeminiCodeAssistant {
         onUsageRecorded: (provider: AiProvider, modelId: String, delta: TokenUsageDelta, toolCount: Int, failed: Boolean) -> Unit = { _, _, _, _, _ -> },
         onMessagesChanged: (List<ChatMessage>) -> Unit = {},
     ) {
-        val trimmed = userPrompt.trim()
-        if (trimmed.isEmpty()) return
+        val rawTrimmed = userPrompt.trim()
+        if (rawTrimmed.isEmpty() && attachments.isEmpty()) return
+        val trimmed = rawTrimmed.ifEmpty {
+            "Please inspect the attached image/file(s) and help implement what is shown."
+        }
 
         val requestedModel = modelId.trim().removePrefix("models/").ifBlank { provider.defaultModelId }
         val resolvedKey = when (provider) {
@@ -164,6 +172,7 @@ class GeminiCodeAssistant {
             id = "u_$now",
             isUser = true,
             text = trimmed,
+            attachmentSummaries = attachments.map { it.displayName },
         )
         val assistantMsgId = "a_${now + 1}"
         activeRunId = assistantMsgId
@@ -196,10 +205,14 @@ class GeminiCodeAssistant {
             userPrompt = trimmed,
             projectName = projectName,
             packageName = packageName,
+            projectLanguage = projectLanguage,
+            minSdkVersion = minSdkVersion,
+            attachments = attachments,
             activeFile = activeFile,
             allFiles = allFiles,
             diagnostics = diagnostics,
         )
+        val imageAttachments = attachments.filter { it.isImage && it.base64Data.isNotBlank() }
 
         val accumulatedVisibleText = StringBuilder()
         var totalMessageTokens = 0L
@@ -279,6 +292,9 @@ class GeminiCodeAssistant {
                     initialModel = requestedModel,
                     apiKey = resolvedKey,
                     thinkingMode = thinkingMode,
+                    projectLanguage = projectLanguage,
+                    minSdkVersion = minSdkVersion,
+                    imageAttachments = imageAttachments,
                     priorHistory = priorHistory,
                     promptWithContext = promptWithContext,
                     steps = steps,
@@ -325,6 +341,9 @@ class GeminiCodeAssistant {
                     initialModel = requestedModel,
                     apiKey = resolvedKey,
                     thinkingMode = thinkingMode,
+                    projectLanguage = projectLanguage,
+                    minSdkVersion = minSdkVersion,
+                    imageAttachments = imageAttachments,
                     priorHistory = priorHistory,
                     promptWithContext = promptWithContext,
                     steps = steps,
@@ -368,6 +387,9 @@ class GeminiCodeAssistant {
                     initialModel = requestedModel,
                     apiKey = resolvedKey,
                     thinkingMode = thinkingMode,
+                    projectLanguage = projectLanguage,
+                    minSdkVersion = minSdkVersion,
+                    imageAttachments = imageAttachments,
                     priorHistory = priorHistory,
                     promptWithContext = promptWithContext,
                     steps = steps,
@@ -506,6 +528,9 @@ class GeminiCodeAssistant {
         initialModel: String,
         apiKey: String,
         thinkingMode: AiThinkingMode,
+        projectLanguage: ProjectLanguage,
+        minSdkVersion: Int,
+        imageAttachments: List<AiAttachment>,
         priorHistory: List<ChatMessage>,
         promptWithContext: String,
         steps: MutableList<AgentStep>,
@@ -517,7 +542,7 @@ class GeminiCodeAssistant {
         toolExecutor: ProjectToolExecutor,
         onUsage: (String, TokenUsageDelta, Int) -> Unit,
     ) {
-        val conversationContents = buildInitialContents(priorHistory, promptWithContext)
+        val conversationContents = buildInitialContents(priorHistory, promptWithContext, imageAttachments)
         var completed = false
         var cumulativeTokens = 0L
         var activeModel = initialModel
@@ -547,6 +572,8 @@ class GeminiCodeAssistant {
                     primaryModelId = activeModel,
                     apiKey = apiKey,
                     thinkingMode = thinkingMode,
+                    projectLanguage = projectLanguage,
+                    minSdkVersion = minSdkVersion,
                     contents = conversationContents,
                     onConnected = { connectedModel ->
                         activeModel = connectedModel
@@ -691,6 +718,9 @@ class GeminiCodeAssistant {
         initialModel: String,
         apiKey: String,
         thinkingMode: AiThinkingMode,
+        projectLanguage: ProjectLanguage,
+        minSdkVersion: Int,
+        imageAttachments: List<AiAttachment>,
         priorHistory: List<ChatMessage>,
         promptWithContext: String,
         steps: MutableList<AgentStep>,
@@ -703,11 +733,32 @@ class GeminiCodeAssistant {
     ) {
         var activeModel = initialModel
         val openAiMessages = JSONArray().apply {
-            put(JSONObject().put("role", "system").put("content", buildSystemInstruction(activeModel)))
+            put(
+                JSONObject()
+                    .put("role", "system")
+                    .put("content", buildSystemInstruction(activeModel, projectLanguage, minSdkVersion)),
+            )
             priorHistory.forEach { msg ->
                 put(JSONObject().put("role", if (msg.isUser) "user" else "assistant").put("content", msg.text))
             }
-            put(JSONObject().put("role", "user").put("content", promptWithContext))
+            if (imageAttachments.isEmpty()) {
+                put(JSONObject().put("role", "user").put("content", promptWithContext))
+            } else {
+                val contentParts = JSONArray().apply {
+                    put(JSONObject().put("type", "text").put("text", promptWithContext))
+                    imageAttachments.forEach { img ->
+                        put(
+                            JSONObject()
+                                .put("type", "image_url")
+                                .put(
+                                    "image_url",
+                                    JSONObject().put("url", "data:${img.mimeType};base64,${img.base64Data}"),
+                                ),
+                        )
+                    }
+                }
+                put(JSONObject().put("role", "user").put("content", contentParts))
+            }
         }
 
         var totalTokens = 0L
@@ -853,6 +904,9 @@ class GeminiCodeAssistant {
         initialModel: String,
         apiKey: String,
         thinkingMode: AiThinkingMode,
+        projectLanguage: ProjectLanguage,
+        minSdkVersion: Int,
+        imageAttachments: List<AiAttachment>,
         priorHistory: List<ChatMessage>,
         promptWithContext: String,
         steps: MutableList<AgentStep>,
@@ -864,12 +918,32 @@ class GeminiCodeAssistant {
         onUsage: (String, TokenUsageDelta, Int) -> Unit,
     ) {
         var activeModel = initialModel
-        val systemText = buildSystemInstruction(activeModel)
+        val systemText = buildSystemInstruction(activeModel, projectLanguage, minSdkVersion)
         val claudeMessages = JSONArray().apply {
             priorHistory.forEach { msg ->
                 put(JSONObject().put("role", if (msg.isUser) "user" else "assistant").put("content", msg.text))
             }
-            put(JSONObject().put("role", "user").put("content", promptWithContext))
+            if (imageAttachments.isEmpty()) {
+                put(JSONObject().put("role", "user").put("content", promptWithContext))
+            } else {
+                val contentBlocks = JSONArray().apply {
+                    put(JSONObject().put("type", "text").put("text", promptWithContext))
+                    imageAttachments.forEach { img ->
+                        put(
+                            JSONObject()
+                                .put("type", "image")
+                                .put(
+                                    "source",
+                                    JSONObject()
+                                        .put("type", "base64")
+                                        .put("media_type", img.mimeType)
+                                        .put("data", img.base64Data),
+                                ),
+                        )
+                    }
+                }
+                put(JSONObject().put("role", "user").put("content", contentBlocks))
+            }
         }
 
         var totalTokens = 0L
@@ -1060,6 +1134,8 @@ class GeminiCodeAssistant {
         primaryModelId: String,
         apiKey: String,
         thinkingMode: AiThinkingMode,
+        projectLanguage: ProjectLanguage,
+        minSdkVersion: Int,
         contents: JSONArray,
         onConnected: (String) -> Unit,
         onStatusUpdate: (String, String) -> Unit,
@@ -1081,6 +1157,8 @@ class GeminiCodeAssistant {
                     modelId = candidate,
                     thinkingMode = thinkingMode,
                     includeThinkingConfig = includeThinkingConfig,
+                    projectLanguage = projectLanguage,
+                    minSdkVersion = minSdkVersion,
                 )
                 try {
                     val outcome = callModelWithSseFallback(
@@ -1430,6 +1508,7 @@ class GeminiCodeAssistant {
     internal fun buildInitialContents(
         history: List<ChatMessage>,
         latestPromptWithContext: String,
+        imageAttachments: List<AiAttachment> = emptyList(),
     ): JSONArray {
         val contentsArray = JSONArray()
         history.forEach { msg ->
@@ -1440,35 +1519,68 @@ class GeminiCodeAssistant {
                 },
             )
         }
+        val latestParts = JSONArray().apply {
+            put(JSONObject().put("text", latestPromptWithContext))
+            imageAttachments.forEach { img ->
+                if (img.isImage && img.base64Data.isNotBlank()) {
+                    put(
+                        JSONObject().put(
+                            "inlineData",
+                            JSONObject()
+                                .put("mimeType", img.mimeType)
+                                .put("data", img.base64Data),
+                        ),
+                    )
+                }
+            }
+        }
         contentsArray.put(
             JSONObject().apply {
                 put("role", "user")
-                put("parts", JSONArray().put(JSONObject().put("text", latestPromptWithContext)))
+                put("parts", latestParts)
             },
         )
         return contentsArray
     }
 
-    private fun buildSystemInstruction(modelId: String): String = """
-        You are an autonomous coding agent powered by $modelId inside DroidForge Studio, an offline-capable Android Java IDE, APK/AAB builder, and live UI previewer.
+    private fun buildSystemInstruction(
+        modelId: String,
+        projectLanguage: ProjectLanguage = ProjectLanguage.JAVA,
+        minSdkVersion: Int = 24,
+    ): String {
+        val langNote = if (projectLanguage == ProjectLanguage.KOTLIN) {
+            "Active project language: KOTLIN (.kt files in src/). Write clean Kotlin Android SDK code (`class MainActivity : Activity()`, `override fun onCreate(savedInstanceState: Bundle?)`, `val`/`var`, `fun`, lambdas `{ ... }`, `object : ...`, string templates). DroidForge compiles `.kt` via its built-in Kotlin-to-Java-8 transpiler + ECJ + DX."
+        } else {
+            "Active project language: JAVA 8 (.java files in src/)."
+        }
+        return """
+            You are an autonomous coding agent powered by $modelId inside DroidForge Studio, an offline-capable Android IDE (Java & Kotlin), APK/AAB builder, and live UI previewer.
+            $langNote
+            Target minSdkVersion: API $minSdkVersion (Android ${com.example.model.AndroidMinSdk.fromApiLevel(minSdkVersion).androidVersion}), targetSdkVersion: 35. Only suggest platform APIs compatible with minSdkVersion API $minSdkVersion (or guard newer APIs with Build.VERSION.SDK_INT).
 
-        Execution rules (prioritize speed & accuracy):
-        - Act autonomously WITHOUT asking the user for permission before reading, creating, editing, or deleting files, or building the APK/AAB.
-        - Key project files (active tab, MainActivity, AndroidManifest, values XML) are already pre-loaded in the prompt. Do NOT waste turns calling list_files or read_file on files already included below—jump straight to edit_file or write_file!
-        - Batch independent tool calls together in a single turn whenever possible.
-        - You have full access via tools: list_files, read_file, write_file, edit_file, delete_file, search_files, build_apk, and build_aab.
-        - Prefer edit_file for targeted edits and write_file for new files or full rewrites.
-        - After modifying Java, XML, or Manifest files, call build_apk to verify compilation. If build_apk reports errors, fix them immediately and rebuild. Skip build_apk for pure Q&A.
-        - Do NOT use AndroidX, Jetpack Compose, Kotlin syntax, or external Gradle dependencies. Use classic Android SDK APIs (android.app.Activity, android.os.Bundle, android.view.*, android.widget.*, android.graphics.*, android.content.*, android.webkit.*, java.*).
-        - Compiles Java 8 (.java), AndroidManifest.xml, res/values/strings.xml, and res/values/colors.xml into R.java and resources.arsc / resources.pb.
-        - Keep your final summary concise, stating what files changed and the build status.
-    """.trimIndent()
+            Execution rules (prioritize speed & accuracy):
+            - Act autonomously WITHOUT asking the user for permission before reading, creating, editing, or deleting files, or building the APK/AAB.
+            - Key project files (active tab, MainActivity, AndroidManifest, values XML) are already pre-loaded in the prompt. Do NOT waste turns calling list_files or read_file on files already included below—jump straight to edit_file or write_file!
+            - Batch independent tool calls together in a single turn whenever possible.
+            - You have full access via tools: list_files, read_file, write_file, edit_file, delete_file, search_files, build_apk, and build_aab.
+            - Prefer edit_file for targeted edits and write_file for new files or full rewrites.
+            - After modifying Java, Kotlin, XML, or Manifest files, call build_apk to verify compilation. If build_apk reports errors, fix them immediately and rebuild. Skip build_apk for pure Q&A.
+            - Do NOT use AndroidX, Jetpack Compose, kotlinx.coroutines, or external Gradle dependencies. Use classic Android SDK APIs (android.app.Activity, android.os.Bundle, android.view.*, android.widget.*, android.graphics.*, android.content.*, android.webkit.*, java.*).
+            - Compiles Java 8 (.java), Kotlin (.kt via built-in transpiler), AndroidManifest.xml, res/values/strings.xml, and res/values/colors.xml into R.java and resources.arsc / resources.pb.
+
+            Response formatting rules (CRITICAL):
+            - Organize your explanation cleanly using short Markdown headings (`### Summary`, `### Changes Made`, `### Build Status`), concise bullet points (`- `), and backticked file paths or symbols (`` `MainActivity.kt` ``).
+            - Keep paragraphs crisp and well-spaced so answers scan effortlessly on a mobile screen.
+        """.trimIndent()
+    }
 
     internal fun buildRequestPayload(
         contents: JSONArray,
         modelId: String = GEMINI_MODEL_ID,
         thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
         includeThinkingConfig: Boolean = true,
+        projectLanguage: ProjectLanguage = ProjectLanguage.JAVA,
+        minSdkVersion: Int = 24,
     ): String {
         val genConfig = JSONObject().put("temperature", 0.3)
         if (includeThinkingConfig) {
@@ -1479,7 +1591,12 @@ class GeminiCodeAssistant {
         return JSONObject().apply {
             put(
                 "systemInstruction",
-                JSONObject().put("parts", JSONArray().put(JSONObject().put("text", buildSystemInstruction(modelId)))),
+                JSONObject().put(
+                    "parts",
+                    JSONArray().put(
+                        JSONObject().put("text", buildSystemInstruction(modelId, projectLanguage, minSdkVersion)),
+                    ),
+                ),
             )
             put("contents", contents)
             put("tools", buildToolDeclarations())
@@ -1516,11 +1633,15 @@ class GeminiCodeAssistant {
         userPrompt: String,
         projectName: String,
         packageName: String,
+        projectLanguage: ProjectLanguage = ProjectLanguage.JAVA,
+        minSdkVersion: Int = 24,
+        attachments: List<AiAttachment> = emptyList(),
         activeFile: ProjectFile?,
         allFiles: List<ProjectFile>,
         diagnostics: List<BuildDiagnostic>,
     ): String = buildString {
         appendLine("Project: $projectName (package: $packageName)")
+        appendLine("Language: ${projectLanguage.displayName} • Min Android SDK: API $minSdkVersion")
         appendLine("Files: ${allFiles.joinToString(", ") { it.relativePath }}")
         if (activeFile != null) {
             appendLine("Currently open editor tab: ${activeFile.relativePath}")
@@ -1552,6 +1673,21 @@ class GeminiCodeAssistant {
             }
         }
 
+        val textAttachments = attachments.filter { !it.isImage && it.textContent.isNotBlank() }
+        if (textAttachments.isNotEmpty()) {
+            appendLine()
+            appendLine("=== User Attached Files ===")
+            textAttachments.forEach { att ->
+                appendLine("--- ${att.displayName} (${att.mimeType}, ${att.sizeBytes} bytes) ---")
+                appendLine(att.textContent.take(12_000))
+            }
+        }
+        val imageAttachments = attachments.filter { it.isImage }
+        if (imageAttachments.isNotEmpty()) {
+            appendLine()
+            appendLine("Attached images (${imageAttachments.size}): ${imageAttachments.joinToString(", ") { it.displayName }}")
+        }
+
         appendLine()
         appendLine("User request:")
         appendLine(userPrompt)
@@ -1564,16 +1700,19 @@ class GeminiCodeAssistant {
         val seen = LinkedHashSet<String>()
         val ordered = mutableListOf<ProjectFile>()
         fun addIfPresent(file: ProjectFile?) {
-            if (file != null && seen.add(file.relativePath)) {
+            if (file != null && !file.isBinary && seen.add(file.relativePath)) {
                 ordered.add(file)
             }
         }
         addIfPresent(activeFile)
+        addIfPresent(allFiles.find { it.relativePath.endsWith("MainActivity.kt") })
         addIfPresent(allFiles.find { it.relativePath.endsWith("MainActivity.java") })
         addIfPresent(allFiles.find { it.relativePath == "AndroidManifest.xml" })
         addIfPresent(allFiles.find { it.relativePath == "res/values/strings.xml" })
         addIfPresent(allFiles.find { it.relativePath == "res/values/colors.xml" })
-        allFiles.filter { it.relativePath.endsWith(".java") || it.relativePath.endsWith(".xml") }
+        allFiles.filter {
+            !it.isBinary && (it.relativePath.endsWith(".kt") || it.relativePath.endsWith(".java") || it.relativePath.endsWith(".xml"))
+        }
             .take(4)
             .forEach { addIfPresent(it) }
         return ordered

@@ -44,6 +44,7 @@ class MainActivity : ComponentActivity() {
             val activeThreadId by viewModel.activeThreadId.collectAsStateWithLifecycle()
             val splitSideThreadId by viewModel.splitSideThreadId.collectAsStateWithLifecycle()
             val aiMessages by viewModel.aiMessages.collectAsStateWithLifecycle()
+            val pendingAiAttachments by viewModel.pendingAiAttachments.collectAsStateWithLifecycle()
             val aiState by viewModel.aiState.collectAsStateWithLifecycle()
 
             DroidForgeTheme(darkTheme = editorSettings.darkTheme) {
@@ -98,11 +99,14 @@ class MainActivity : ComponentActivity() {
                         activeThreadId = activeThreadId,
                         splitSideThreadId = splitSideThreadId,
                         aiMessages = aiMessages,
+                        pendingAiAttachments = pendingAiAttachments,
                         aiState = aiState,
                         onSelectFile = viewModel::openFile,
                         onCloseTab = viewModel::closeTab,
                         onCreateFile = viewModel::createNewFile,
                         onDeleteFile = viewModel::deleteFile,
+                        onImportProjectFileUri = viewModel::importProjectFileFromUri,
+                        onUpdateProjectConfig = viewModel::updateProjectConfig,
                         onUpdateContent = viewModel::updateActiveFileContent,
                         onSelectBuildVariant = viewModel::selectBuildVariant,
                         onBuildApk = viewModel::buildApk,
@@ -127,6 +131,8 @@ class MainActivity : ComponentActivity() {
                         onRenameChatThread = viewModel::renameChatThread,
                         onDeleteChatThread = viewModel::deleteChatThread,
                         onSetSplitSideThread = viewModel::setSplitSideThread,
+                        onAddAiAttachmentUri = viewModel::addAiAttachmentFromUri,
+                        onRemoveAiAttachment = viewModel::removePendingAttachment,
                         onAskGemini = viewModel::askGemini,
                         onRetryGemini = viewModel::retryLastGeminiPrompt,
                         onStopGemini = viewModel::cancelGemini,

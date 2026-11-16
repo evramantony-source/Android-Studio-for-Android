@@ -17,6 +17,7 @@ import com.example.model.BuildVariant
 import com.example.model.EditorSettings
 import com.example.model.FileLanguage
 import com.example.model.ProjectFile
+import com.example.model.ProjectLanguage
 import com.example.model.ProjectMetadata
 import com.example.model.ProjectTemplate
 import com.example.model.ReleaseSigningConfig
@@ -291,19 +292,30 @@ class ProjectRepository(
         name: String,
         packageName: String,
         template: ProjectTemplate,
+        language: ProjectLanguage = ProjectLanguage.JAVA,
+        minSdkVersion: Int = 24,
     ): ProjectMetadata = withContext(Dispatchers.IO) {
-        createProjectInternal(name, packageName, template)
+        createProjectInternal(name, packageName, template, language, minSdkVersion)
     }
 
     private fun createProjectInternal(
         name: String,
         packageName: String,
         template: ProjectTemplate,
+        language: ProjectLanguage = ProjectLanguage.JAVA,
+        minSdkVersion: Int = 24,
     ): ProjectMetadata {
+        val safeMinSdk = minSdkVersion.coerceIn(21, 35)
         val id = UUID.randomUUID().toString().take(8)
         val projectDir = File(projectsRoot, id).apply { mkdirs() }
         val now = System.currentTimeMillis()
-        val files = TemplateProvider.generateFiles(template, name, packageName)
+        val files = TemplateProvider.generateFiles(
+            template = template,
+            appName = name,
+            packageName = packageName,
+            language = language,
+            minSdkVersion = safeMinSdk,
+        )
         files.forEach { (relPath, content) ->
             val file = File(projectDir, relPath)
             file.parentFile?.mkdirs()
@@ -316,9 +328,64 @@ class ProjectRepository(
             template = template,
             createdAtMillis = now,
             updatedAtMillis = now,
+            language = language,
+            minSdkVersion = safeMinSdk,
         )
         writeMetadata(projectDir, meta)
         return meta
+    }
+
+    suspend fun updateProjectConfig(
+        projectId: String,
+        language: ProjectLanguage,
+        minSdkVersion: Int,
+    ): ProjectMetadata? = withContext(Dispatchers.IO) {
+        val dir = getProjectDir(projectId)
+        val current = readMetadata(dir) ?: return@withContext null
+        val safeMinSdk = minSdkVersion.coerceIn(21, 35)
+        val manifestFile = File(dir, "AndroidManifest.xml")
+        if (manifestFile.exists()) {
+            val xml = manifestFile.readText()
+            val updatedXml = updateManifestMinSdk(xml, safeMinSdk)
+            manifestFile.writeText(updatedXml)
+        }
+        val updatedMeta = current.copy(
+            language = language,
+            minSdkVersion = safeMinSdk,
+            updatedAtMillis = System.currentTimeMillis(),
+        )
+        writeMetadata(dir, updatedMeta)
+        updatedMeta
+    }
+
+    private fun updateManifestMinSdk(xml: String, minSdkVersion: Int): String {
+        val usesSdkRegex = Regex("""<uses-sdk\b[^>]*?>""")
+        val minAttrRegex = Regex("""android:minSdkVersion\s*=\s*"\d+"""")
+        return when {
+            usesSdkRegex.containsMatchIn(xml) -> {
+                usesSdkRegex.replace(xml) { match ->
+                    val tag = match.value
+                    if (minAttrRegex.containsMatchIn(tag)) {
+                        minAttrRegex.replace(tag, """android:minSdkVersion="$minSdkVersion"""")
+                    } else if (tag.endsWith("/>")) {
+                        tag.dropLast(2).trimEnd() + """ android:minSdkVersion="$minSdkVersion" />"""
+                    } else {
+                        tag.dropLast(1).trimEnd() + """ android:minSdkVersion="$minSdkVersion">"""
+                    }
+                }
+            }
+            else -> {
+                val manifestClose = Regex("""(<manifest\b[^>]*>)""")
+                if (manifestClose.containsMatchIn(xml)) {
+                    manifestClose.replaceFirst(
+                        xml,
+                        "$1\n\n    <uses-sdk\n        android:minSdkVersion=\"$minSdkVersion\"\n        android:targetSdkVersion=\"35\" />",
+                    )
+                } else {
+                    xml
+                }
+            }
+        }
     }
 
     suspend fun deleteProject(projectId: String) = withContext(Dispatchers.IO) {
@@ -339,15 +406,21 @@ class ProjectRepository(
             }
             .map { file ->
                 val rel = file.relativeTo(dir).invariantSeparatorsPath
+                val isBin = isBinaryPath(rel)
                 ProjectFile(
                     relativePath = rel,
-                    content = file.readText(),
+                    content = if (isBin) {
+                        "Binary asset (${file.length()} bytes)\nPath: $rel\nBundled automatically inside APK/AAB assets."
+                    } else {
+                        runCatching { file.readText() }.getOrDefault("")
+                    },
                     language = detectLanguage(rel),
+                    isBinary = isBin,
                 )
             }
             .sortedWith(
                 compareBy<ProjectFile>(
-                    { if (it.fileName == "MainActivity.java") 0 else 1 },
+                    { if (it.fileName == "MainActivity.java" || it.fileName == "MainActivity.kt") 0 else 1 },
                     { if (it.relativePath.startsWith("src/")) 0 else 1 },
                     { it.relativePath },
                 ),
@@ -388,6 +461,16 @@ class ProjectRepository(
         val target = resolveProjectFile(projectId, relativePath) ?: return@withContext
         target.parentFile?.mkdirs()
         target.writeText(content)
+        val dir = getProjectDir(projectId)
+        readMetadata(dir)?.let { meta ->
+            writeMetadata(dir, meta.copy(updatedAtMillis = System.currentTimeMillis()))
+        }
+    }
+
+    suspend fun saveBinaryFile(projectId: String, relativePath: String, bytes: ByteArray) = withContext(Dispatchers.IO) {
+        val target = resolveProjectFile(projectId, relativePath) ?: return@withContext
+        target.parentFile?.mkdirs()
+        target.writeBytes(bytes)
         val dir = getProjectDir(projectId)
         readMetadata(dir)?.let { meta ->
             writeMetadata(dir, meta.copy(updatedAtMillis = System.currentTimeMillis()))
@@ -440,9 +523,15 @@ class ProjectRepository(
 
     fun detectLanguage(path: String): FileLanguage = when {
         path.endsWith(".java", ignoreCase = true) -> FileLanguage.JAVA
+        path.endsWith(".kt", ignoreCase = true) -> FileLanguage.KOTLIN
         path.endsWith(".xml", ignoreCase = true) -> FileLanguage.XML
         path.endsWith(".json", ignoreCase = true) -> FileLanguage.JSON
         else -> FileLanguage.TEXT
+    }
+
+    fun isBinaryPath(path: String): Boolean {
+        val ext = path.substringAfterLast('.', "").lowercase()
+        return ext in BINARY_EXTENSIONS
     }
 
     private fun writeMetadata(dir: File, meta: ProjectMetadata) {
@@ -453,6 +542,8 @@ class ProjectRepository(
             put("template", meta.template.name)
             put("createdAtMillis", meta.createdAtMillis)
             put("updatedAtMillis", meta.updatedAtMillis)
+            put("language", meta.language.name)
+            put("minSdkVersion", meta.minSdkVersion)
             meta.lastBuildSuccess?.let { put("lastBuildSuccess", it) }
             meta.lastApkSizeBytes?.let { put("lastApkSizeBytes", it) }
             meta.lastBuildTimestamp?.let { put("lastBuildTimestamp", it) }
@@ -469,6 +560,10 @@ class ProjectRepository(
             val variant = obj.optString("lastBuildVariant").takeIf { it.isNotBlank() }?.let {
                 runCatching { BuildVariant.valueOf(it) }.getOrNull()
             }
+            val language = runCatching {
+                ProjectLanguage.valueOf(obj.optString("language", ProjectLanguage.JAVA.name))
+            }.getOrDefault(ProjectLanguage.JAVA)
+            val minSdk = obj.optInt("minSdkVersion", 24).coerceIn(21, 35)
             ProjectMetadata(
                 id = obj.getString("id"),
                 name = obj.getString("name"),
@@ -478,11 +573,22 @@ class ProjectRepository(
                 ),
                 createdAtMillis = obj.optLong("createdAtMillis", dir.lastModified()),
                 updatedAtMillis = obj.optLong("updatedAtMillis", dir.lastModified()),
+                language = language,
+                minSdkVersion = minSdk,
                 lastBuildSuccess = if (obj.has("lastBuildSuccess")) obj.getBoolean("lastBuildSuccess") else null,
                 lastApkSizeBytes = if (obj.has("lastApkSizeBytes")) obj.getLong("lastApkSizeBytes") else null,
                 lastBuildTimestamp = if (obj.has("lastBuildTimestamp")) obj.getLong("lastBuildTimestamp") else null,
                 lastBuildVariant = variant,
             )
         }.getOrNull()
+    }
+
+    companion object {
+        private val BINARY_EXTENSIONS = setOf(
+            "png", "jpg", "jpeg", "webp", "gif", "bmp", "ico",
+            "ttf", "otf", "woff", "woff2",
+            "mp3", "wav", "ogg", "mp4", "webm",
+            "bin", "so", "jar", "dex", "apk", "aab", "zip",
+        )
     }
 }

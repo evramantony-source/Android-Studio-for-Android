@@ -36,6 +36,7 @@ data class ChatMessage(
     val isStreaming: Boolean = false,
     val steps: List<AgentStep> = emptyList(),
     val codeBlocks: List<SuggestedCodeBlock> = emptyList(),
+    val attachmentSummaries: List<String> = emptyList(),
     val providerName: String = "",
     val modelId: String = "",
     val totalTokens: Long = 0L,
@@ -144,6 +145,7 @@ object ProjectChatStore {
                             .put("code", b.code),
                     )
                 }
+                val attArr = JSONArray().apply { msg.attachmentSummaries.forEach { put(it) } }
                 msgArr.put(
                     JSONObject()
                         .put("id", msg.id)
@@ -151,6 +153,7 @@ object ProjectChatStore {
                         .put("text", msg.text)
                         .put("steps", stepsArr)
                         .put("codeBlocks", blocksArr)
+                        .put("attachmentSummaries", attArr)
                         .put("providerName", msg.providerName)
                         .put("modelId", msg.modelId)
                         .put("totalTokens", msg.totalTokens)
@@ -213,6 +216,10 @@ object ProjectChatStore {
                         ),
                     )
                 }
+                val attArr = mObj.optJSONArray("attachmentSummaries") ?: JSONArray()
+                val attList = (0 until attArr.length()).mapNotNull { idx ->
+                    attArr.optString(idx).takeIf { it.isNotBlank() }
+                }
                 msgs.add(
                     ChatMessage(
                         id = mObj.optString("id"),
@@ -221,6 +228,7 @@ object ProjectChatStore {
                         isStreaming = false,
                         steps = steps,
                         codeBlocks = blocks,
+                        attachmentSummaries = attList,
                         providerName = mObj.optString("providerName"),
                         modelId = mObj.optString("modelId"),
                         totalTokens = mObj.optLong("totalTokens", 0L),

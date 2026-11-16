@@ -91,6 +91,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material3.FilterChip
 import com.example.ai.AiModelOption
 import com.example.ai.AiProvider
 import com.example.ai.AiThinkingMode
@@ -100,12 +110,15 @@ import com.example.ai.ChatMessage
 import com.example.ai.ProjectChatThread
 import com.example.ai.SuggestedCodeBlock
 import com.example.emulator.EmulatorPanel
+import com.example.model.AiAttachment
+import com.example.model.AndroidMinSdk
 import com.example.model.BuildDiagnostic
 import com.example.model.BuildResult
 import com.example.model.BuildVariant
 import com.example.model.EditorSettings
 import com.example.model.FileLanguage
 import com.example.model.ProjectFile
+import com.example.model.ProjectLanguage
 import com.example.model.ProjectMetadata
 import com.example.model.ProjectSearchHit
 import com.example.model.ReleaseSigningConfig
@@ -148,11 +161,14 @@ fun IdeWorkspaceScreen(
     activeThreadId: String,
     splitSideThreadId: String?,
     aiMessages: List<ChatMessage>,
+    pendingAiAttachments: List<AiAttachment> = emptyList(),
     aiState: AiUiState,
     onSelectFile: (String) -> Unit,
     onCloseTab: (String) -> Unit,
     onCreateFile: (String) -> Unit,
     onDeleteFile: (String) -> Unit,
+    onImportProjectFileUri: (Uri) -> Unit = {},
+    onUpdateProjectConfig: (ProjectLanguage, Int) -> Unit = { _, _ -> },
     onUpdateContent: (String) -> Unit,
     onSelectBuildVariant: (BuildVariant) -> Unit,
     onBuildApk: (BuildVariant?) -> Unit,
@@ -177,6 +193,8 @@ fun IdeWorkspaceScreen(
     onRenameChatThread: (String, String) -> Unit,
     onDeleteChatThread: (String) -> Unit,
     onSetSplitSideThread: (String?) -> Unit,
+    onAddAiAttachmentUri: (Uri, Boolean) -> Unit = { _, _ -> },
+    onRemoveAiAttachment: (String) -> Unit = {},
     onAskGemini: (String) -> Unit,
     onRetryGemini: () -> Unit,
     onStopGemini: () -> Unit,
@@ -204,6 +222,8 @@ fun IdeWorkspaceScreen(
     var showModelMenuDialog by remember { mutableStateOf(false) }
     var showKeysDialog by remember { mutableStateOf(false) }
     var showUsageDialog by remember { mutableStateOf(false) }
+    var showProjectConfigDialog by remember { mutableStateOf(false) }
+    var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
 
     val exportApkLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("application/vnd.android.package-archive"),
@@ -221,6 +241,43 @@ fun IdeWorkspaceScreen(
         contract = ActivityResultContracts.CreateDocument("application/zip"),
     ) { uri ->
         if (uri != null) onExportProjectZipUri(uri)
+    }
+
+    val pickPhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) onAddAiAttachmentUri(uri, true)
+    }
+
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture(),
+    ) { success ->
+        val captured = pendingCameraUri
+        pendingCameraUri = null
+        if (success && captured != null) {
+            onAddAiAttachmentUri(captured, true)
+        }
+    }
+
+    val pickAiFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) onAddAiAttachmentUri(uri, false)
+    }
+
+    val importProjectFileLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) onImportProjectFileUri(uri)
+    }
+
+    fun launchCameraCapture() {
+        runCatching {
+            val file = File(context.cacheDir, "ai_camera_${System.currentTimeMillis()}.jpg")
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            pendingCameraUri = uri
+            takePictureLauncher.launch(uri)
+        }
     }
 
     LaunchedEffect(isBuilding, lastBuildResult) {
@@ -310,7 +367,11 @@ fun IdeWorkspaceScreen(
                             }
                         },
                         title = {
-                            Column {
+                            Column(
+                                modifier = Modifier
+                                    .clickable { showProjectConfigDialog = true }
+                                    .testTag("open_project_config_title"),
+                            ) {
                                 Text(
                                     text = project.name,
                                     style = MaterialTheme.typography.titleMedium,
@@ -318,7 +379,7 @@ fun IdeWorkspaceScreen(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    text = "${project.packageName} • ${selectedBuildVariant.shortLabel}",
+                                    text = "${project.language.displayName} • API ${project.minSdkVersion} • ${selectedBuildVariant.shortLabel}",
                                     fontFamily = JetBrainsMonoFontFamily,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -328,56 +389,37 @@ fun IdeWorkspaceScreen(
                             }
                         },
                         actions = {
-                            if (!isExpanded) {
-                                IconButton(
-                                    onClick = { scope.launch { drawerState.open() } },
-                                    modifier = Modifier.testTag("open_files_drawer_button"),
-                                ) {
-                                    Icon(Icons.Default.FolderOpen, contentDescription = "Project files")
+                            Button(
+                                onClick = { onBuildApk(null) },
+                                enabled = !isBuilding,
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondary,
+                                    contentColor = MaterialTheme.colorScheme.onSecondary,
+                                ),
+                                modifier = Modifier
+                                    .padding(end = 4.dp)
+                                    .testTag("build_apk_button"),
+                            ) {
+                                if (isBuilding) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.onSecondary,
+                                    )
+                                } else {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                                 }
-                            }
-                            IconButton(
-                                onClick = { showSearchDialog = true },
-                                modifier = Modifier.testTag("workspace_search_button"),
-                            ) {
-                                Icon(Icons.Default.Search, contentDescription = "Search project files")
-                            }
-                            IconButton(
-                                onClick = {
-                                    val next = !showEmulatorPanel
-                                    showEmulatorPanel = next
-                                    if (!isExpanded && next) showGeminiPanel = false
-                                },
-                                modifier = Modifier.testTag("toggle_emulator_button"),
-                            ) {
-                                Icon(
-                                    Icons.Default.PhoneAndroid,
-                                    contentDescription = "Toggle live emulator",
-                                    tint = if (showEmulatorPanel) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface,
-                                )
-                            }
-                            IconButton(
-                                onClick = { showBuildPanel = !showBuildPanel },
-                                modifier = Modifier.testTag("toggle_console_button"),
-                            ) {
-                                Icon(
-                                    Icons.Default.Terminal,
-                                    contentDescription = "Toggle build console",
-                                    tint = if (showBuildPanel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
-                                )
-                            }
-                            IconButton(
-                                onClick = {
-                                    val next = !showGeminiPanel
-                                    showGeminiPanel = next
-                                    if (!isExpanded && next) showEmulatorPanel = false
-                                },
-                                modifier = Modifier.testTag("toggle_gemini_button"),
-                            ) {
-                                Icon(
-                                    Icons.Default.AutoAwesome,
-                                    contentDescription = "Toggle AI agent",
-                                    tint = if (showGeminiPanel) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                Spacer(Modifier.width(4.dp))
+                                Text(
+                                    text = when {
+                                        isBuilding -> "Building"
+                                        selectedBuildVariant == BuildVariant.RELEASE_AAB -> "AAB"
+                                        selectedBuildVariant == BuildVariant.RELEASE_APK -> "Release"
+                                        else -> "Build"
+                                    },
+                                    maxLines = 1,
+                                    softWrap = false,
                                 )
                             }
                             Box {
@@ -391,6 +433,23 @@ fun IdeWorkspaceScreen(
                                     expanded = showMoreMenu,
                                     onDismissRequest = { showMoreMenu = false },
                                 ) {
+                                    DropdownMenuItem(
+                                        text = { Text("App Language & Min SDK") },
+                                        leadingIcon = { Icon(Icons.Default.Code, contentDescription = null) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            showProjectConfigDialog = true
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Import File into Project") },
+                                        leadingIcon = { Icon(Icons.Default.UploadFile, contentDescription = null) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            importProjectFileLauncher.launch(arrayOf("*/*"))
+                                        },
+                                    )
+                                    HorizontalDivider()
                                     DropdownMenuItem(
                                         text = { Text("Choose AI Model") },
                                         leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null) },
@@ -443,36 +502,6 @@ fun IdeWorkspaceScreen(
                                     )
                                 }
                             }
-                            Button(
-                                onClick = { onBuildApk(null) },
-                                enabled = !isBuilding,
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.secondary,
-                                    contentColor = MaterialTheme.colorScheme.onSecondary,
-                                ),
-                                modifier = Modifier
-                                    .padding(end = 8.dp)
-                                    .testTag("build_apk_button"),
-                            ) {
-                                if (isBuilding) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.onSecondary,
-                                    )
-                                } else {
-                                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                                }
-                                Spacer(Modifier.width(4.dp))
-                                Text(
-                                    when {
-                                        isBuilding -> "Building"
-                                        selectedBuildVariant == BuildVariant.RELEASE_AAB -> "Build AAB"
-                                        selectedBuildVariant == BuildVariant.RELEASE_APK -> "Release"
-                                        else -> "Build APK"
-                                    },
-                                )
-                            }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(
                             containerColor = MaterialTheme.colorScheme.surface,
@@ -483,8 +512,7 @@ fun IdeWorkspaceScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(innerPadding)
-                        .imePadding(),
+                        .padding(innerPadding),
                 ) {
                     // Persistent Explorer Sidebar on Expanded Screens
                     if (isExpanded) {
@@ -493,6 +521,7 @@ fun IdeWorkspaceScreen(
                             activeFilePath = activeFilePath,
                             onSelectFile = onSelectFile,
                             onCreateFile = { showNewFileDialog = true },
+                            onImportFile = { importProjectFileLauncher.launch(arrayOf("*/*")) },
                             onDeleteFile = onDeleteFile,
                             modifier = Modifier
                                 .width(225.dp)
@@ -507,6 +536,81 @@ fun IdeWorkspaceScreen(
                             .weight(1f)
                             .fillMaxHeight(),
                     ) {
+                        // Quick Workspace Tool Strip (keeps TopAppBar uncrowded on phones)
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceContainer,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                if (!isExpanded) {
+                                    WorkspaceStripChip(
+                                        icon = Icons.Default.FolderOpen,
+                                        label = "Files",
+                                        selected = drawerState.isOpen,
+                                        onClick = { scope.launch { drawerState.open() } },
+                                        tag = "open_files_drawer_button",
+                                    )
+                                }
+                                WorkspaceStripChip(
+                                    icon = Icons.Default.AutoAwesome,
+                                    label = "AI Agent",
+                                    selected = showGeminiPanel,
+                                    onClick = {
+                                        val next = !showGeminiPanel
+                                        showGeminiPanel = next
+                                        if (!isExpanded && next) showEmulatorPanel = false
+                                    },
+                                    tag = "toggle_gemini_button",
+                                )
+                                WorkspaceStripChip(
+                                    icon = Icons.Default.PhoneAndroid,
+                                    label = "Emulator",
+                                    selected = showEmulatorPanel,
+                                    onClick = {
+                                        val next = !showEmulatorPanel
+                                        showEmulatorPanel = next
+                                        if (!isExpanded && next) showGeminiPanel = false
+                                    },
+                                    tag = "toggle_emulator_button",
+                                )
+                                WorkspaceStripChip(
+                                    icon = Icons.Default.Terminal,
+                                    label = "Console",
+                                    selected = showBuildPanel,
+                                    onClick = { showBuildPanel = !showBuildPanel },
+                                    tag = "toggle_console_button",
+                                )
+                                WorkspaceStripChip(
+                                    icon = Icons.Default.Search,
+                                    label = "Search",
+                                    selected = showSearchDialog,
+                                    onClick = { showSearchDialog = true },
+                                    tag = "workspace_search_button",
+                                )
+                                WorkspaceStripChip(
+                                    icon = Icons.Default.UploadFile,
+                                    label = "Import",
+                                    selected = false,
+                                    onClick = { importProjectFileLauncher.launch(arrayOf("*/*")) },
+                                    tag = "import_project_file_button",
+                                )
+                                WorkspaceStripChip(
+                                    icon = Icons.Default.Settings,
+                                    label = "${project.language.displayName} • API ${project.minSdkVersion}",
+                                    selected = showProjectConfigDialog,
+                                    onClick = { showProjectConfigDialog = true },
+                                    tag = "project_config_chip",
+                                )
+                            }
+                        }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         // File Tabs Strip
                         Surface(
                             color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -581,7 +685,30 @@ fun IdeWorkspaceScreen(
                                 .weight(1f)
                                 .fillMaxWidth(),
                         ) {
-                            if (activeFile != null) {
+                            if (activeFile != null && activeFile.isBinary) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .padding(24.dp),
+                                    verticalArrangement = Arrangement.Center,
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    Icon(
+                                        Icons.Default.Description,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(48.dp),
+                                        tint = MaterialTheme.colorScheme.secondary,
+                                    )
+                                    Spacer(Modifier.height(10.dp))
+                                    Text(activeFile.fileName, style = MaterialTheme.typography.titleMedium)
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(
+                                        text = activeFile.content,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            } else if (activeFile != null) {
                                 CodeEditor(
                                     filePath = activeFile.relativePath,
                                     content = activeFile.content,
@@ -609,7 +736,7 @@ fun IdeWorkspaceScreen(
                                     Spacer(Modifier.height(10.dp))
                                     Text("No file open", style = MaterialTheme.typography.titleMedium)
                                     Text(
-                                        "Open a Java or XML file from the Project Explorer.",
+                                        "Open a Kotlin, Java, or XML file from the Project Explorer.",
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -681,6 +808,7 @@ fun IdeWorkspaceScreen(
                             activeThreadId = activeThreadId,
                             diagnostics = lastBuildResult?.diagnostics.orEmpty(),
                             messages = aiMessages,
+                            pendingAttachments = pendingAiAttachments,
                             aiState = aiState,
                             showSplitSideChat = showSplitSideChat,
                             onToggleSplitSideChat = { showSplitSideChat = !showSplitSideChat },
@@ -694,6 +822,14 @@ fun IdeWorkspaceScreen(
                             onCreateSideChat = onCreateSideChat,
                             onRenameChatThread = onRenameChatThread,
                             onDeleteChatThread = onDeleteChatThread,
+                            onPickPhoto = {
+                                pickPhotoLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            },
+                            onCaptureCamera = { launchCameraCapture() },
+                            onPickFile = { pickAiFileLauncher.launch(arrayOf("*/*")) },
+                            onRemoveAttachment = onRemoveAiAttachment,
                             onSendPrompt = onAskGemini,
                             onRetryGemini = onRetryGemini,
                             onStopGemini = onStopGemini,
@@ -751,6 +887,10 @@ fun IdeWorkspaceScreen(
                                 scope.launch { drawerState.close() }
                                 showNewFileDialog = true
                             },
+                            onImportFile = {
+                                scope.launch { drawerState.close() }
+                                importProjectFileLauncher.launch(arrayOf("*/*"))
+                            },
                             onDeleteFile = onDeleteFile,
                             modifier = Modifier.fillMaxSize(),
                         )
@@ -764,8 +904,15 @@ fun IdeWorkspaceScreen(
                 ModalBottomSheet(
                     onDismissRequest = { showEmulatorPanel = false },
                     sheetState = sheetState,
+                    contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
                 ) {
-                    Box(modifier = Modifier.height(600.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .fillMaxHeight(0.86f)
+                            .imePadding()
+                            .navigationBarsPadding(),
+                    ) {
                         EmulatorPanel(
                             appName = project.name,
                             packageName = project.packageName,
@@ -781,8 +928,15 @@ fun IdeWorkspaceScreen(
                 ModalBottomSheet(
                     onDismissRequest = { showGeminiPanel = false },
                     sheetState = sheetState,
+                    contentWindowInsets = { WindowInsets(0, 0, 0, 0) },
                 ) {
-                    Box(modifier = Modifier.height(580.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .fillMaxHeight(0.88f)
+                            .imePadding()
+                            .navigationBarsPadding(),
+                    ) {
                         GeminiPanel(
                             activeFileName = activeFile?.relativePath,
                             activeProvider = activeProvider,
@@ -796,6 +950,7 @@ fun IdeWorkspaceScreen(
                             activeThreadId = activeThreadId,
                             diagnostics = lastBuildResult?.diagnostics.orEmpty(),
                             messages = aiMessages,
+                            pendingAttachments = pendingAiAttachments,
                             aiState = aiState,
                             onSelectProvider = onSelectProvider,
                             onSelectThinkingMode = onSelectThinkingMode,
@@ -807,6 +962,14 @@ fun IdeWorkspaceScreen(
                             onCreateSideChat = onCreateSideChat,
                             onRenameChatThread = onRenameChatThread,
                             onDeleteChatThread = onDeleteChatThread,
+                            onPickPhoto = {
+                                pickPhotoLauncher.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                )
+                            },
+                            onCaptureCamera = { launchCameraCapture() },
+                            onPickFile = { pickAiFileLauncher.launch(arrayOf("*/*")) },
+                            onRemoveAttachment = onRemoveAiAttachment,
                             onSendPrompt = onAskGemini,
                             onRetryGemini = onRetryGemini,
                             onStopGemini = onStopGemini,
@@ -823,10 +986,23 @@ fun IdeWorkspaceScreen(
     if (showNewFileDialog) {
         NewFileDialog(
             packageName = project.packageName,
+            projectLanguage = project.language,
             onDismiss = { showNewFileDialog = false },
             onCreate = { path ->
                 showNewFileDialog = false
                 onCreateFile(path)
+            },
+        )
+    }
+
+    if (showProjectConfigDialog) {
+        ProjectConfigDialog(
+            currentLanguage = project.language,
+            currentMinSdk = project.minSdkVersion,
+            onDismiss = { showProjectConfigDialog = false },
+            onSave = { lang, minSdk ->
+                showProjectConfigDialog = false
+                onUpdateProjectConfig(lang, minSdk)
             },
         )
     }
@@ -889,11 +1065,53 @@ fun IdeWorkspaceScreen(
 }
 
 @Composable
+private fun WorkspaceStripChip(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    tag: String,
+) {
+    Surface(
+        onClick = onClick,
+        color = if (selected) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHigh
+        },
+        shape = RoundedCornerShape(10.dp),
+        modifier = Modifier.testTag(tag),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.size(15.dp),
+                tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                softWrap = false,
+            )
+        }
+    }
+}
+
+@Composable
 private fun ProjectExplorerPane(
     files: List<ProjectFile>,
     activeFilePath: String?,
     onSelectFile: (String) -> Unit,
     onCreateFile: () -> Unit,
+    onImportFile: () -> Unit,
     onDeleteFile: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -909,8 +1127,11 @@ private fun ProjectExplorerPane(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text("Project Files", style = MaterialTheme.typography.titleMedium)
-                IconButton(onClick = onCreateFile) {
+                Text("Project Files", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                IconButton(onClick = onImportFile, modifier = Modifier.testTag("explorer_import_file_button")) {
+                    Icon(Icons.Default.UploadFile, contentDescription = "Upload or import file")
+                }
+                IconButton(onClick = onCreateFile, modifier = Modifier.testTag("explorer_new_file_button")) {
                     Icon(Icons.Default.CreateNewFolder, contentDescription = "New file")
                 }
             }
@@ -941,14 +1162,13 @@ private fun ProjectExplorerPane(
                     ) {
                         Icon(
                             imageVector = when (file.language) {
-                                FileLanguage.JAVA -> Icons.Default.Code
+                                FileLanguage.JAVA, FileLanguage.KOTLIN -> Icons.Default.Code
                                 else -> Icons.Default.Description
                             },
                             contentDescription = null,
-                            tint = if (file.language == FileLanguage.JAVA) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.secondary
+                            tint = when (file.language) {
+                                FileLanguage.JAVA, FileLanguage.KOTLIN -> MaterialTheme.colorScheme.primary
+                                else -> MaterialTheme.colorScheme.secondary
                             },
                             modifier = Modifier.size(18.dp),
                         )
@@ -992,11 +1212,13 @@ private fun ProjectExplorerPane(
 @Composable
 private fun NewFileDialog(
     packageName: String,
+    projectLanguage: ProjectLanguage,
     onDismiss: () -> Unit,
     onCreate: (String) -> Unit,
 ) {
     val pkgPath = packageName.replace('.', '/')
-    var pathInput by remember { mutableStateOf("src/$pkgPath/Helper.java") }
+    val defaultExt = if (projectLanguage == ProjectLanguage.KOTLIN) "kt" else "java"
+    var pathInput by remember { mutableStateOf("src/$pkgPath/Helper.$defaultExt") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1004,7 +1226,7 @@ private fun NewFileDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "Enter a relative project path (Java under src/ or XML under res/values/).",
+                    text = "Enter a relative project path (.kt or .java under src/, or .xml under res/values/).",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1020,6 +1242,82 @@ private fun NewFileDialog(
         confirmButton = {
             Button(onClick = { onCreate(pathInput) }) {
                 Text("Create")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
+}
+
+@Composable
+private fun ProjectConfigDialog(
+    currentLanguage: ProjectLanguage,
+    currentMinSdk: Int,
+    onDismiss: () -> Unit,
+    onSave: (ProjectLanguage, Int) -> Unit,
+) {
+    var selectedLang by remember { mutableStateOf(currentLanguage) }
+    var selectedSdk by remember { mutableStateOf(AndroidMinSdk.fromApiLevel(currentMinSdk)) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("App Language & Min SDK") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Text("Primary Language", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ProjectLanguage.entries.forEach { lang ->
+                        FilterChip(
+                            selected = selectedLang == lang,
+                            onClick = { selectedLang = lang },
+                            label = { Text(lang.badge) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Text("Minimum Android Version (syncs to AndroidManifest.xml)", style = MaterialTheme.typography.labelLarge)
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    AndroidMinSdk.entries.forEach { sdk ->
+                        val selected = sdk == selectedSdk
+                        Surface(
+                            onClick = { selectedSdk = sdk },
+                            color = if (selected) {
+                                MaterialTheme.colorScheme.primaryContainer
+                            } else {
+                                MaterialTheme.colorScheme.surfaceContainerHigh
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                text = sdk.shortLabel,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onSave(selectedLang, selectedSdk.apiLevel) }) {
+                Text("Save")
             }
         },
         dismissButton = {

@@ -26,6 +26,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
@@ -37,7 +38,10 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material3.AlertDialog
@@ -77,6 +81,7 @@ import com.example.ai.ChatMessage
 import com.example.ai.GeminiCodeAssistant
 import com.example.ai.ProjectChatThread
 import com.example.ai.SuggestedCodeBlock
+import com.example.model.AiAttachment
 import com.example.model.BuildDiagnostic
 import com.example.ui.theme.JetBrainsMonoFontFamily
 
@@ -94,6 +99,7 @@ fun GeminiPanel(
     activeThreadId: String,
     diagnostics: List<BuildDiagnostic>,
     messages: List<ChatMessage>,
+    pendingAttachments: List<AiAttachment> = emptyList(),
     aiState: AiUiState,
     showSplitSideChat: Boolean = false,
     onToggleSplitSideChat: (() -> Unit)? = null,
@@ -107,6 +113,10 @@ fun GeminiPanel(
     onCreateSideChat: (String) -> Unit,
     onRenameChatThread: (String, String) -> Unit,
     onDeleteChatThread: (String) -> Unit,
+    onPickPhoto: () -> Unit = {},
+    onCaptureCamera: () -> Unit = {},
+    onPickFile: () -> Unit = {},
+    onRemoveAttachment: (String) -> Unit = {},
     onSendPrompt: (String) -> Unit,
     onRetryGemini: () -> Unit,
     onStopGemini: () -> Unit,
@@ -549,11 +559,93 @@ fun GeminiPanel(
 
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
+            // Pending Attachments Strip
+            if (pendingAttachments.isNotEmpty()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    pendingAttachments.forEach { att ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.secondaryContainer,
+                            shape = RoundedCornerShape(14.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(start = 10.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                Icon(
+                                    imageVector = if (att.isImage) Icons.Default.Image else Icons.Default.AttachFile,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                )
+                                Text(
+                                    text = att.displayName,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Remove ${att.displayName}",
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .clickable { onRemoveAttachment(att.id) },
+                                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Attachment Action Row (Photo Picker, Camera, SAF File Picker)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(start = 10.dp, end = 10.dp, top = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AssistChip(
+                    onClick = onPickPhoto,
+                    label = { Text("Photo", style = MaterialTheme.typography.labelSmall) },
+                    leadingIcon = {
+                        Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(15.dp))
+                    },
+                    modifier = Modifier.testTag("ai_attach_photo_button"),
+                )
+                AssistChip(
+                    onClick = onCaptureCamera,
+                    label = { Text("Camera", style = MaterialTheme.typography.labelSmall) },
+                    leadingIcon = {
+                        Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(15.dp))
+                    },
+                    modifier = Modifier.testTag("ai_attach_camera_button"),
+                )
+                AssistChip(
+                    onClick = onPickFile,
+                    label = { Text("Attach File", style = MaterialTheme.typography.labelSmall) },
+                    leadingIcon = {
+                        Icon(Icons.Default.AttachFile, contentDescription = null, modifier = Modifier.size(15.dp))
+                    },
+                    modifier = Modifier.testTag("ai_attach_file_button"),
+                )
+            }
+
             // Prompt Input
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(10.dp),
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -567,6 +659,7 @@ fun GeminiPanel(
                         .testTag("gemini_prompt_input"),
                 )
                 val isBusy = aiState is AiUiState.Streaming
+                val canSend = promptInput.isNotBlank() || pendingAttachments.isNotEmpty()
                 if (isBusy) {
                     IconButton(
                         onClick = onStopGemini,
@@ -586,12 +679,12 @@ fun GeminiPanel(
                                 return@IconButton
                             }
                             val p = promptInput.trim()
-                            if (p.isNotEmpty()) {
+                            if (p.isNotEmpty() || pendingAttachments.isNotEmpty()) {
                                 promptInput = ""
                                 onSendPrompt(p)
                             }
                         },
-                        enabled = promptInput.isNotBlank(),
+                        enabled = canSend,
                         modifier = Modifier.testTag("gemini_send_button"),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send prompt")
@@ -861,6 +954,41 @@ fun ChatBubble(
                     )
                 }
 
+                if (message.attachmentSummaries.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        message.attachmentSummaries.forEach { name ->
+                            Surface(
+                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.25f),
+                                shape = RoundedCornerShape(10.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Default.AttachFile,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(12.dp),
+                                        tint = textColor,
+                                    )
+                                    Text(
+                                        text = name,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = textColor,
+                                        maxLines = 1,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if (message.text.isEmpty() && message.isStreaming) {
                     if (message.steps.isEmpty()) {
                         Row(
@@ -872,10 +1000,10 @@ fun ChatBubble(
                         }
                     }
                 } else if (message.text.isNotEmpty()) {
-                    Text(
-                        text = message.text,
-                        style = MaterialTheme.typography.bodyMedium,
+                    MarkdownText(
+                        markdown = message.text,
                         color = textColor,
+                        isUser = message.isUser,
                     )
                 }
 

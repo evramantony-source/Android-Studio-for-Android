@@ -118,15 +118,15 @@ object EmulatorEngine {
             stringsMap,
         ).ifBlank { appName }
 
-        val javaFiles = files.filter { it.relativePath.endsWith(".java") }
-        val mainJava = javaFiles.find { it.fileName == "MainActivity.java" }
-            ?: javaFiles.firstOrNull()
+        val codeFiles = files.filter { it.relativePath.endsWith(".java") || it.relativePath.endsWith(".kt") }
+        val mainSource = codeFiles.find { it.fileName == "MainActivity.kt" || it.fileName == "MainActivity.java" }
+            ?: codeFiles.firstOrNull()
 
-        if (mainJava == null) {
-            return fallbackProgram(resolvedAppName, packageName, "No MainActivity.java found in src/")
+        if (mainSource == null) {
+            return fallbackProgram(resolvedAppName, packageName, "No MainActivity.java or MainActivity.kt found in src/")
         }
 
-        val code = mainJava.content
+        val code = mainSource.content
         val hasCanvas = code.contains("DrawingPadView") || files.any { it.content.contains("onTouchEvent") && it.content.contains("drawPath") }
         val isCalculator = code.contains("GridLayout") && code.contains("onKeyPress")
         val isCounter = code.contains("countDisplay") || (code.contains("count++") && code.contains("count--"))
@@ -489,15 +489,15 @@ object EmulatorEngine {
 
         val widgets = mutableListOf<EmulatorNode>()
 
-        // Parse TextView.setText(...) expressions
-        val textRegex = Regex("""(\w+)\.setText\(([^)]+)\)""")
+        // Parse TextView.setText(...) and Kotlin var.text = ... expressions
+        val textRegex = Regex("""(\w+)\.setText\(([^)]+)\)|(\w+)\.text\s*=\s*([^\n;]+)""")
         val seenTexts = linkedSetOf<String>()
         textRegex.findAll(code).forEachIndexed { idx, match ->
-            val varName = match.groupValues[1]
-            val arg = match.groupValues[2].trim()
+            val varName = match.groupValues[1].ifBlank { match.groupValues[3] }
+            val arg = match.groupValues[2].ifBlank { match.groupValues[4] }.trim()
             val resolved = evaluateJavaStringExpr(arg, appName, strings)
             if (resolved.isNotBlank() && seenTexts.add("$varName:$resolved")) {
-                val isBtn = code.contains(Regex("""Button\s+$varName\b"""))
+                val isBtn = code.contains(Regex("""Button\s+$varName\b|\bval\s+$varName\s*=\s*Button\b|\bvar\s+$varName\s*=\s*Button\b"""))
                 if (isBtn) {
                     val hasDialog = code.contains("AlertDialog")
                     val toastMatch = Regex("""Toast\.makeText\([^,]+,\s*"([^"]+)"""").find(code)
@@ -635,8 +635,9 @@ object EmulatorEngine {
     }
 
     private fun extractTextAssignment(code: String, varName: String, strings: Map<String, String>): String? {
-        val m = Regex("""\b$varName\.setText\(([^)]+)\)""").find(code) ?: return null
-        return evaluateJavaStringExpr(m.groupValues[1], strings["app_name"] ?: "App", strings)
+        val m = Regex("""\b$varName\.setText\(([^)]+)\)|\b$varName\.text\s*=\s*([^\n;]+)""").find(code) ?: return null
+        val expr = m.groupValues[1].ifBlank { m.groupValues[2] }
+        return evaluateJavaStringExpr(expr, strings["app_name"] ?: "App", strings)
     }
 
     private fun evaluateJavaStringExpr(expr: String, appName: String, strings: Map<String, String>): String {

@@ -43,20 +43,45 @@ object SyntaxHighlighter {
         "HashMap", "Override", "R",
     )
 
+    private val KOTLIN_KEYWORDS = setOf(
+        "abstract", "actual", "annotation", "as", "break", "by", "catch", "class",
+        "companion", "const", "constructor", "continue", "crossinline", "data",
+        "delegate", "do", "dynamic", "else", "enum", "expect", "external", "false",
+        "field", "file", "final", "finally", "for", "fun", "get", "if", "import",
+        "in", "infix", "init", "inline", "inner", "interface", "internal", "is",
+        "lateinit", "noinline", "null", "object", "open", "operator", "out", "override",
+        "package", "param", "private", "property", "protected", "public", "reified",
+        "return", "sealed", "set", "setparam", "super", "suspend", "tailrec", "this",
+        "throw", "true", "try", "typealias", "typeof", "val", "var", "vararg",
+        "when", "where", "while",
+    )
+
+    private val KOTLIN_COMMON_TYPES = JAVA_COMMON_TYPES + setOf(
+        "Int", "Long", "Float", "Double", "Boolean", "Char", "Byte", "Short",
+        "Unit", "Nothing", "Any", "IntArray", "FloatArray", "BooleanArray", "Array",
+        "MutableList", "MutableMap", "Pair", "Regex",
+    )
+
     fun highlight(
         code: String,
         language: FileLanguage,
         colors: SyntaxColors,
     ): AnnotatedString {
         return when (language) {
-            FileLanguage.JAVA -> highlightJava(code, colors)
+            FileLanguage.JAVA -> highlightJvmLanguage(code, colors, JAVA_KEYWORDS, JAVA_COMMON_TYPES)
+            FileLanguage.KOTLIN -> highlightJvmLanguage(code, colors, KOTLIN_KEYWORDS, KOTLIN_COMMON_TYPES)
             FileLanguage.XML -> highlightXml(code, colors)
             FileLanguage.JSON -> highlightJson(code, colors)
             FileLanguage.TEXT -> AnnotatedString(code)
         }
     }
 
-    private fun highlightJava(code: String, colors: SyntaxColors): AnnotatedString =
+    private fun highlightJvmLanguage(
+        code: String,
+        colors: SyntaxColors,
+        keywords: Set<String>,
+        commonTypes: Set<String>,
+    ): AnnotatedString =
         buildAnnotatedString {
             append(code)
             val len = code.length
@@ -115,12 +140,12 @@ object SyntaxHighlighter {
                         while (j < len && (code[j].isLetterOrDigit() || code[j] == '_')) j++
                         val word = code.substring(i, j)
                         when {
-                            word in JAVA_KEYWORDS -> addStyle(
+                            word in keywords -> addStyle(
                                 SpanStyle(color = colors.keyword, fontWeight = FontWeight.Medium),
                                 i,
                                 j,
                             )
-                            word in JAVA_COMMON_TYPES || (word[0].isUpperCase() && word.any { it.isLowerCase() }) ->
+                            word in commonTypes || (word[0].isUpperCase() && word.any { it.isLowerCase() }) ->
                                 addStyle(SpanStyle(color = colors.type), i, j)
                         }
                         i = j

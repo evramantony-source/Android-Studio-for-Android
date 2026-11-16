@@ -4,6 +4,8 @@ import com.android.apksig.ApkVerifier
 import com.example.compiler.OfflineApkBuilder
 import com.example.data.TemplateProvider
 import com.example.model.DiagnosticSeverity
+import com.example.model.FileLanguage
+import com.example.model.ProjectLanguage
 import com.example.model.ProjectTemplate
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -390,7 +392,11 @@ class OfflineApkBuilderTest {
                     com.example.model.ProjectFile(
                         relativePath = path,
                         content = content,
-                        language = if (path.endsWith(".java")) com.example.model.FileLanguage.JAVA else com.example.model.FileLanguage.XML,
+                        language = when {
+                            path.endsWith(".kt") -> FileLanguage.KOTLIN
+                            path.endsWith(".java") -> FileLanguage.JAVA
+                            else -> FileLanguage.XML
+                        },
                     )
                 }
             val parsed = com.example.emulator.EmulatorEngine.parseProject(
@@ -399,6 +405,171 @@ class OfflineApkBuilderTest {
                 files = files,
             )
             assertTrue("Expected widgets parsed for ${template.name}", parsed.detectedWidgetsCount > 0)
+        }
+    }
+
+    @Test
+    fun buildsAndSignsAllKotlinStarterTemplates() {
+        val builder = OfflineApkBuilder()
+        ProjectTemplate.entries.forEach { template ->
+            val projectDir = tempFolder.newFolder("kt_${template.name.lowercase()}")
+            val files = TemplateProvider.generateFiles(
+                template = template,
+                appName = template.defaultAppName,
+                packageName = template.defaultPackage,
+                language = ProjectLanguage.KOTLIN,
+                minSdkVersion = 24,
+            )
+            files.forEach { (relPath, content) ->
+                val target = File(projectDir, relPath)
+                target.parentFile?.mkdirs()
+                target.writeText(content)
+            }
+
+            val result = builder.buildWithToolchain(
+                projectDir = projectDir,
+                packageName = template.defaultPackage,
+                stubsJar = resolveAsset("android-stubs.jar"),
+                keystoreFile = resolveAsset("debug_signing.p12"),
+                targetMinSdk = 24,
+            )
+            assertTrue(
+                "Expected Kotlin build to succeed for ${template.name}, logs=${result.logs}",
+                result.success,
+            )
+
+            val apkFile = File(result.apkPath!!)
+            val verification = ApkVerifier.Builder(apkFile)
+                .setMinCheckedPlatformVersion(24)
+                .build()
+                .verify()
+            assertTrue(
+                "APK signature failed for Kotlin ${template.name}: ${verification.errors}",
+                verification.isVerified,
+            )
+        }
+    }
+
+    @Test
+    fun reportsKotlinErrorLineBackToKtSource() {
+        val projectDir = tempFolder.newFolder("broken_kotlin_project")
+        val files = TemplateProvider.generateFiles(
+            template = ProjectTemplate.BLANK_ACTIVITY,
+            appName = "BrokenKt",
+            packageName = "com.example.brokenkt",
+            language = ProjectLanguage.KOTLIN,
+            minSdkVersion = 24,
+        ).toMutableMap()
+        files["src/com/example/brokenkt/MainActivity.kt"] = """
+            package com.example.brokenkt
+
+            import android.app.Activity
+            import android.os.Bundle
+
+            class MainActivity : Activity() {
+                override fun onCreate(savedInstanceState: Bundle?) {
+                    super.onCreate(savedInstanceState)
+                    missingKotlinCall()
+                }
+            }
+        """.trimIndent()
+
+        files.forEach { (relPath, content) ->
+            val target = File(projectDir, relPath)
+            target.parentFile?.mkdirs()
+            target.writeText(content)
+        }
+
+        val result = OfflineApkBuilder().buildWithToolchain(
+            projectDir = projectDir,
+            packageName = "com.example.brokenkt",
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = resolveAsset("debug_signing.p12"),
+            targetMinSdk = 24,
+        )
+
+        assertFalse("Expected broken Kotlin project to fail compilation", result.success)
+        assertTrue(
+            "Expected error diagnostic mapped back to MainActivity.kt line 9, got=${result.diagnostics}",
+            result.diagnostics.any {
+                it.severity == DiagnosticSeverity.ERROR &&
+                    it.filePath.endsWith("MainActivity.kt") &&
+                    it.line == 9
+            },
+        )
+    }
+
+    @Test
+    fun propagatesCustomMinSdkVersionToBuiltApk() {
+        val projectDir = tempFolder.newFolder("custom_min_sdk_project")
+        val files = TemplateProvider.generateFiles(
+            template = ProjectTemplate.COUNTER_APP,
+            appName = "Api28App",
+            packageName = "com.example.api28",
+            language = ProjectLanguage.KOTLIN,
+            minSdkVersion = 28,
+        )
+        files.forEach { (relPath, content) ->
+            val target = File(projectDir, relPath)
+            target.parentFile?.mkdirs()
+            target.writeText(content)
+        }
+
+        val result = OfflineApkBuilder().buildWithToolchain(
+            projectDir = projectDir,
+            packageName = "com.example.api28",
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = resolveAsset("debug_signing.p12"),
+            targetMinSdk = 28,
+        )
+        assertTrue("Expected custom minSdk build to succeed, logs=${result.logs}", result.success)
+
+        val apkFile = File(result.apkPath!!)
+        val verification = ApkVerifier.Builder(apkFile)
+            .setMinCheckedPlatformVersion(28)
+            .build()
+            .verify()
+        assertTrue("Signature verification failed: ${verification.errors}", verification.isVerified)
+
+        val sdkRoot = System.getenv("ANDROID_SDK_ROOT") ?: return
+        val buildToolsDir = File(sdkRoot, "build-tools").listFiles()
+            ?.filter { it.isDirectory }
+            ?.maxByOrNull { it.name } ?: return
+        val aapt2 = File(buildToolsDir, "aapt2").takeIf { it.exists() } ?: return
+
+        val badgingProc = ProcessBuilder(aapt2.absolutePath, "dump", "badging", apkFile.absolutePath)
+            .redirectErrorStream(true).start()
+        val badgingOut = badgingProc.inputStream.bufferedReader().readText()
+        assertEquals("aapt2 badging failed:\n$badgingOut", 0, badgingProc.waitFor())
+        assertTrue("Expected minSdkVersion:'28' in:\n$badgingOut", badgingOut.contains("minSdkVersion:'28'"))
+    }
+
+    @Test
+    fun emulatorEngineParsesAllKotlinStarterTemplates() {
+        ProjectTemplate.entries.forEach { template ->
+            val files = TemplateProvider.generateFiles(
+                template = template,
+                appName = template.defaultAppName,
+                packageName = template.defaultPackage,
+                language = ProjectLanguage.KOTLIN,
+                minSdkVersion = 24,
+            ).map { (path, content) ->
+                com.example.model.ProjectFile(
+                    relativePath = path,
+                    content = content,
+                    language = when {
+                        path.endsWith(".kt") -> FileLanguage.KOTLIN
+                        path.endsWith(".java") -> FileLanguage.JAVA
+                        else -> FileLanguage.XML
+                    },
+                )
+            }
+            val parsed = com.example.emulator.EmulatorEngine.parseProject(
+                appName = template.defaultAppName,
+                packageName = template.defaultPackage,
+                files = files,
+            )
+            assertTrue("Expected widgets parsed for Kotlin ${template.name}", parsed.detectedWidgetsCount > 0)
         }
     }
 }

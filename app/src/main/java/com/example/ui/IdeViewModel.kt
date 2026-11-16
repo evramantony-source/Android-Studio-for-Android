@@ -1,7 +1,11 @@
 package com.example.ui
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
+import android.provider.OpenableColumns
+import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ai.AgentToolResult
@@ -21,15 +25,19 @@ import com.example.ai.SuggestedCodeBlock
 import com.example.compiler.KeystoreManager
 import com.example.compiler.OfflineApkBuilder
 import com.example.data.ProjectRepository
+import com.example.model.AiAttachment
 import com.example.model.BuildDiagnostic
 import com.example.model.BuildResult
 import com.example.model.BuildVariant
 import com.example.model.EditorSettings
 import com.example.model.ProjectFile
+import com.example.model.ProjectLanguage
 import com.example.model.ProjectMetadata
 import com.example.model.ProjectSearchHit
 import com.example.model.ProjectTemplate
 import com.example.model.ReleaseSigningConfig
+import java.io.ByteArrayOutputStream
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -95,6 +103,9 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isFetchingModels = MutableStateFlow(false)
     val isFetchingModels: StateFlow<Boolean> = _isFetchingModels.asStateFlow()
+
+    private val _pendingAiAttachments = MutableStateFlow<List<AiAttachment>>(emptyList())
+    val pendingAiAttachments: StateFlow<List<AiAttachment>> = _pendingAiAttachments.asStateFlow()
 
     val editorSettings: StateFlow<EditorSettings> = repository.editorSettings.stateIn(
         scope = viewModelScope,
@@ -176,13 +187,30 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createProject(name: String, packageName: String, template: ProjectTemplate) {
+    fun createProject(
+        name: String,
+        packageName: String,
+        template: ProjectTemplate,
+        language: ProjectLanguage = ProjectLanguage.JAVA,
+        minSdkVersion: Int = 24,
+    ) {
         viewModelScope.launch {
             val cleanName = name.trim().ifBlank { template.defaultAppName }
             val cleanPkg = sanitizePackageName(packageName.trim().ifBlank { template.defaultPackage })
-            val meta = repository.createProject(cleanName, cleanPkg, template)
+            val meta = repository.createProject(cleanName, cleanPkg, template, language, minSdkVersion)
             _projects.value = repository.listProjects()
             openProject(meta)
+        }
+    }
+
+    fun updateProjectConfig(language: ProjectLanguage, minSdkVersion: Int) {
+        val project = _activeProject.value ?: return
+        viewModelScope.launch {
+            val updated = repository.updateProjectConfig(project.id, language, minSdkVersion) ?: return@launch
+            _activeProject.value = updated
+            _projects.value = repository.listProjects()
+            _projectFiles.value = repository.loadProjectFiles(project.id)
+            _statusBanner.value = "Updated project: ${updated.language.displayName}, Min SDK API ${updated.minSdkVersion}"
         }
     }
 
@@ -273,6 +301,8 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     fun updateActiveFileContent(newContent: String) {
         val project = _activeProject.value ?: return
         val path = _activeFilePath.value ?: return
+        val active = _projectFiles.value.find { it.relativePath == path }
+        if (active?.isBinary == true) return
         _projectFiles.value = _projectFiles.value.map { file ->
             if (file.relativePath == path) file.copy(content = newContent) else file
         }
@@ -285,7 +315,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun saveAllImmediately() {
         val project = _activeProject.value ?: return
-        val files = _projectFiles.value
+        val files = _projectFiles.value.filterNot { it.isBinary }
         viewModelScope.launch {
             files.forEach { file ->
                 repository.saveFile(project.id, file.relativePath, file.content)
@@ -310,7 +340,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
             _liveLogs.value = listOf("Starting ${variant.label} build for ${project.name}...")
             _lastBuildResult.value = null
 
-            _projectFiles.value.forEach { file ->
+            _projectFiles.value.filterNot { it.isBinary }.forEach { file ->
                 repository.saveFile(project.id, file.relativePath, file.content)
             }
 
@@ -319,6 +349,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 packageName = project.packageName,
                 variant = variant,
                 releaseSigning = signing,
+                targetMinSdk = project.minSdkVersion,
                 onProgress = { line ->
                     _liveLogs.value = _liveLogs.value + line
                 },
@@ -461,7 +492,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     fun exportProjectZipToUri(destinationUri: Uri) {
         val project = _activeProject.value ?: return
         viewModelScope.launch {
-            _projectFiles.value.forEach { file ->
+            _projectFiles.value.filterNot { it.isBinary }.forEach { file ->
                 repository.saveFile(project.id, file.relativePath, file.content)
             }
             val ok = withContext(Dispatchers.IO) {
@@ -618,6 +649,135 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         _splitSideThreadId.value = threadId
     }
 
+    fun addAiAttachmentFromUri(uri: Uri, forceImage: Boolean = false) {
+        viewModelScope.launch {
+            val attachment = withContext(Dispatchers.IO) {
+                runCatching {
+                    val resolver = getApplication<Application>().contentResolver
+                    val displayName = resolveDisplayName(uri) ?: if (forceImage) "photo_${System.currentTimeMillis()}.jpg" else "attachment"
+                    val rawMime = resolver.getType(uri)?.lowercase().orEmpty()
+                    val ext = displayName.substringAfterLast('.', "").lowercase()
+                    val isImage = forceImage || rawMime.startsWith("image/") || ext in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")
+
+                    if (isImage) {
+                        val rawBytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                            ?: error("Could not read image")
+                        val compressed = compressImageForAi(rawBytes)
+                        val base64 = Base64.encodeToString(compressed, Base64.NO_WRAP)
+                        AiAttachment(
+                            id = UUID.randomUUID().toString().take(8),
+                            displayName = displayName,
+                            mimeType = "image/jpeg",
+                            isImage = true,
+                            sizeBytes = compressed.size.toLong(),
+                            base64Data = base64,
+                            previewUriString = uri.toString(),
+                        )
+                    } else {
+                        val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                            ?: error("Could not read file")
+                        val text = bytes.take(48_000).toByteArray().toString(Charsets.UTF_8)
+                        AiAttachment(
+                            id = UUID.randomUUID().toString().take(8),
+                            displayName = displayName,
+                            mimeType = rawMime.ifBlank { "text/plain" },
+                            isImage = false,
+                            sizeBytes = bytes.size.toLong(),
+                            textContent = text,
+                            previewUriString = uri.toString(),
+                        )
+                    }
+                }.getOrNull()
+            }
+            if (attachment != null) {
+                _pendingAiAttachments.value = (_pendingAiAttachments.value + attachment).takeLast(5)
+            } else {
+                _statusBanner.value = "Failed to attach selected file or image."
+            }
+        }
+    }
+
+    fun removePendingAttachment(id: String) {
+        _pendingAiAttachments.value = _pendingAiAttachments.value.filterNot { it.id == id }
+    }
+
+    fun importProjectFileFromUri(uri: Uri) {
+        val project = _activeProject.value ?: return
+        viewModelScope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching {
+                    val resolver = getApplication<Application>().contentResolver
+                    val rawName = (resolveDisplayName(uri) ?: "imported_${System.currentTimeMillis()}")
+                        .replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: error("Unable to read selected file")
+                    val pkgPath = project.packageName.replace('.', '/')
+                    val lower = rawName.lowercase()
+                    val targetRelPath = when {
+                        lower.endsWith(".java") || lower.endsWith(".kt") -> "src/$pkgPath/$rawName"
+                        lower.endsWith(".xml") -> "res/values/$rawName"
+                        else -> "assets/$rawName"
+                    }
+                    if (repository.isBinaryPath(targetRelPath)) {
+                        repository.saveBinaryFile(project.id, targetRelPath, bytes)
+                    } else {
+                        repository.saveFile(project.id, targetRelPath, bytes.toString(Charsets.UTF_8))
+                    }
+                    targetRelPath
+                }
+            }
+            outcome.onSuccess { importedPath ->
+                _projectFiles.value = repository.loadProjectFiles(project.id)
+                openFile(importedPath)
+                _statusBanner.value = "Imported $importedPath into project."
+            }.onFailure { err ->
+                _statusBanner.value = "File import failed: ${err.localizedMessage}"
+            }
+        }
+    }
+
+    private fun resolveDisplayName(uri: Uri): String? {
+        val resolver = getApplication<Application>().contentResolver
+        resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (idx >= 0) {
+                    val v = cursor.getString(idx)
+                    if (!v.isNullOrBlank()) return v
+                }
+            }
+        }
+        return uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+    }
+
+    private fun compressImageForAi(rawBytes: ByteArray): ByteArray {
+        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, boundsOpts)
+        var sampleSize = 1
+        val maxDim = 1024
+        while (boundsOpts.outWidth / sampleSize > maxDim * 2 || boundsOpts.outHeight / sampleSize > maxDim * 2) {
+            sampleSize *= 2
+        }
+        val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        val bmp = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts) ?: return rawBytes
+        val scale = minOf(1f, maxDim.toFloat() / maxOf(bmp.width, bmp.height).coerceAtLeast(1))
+        val finalBmp = if (scale < 0.99f) {
+            Bitmap.createScaledBitmap(
+                bmp,
+                (bmp.width * scale).toInt().coerceAtLeast(1),
+                (bmp.height * scale).toInt().coerceAtLeast(1),
+                true,
+            )
+        } else {
+            bmp
+        }
+        val out = ByteArrayOutputStream()
+        finalBmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        if (finalBmp !== bmp) finalBmp.recycle()
+        bmp.recycle()
+        return out.toByteArray()
+    }
+
     fun askGemini(prompt: String) {
         val project = _activeProject.value ?: return
         val active = _projectFiles.value.find { it.relativePath == _activeFilePath.value }
@@ -626,6 +786,8 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         val thinkingMode = aiThinkingMode.value
         val apiKey = providerApiKeys.value[provider].orEmpty()
         val modelId = providerModels.value[provider].orEmpty().ifBlank { provider.defaultModelId }
+        val attachmentsSnapshot = _pendingAiAttachments.value
+        _pendingAiAttachments.value = emptyList()
         val threadIdAtStart = _activeThreadId.value
         val previousJob = aiJob
 
@@ -640,6 +802,9 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 thinkingMode = thinkingMode,
                 projectName = project.name,
                 packageName = project.packageName,
+                projectLanguage = project.language,
+                minSdkVersion = project.minSdkVersion,
+                attachments = attachmentsSnapshot,
                 activeFile = active,
                 allFiles = _projectFiles.value,
                 diagnostics = diagnostics,
@@ -711,7 +876,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
         private suspend fun flushInMemoryFiles() {
             saveJob?.cancel()
-            _projectFiles.value.forEach { file ->
+            _projectFiles.value.filterNot { it.isBinary }.forEach { file ->
                 repository.saveFile(projectId, file.relativePath, file.content)
             }
         }
@@ -949,6 +1114,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                     packageName = packageName,
                     variant = variant,
                     releaseSigning = releaseSigningConfig.value,
+                    targetMinSdk = _activeProject.value?.minSdkVersion,
                     onProgress = { line ->
                         _liveLogs.value = _liveLogs.value + line
                     },
@@ -1027,6 +1193,21 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
                 public class $className {
                     public $className() {
+                    }
+                }
+                """.trimIndent() + "\n"
+            }
+            relPath.endsWith(".kt") -> {
+                val className = relPath.substringAfterLast('/').removeSuffix(".kt")
+                val pkgSub = relPath.removePrefix("src/").substringBeforeLast('/', "")
+                    .replace('/', '.')
+                    .ifBlank { packageName }
+                """
+                package $pkgSub
+
+                class $className {
+                    fun info(): String {
+                        return "$className ready"
                     }
                 }
                 """.trimIndent() + "\n"

@@ -76,10 +76,17 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
 import com.example.ai.AiModelOption
 import com.example.ai.AiProvider
 import com.example.ai.AiUsageSummary
+import com.example.model.AndroidMinSdk
 import com.example.model.EditorSettings
+import com.example.model.ProjectLanguage
 import com.example.model.ProjectMetadata
 import com.example.model.ProjectTemplate
 import com.example.model.ReleaseSigningConfig
@@ -106,7 +113,7 @@ fun ProjectsScreen(
     statusBanner: String?,
     onClearStatusBanner: () -> Unit,
     onOpenProject: (ProjectMetadata) -> Unit,
-    onCreateProject: (String, String, ProjectTemplate) -> Unit,
+    onCreateProject: (String, String, ProjectTemplate, ProjectLanguage, Int) -> Unit,
     onDeleteProject: (String) -> Unit,
     onUpdateSettings: ((EditorSettings) -> EditorSettings) -> Unit,
     onSelectModel: (AiProvider, String) -> Unit,
@@ -125,6 +132,7 @@ fun ProjectsScreen(
     var showModelMenuDialog by remember { mutableStateOf(false) }
     var showKeysDialog by remember { mutableStateOf(false) }
     var showKeystoreDialog by remember { mutableStateOf(false) }
+    var showHomeMenu by remember { mutableStateOf(false) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val nf = remember { NumberFormat.getIntegerInstance() }
@@ -160,48 +168,88 @@ fun ProjectsScreen(
                                 modifier = Modifier.padding(6.dp),
                             )
                         }
-                        Column {
-                            Text("DroidForge Studio", style = MaterialTheme.typography.titleLarge)
+                        Column(modifier = Modifier.weight(1f, fill = false)) {
                             Text(
-                                "Offline APK & AAB IDE • Live Emulator",
+                                text = "DroidForge Studio",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                text = "Offline APK & AAB IDE",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
                 },
                 actions = {
                     IconButton(
-                        onClick = { showUsageDialog = true },
-                        modifier = Modifier.testTag("home_ai_usage_button"),
-                    ) {
-                        Icon(Icons.Default.Analytics, contentDescription = "AI usage and tokens")
-                    }
-                    IconButton(
                         onClick = { showKeysDialog = true },
                         modifier = Modifier.testTag("home_ai_keys_button"),
                     ) {
                         Icon(Icons.Default.Key, contentDescription = "AI provider keys")
                     }
-                    IconButton(
-                        onClick = { showKeystoreDialog = true },
-                        modifier = Modifier.testTag("home_keystore_button"),
-                    ) {
-                        Icon(
-                            Icons.Default.VerifiedUser,
-                            contentDescription = "Release keystore manager",
-                            tint = if (releaseSigningConfig.isConfigured) {
-                                MaterialTheme.colorScheme.secondary
-                            } else {
-                                MaterialTheme.colorScheme.onSurface
-                            },
-                        )
-                    }
-                    IconButton(
-                        onClick = { showSettingsDialog = true },
-                        modifier = Modifier.testTag("open_settings_button"),
-                    ) {
-                        Icon(Icons.Default.Settings, contentDescription = "IDE Settings")
+                    Box {
+                        IconButton(
+                            onClick = { showHomeMenu = true },
+                            modifier = Modifier.testTag("home_more_menu_button"),
+                        ) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "More IDE options")
+                        }
+                        DropdownMenu(
+                            expanded = showHomeMenu,
+                            onDismissRequest = { showHomeMenu = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("AI Usage & Tokens") },
+                                leadingIcon = { Icon(Icons.Default.Analytics, contentDescription = null) },
+                                onClick = {
+                                    showHomeMenu = false
+                                    showUsageDialog = true
+                                },
+                                modifier = Modifier.testTag("home_ai_usage_button"),
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Choose AI Model") },
+                                leadingIcon = { Icon(Icons.Default.AutoAwesome, contentDescription = null) },
+                                onClick = {
+                                    showHomeMenu = false
+                                    showModelMenuDialog = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Release Keystore Manager") },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.VerifiedUser,
+                                        contentDescription = null,
+                                        tint = if (releaseSigningConfig.isConfigured) {
+                                            MaterialTheme.colorScheme.secondary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurface
+                                        },
+                                    )
+                                },
+                                onClick = {
+                                    showHomeMenu = false
+                                    showKeystoreDialog = true
+                                },
+                                modifier = Modifier.testTag("home_keystore_button"),
+                            )
+                            DropdownMenuItem(
+                                text = { Text("IDE Settings") },
+                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                onClick = {
+                                    showHomeMenu = false
+                                    showSettingsDialog = true
+                                },
+                                modifier = Modifier.testTag("open_settings_button"),
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -434,7 +482,7 @@ fun ProjectsScreen(
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    text = project.packageName,
+                                    text = "${project.packageName} • ${project.language.displayName} • API ${project.minSdkVersion}",
                                     fontFamily = JetBrainsMonoFontFamily,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -485,9 +533,9 @@ fun ProjectsScreen(
         CreateProjectDialog(
             initialTemplate = template,
             onDismiss = { createDialogTemplate = null },
-            onConfirm = { name, pkg, selectedTemplate ->
+            onConfirm = { name, pkg, selectedTemplate, language, minSdk ->
                 createDialogTemplate = null
-                onCreateProject(name, pkg, selectedTemplate)
+                onCreateProject(name, pkg, selectedTemplate, language, minSdk)
             },
         )
     }
@@ -638,19 +686,21 @@ private fun StudioMetricCard(
 private fun CreateProjectDialog(
     initialTemplate: ProjectTemplate,
     onDismiss: () -> Unit,
-    onConfirm: (String, String, ProjectTemplate) -> Unit,
+    onConfirm: (String, String, ProjectTemplate, ProjectLanguage, Int) -> Unit,
 ) {
     var selectedTemplate by remember { mutableStateOf(initialTemplate) }
+    var selectedLanguage by remember { mutableStateOf(ProjectLanguage.KOTLIN) }
+    var selectedMinSdk by remember { mutableStateOf(AndroidMinSdk.API_24) }
     var appName by remember { mutableStateOf(initialTemplate.defaultAppName) }
     var packageName by remember { mutableStateOf(initialTemplate.defaultPackage) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("New Android Java Project") },
+        title = { Text("New Android Project") },
         text = {
             Column(
                 modifier = Modifier
-                    .heightIn(max = 380.dp)
+                    .heightIn(max = 430.dp)
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -673,6 +723,41 @@ private fun CreateProjectDialog(
                         .fillMaxWidth()
                         .testTag("new_project_pkg_input"),
                 )
+
+                Text("Language", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    ProjectLanguage.entries.forEach { lang ->
+                        FilterChip(
+                            selected = selectedLanguage == lang,
+                            onClick = { selectedLanguage = lang },
+                            label = { Text(lang.badge) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("create_lang_${lang.name.lowercase()}"),
+                        )
+                    }
+                }
+
+                Text("Minimum Android Version", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    AndroidMinSdk.entries.forEach { sdk ->
+                        FilterChip(
+                            selected = selectedMinSdk == sdk,
+                            onClick = { selectedMinSdk = sdk },
+                            label = { Text(sdk.shortLabel, style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.testTag("create_minsdk_${sdk.apiLevel}"),
+                        )
+                    }
+                }
+
                 Text("Template", style = MaterialTheme.typography.labelLarge)
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     ProjectTemplate.entries.forEach { t ->
@@ -708,7 +793,15 @@ private fun CreateProjectDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onConfirm(appName, packageName, selectedTemplate) },
+                onClick = {
+                    onConfirm(
+                        appName,
+                        packageName,
+                        selectedTemplate,
+                        selectedLanguage,
+                        selectedMinSdk.apiLevel,
+                    )
+                },
                 modifier = Modifier.testTag("confirm_create_project_button"),
             ) {
                 Text("Create")
