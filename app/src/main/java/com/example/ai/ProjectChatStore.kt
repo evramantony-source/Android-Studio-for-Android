@@ -77,6 +77,22 @@ interface ProjectToolExecutor {
     suspend fun searchFiles(query: String): AgentToolResult
     suspend fun buildApk(isRelease: Boolean = false): AgentToolResult
     suspend fun buildAab(): AgentToolResult
+    suspend fun githubStatus(): AgentToolResult = AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubListRepos(): AgentToolResult = AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubCreateRepo(name: String, description: String = "", isPrivate: Boolean = false): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubLinkRepo(owner: String, repo: String, branch: String = "main"): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubListRepoFiles(owner: String, repo: String, branch: String): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubReadFile(path: String, owner: String, repo: String, branch: String): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubPullChanges(): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubPushChanges(commitMessage: String): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubTriggerCloudBuild(): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
 }
 
 object ProjectChatStore {

@@ -130,9 +130,15 @@ fun GeminiPanel(
     var showModelMenuDialog by remember { mutableStateOf(false) }
     var showUsageDialog by remember { mutableStateOf(false) }
     var renameThreadTarget by remember { mutableStateOf<ProjectChatThread?>(null) }
+    var isPanelReady by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
-    val currentModelId = providerModels[activeProvider].orEmpty().ifBlank { activeProvider.defaultModelId }
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.yield()
+        isPanelReady = true
+    }
+
+    val currentModelId = com.example.ai.AiModelsCatalog.normalizeModelId(activeProvider, providerModels[activeProvider])
     val hasEffectiveKey = remember(activeProvider, providerApiKeys) {
         when (activeProvider) {
             AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
@@ -157,6 +163,33 @@ fun GeminiPanel(
         tonalElevation = 2.dp,
         modifier = modifier.fillMaxSize(),
     ) {
+        if (!isPanelReady) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("gemini_panel_loading"),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.padding(24.dp),
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 3.dp)
+                    Text(
+                        text = "Loading ${activeProvider.shortName} Agent...",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    Text(
+                        text = currentModelId,
+                        fontFamily = JetBrainsMonoFontFamily,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+            }
+            return@Surface
+        }
         Column(modifier = Modifier.fillMaxSize()) {
             // Top Header
             Row(

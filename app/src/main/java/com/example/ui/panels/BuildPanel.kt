@@ -1,6 +1,7 @@
 package com.example.ui.panels
 
 import androidx.compose.foundation.background
+import java.util.Locale
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Key
@@ -79,6 +81,7 @@ fun BuildPanel(
     onAskGeminiToFix: () -> Unit,
     onExportArtifact: (String) -> Unit,
     onShareArtifact: (String) -> Unit,
+    onOpenGitHubCloudBuild: () -> Unit = {},
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -182,6 +185,14 @@ fun BuildPanel(
                         Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(15.dp))
                     },
                 )
+                AssistChip(
+                    onClick = onOpenGitHubCloudBuild,
+                    label = { Text("Cloud CI", style = MaterialTheme.typography.labelSmall) },
+                    leadingIcon = {
+                        Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(15.dp))
+                    },
+                    modifier = Modifier.testTag("build_panel_cloud_ci_chip"),
+                )
             }
 
             if (isBuilding) {
@@ -200,6 +211,7 @@ fun BuildPanel(
                     onExportArtifact = onExportArtifact,
                     onShareArtifact = onShareArtifact,
                     onOpenEmulator = onOpenEmulator,
+                    onOpenGitHubCloudBuild = onOpenGitHubCloudBuild,
                     modifier = Modifier.weight(1f),
                 )
             } else {
@@ -222,6 +234,7 @@ private fun BuildConsoleTab(
     onExportArtifact: (String) -> Unit,
     onShareArtifact: (String) -> Unit,
     onOpenEmulator: () -> Unit,
+    onOpenGitHubCloudBuild: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
@@ -301,15 +314,36 @@ private fun BuildConsoleTab(
                                 Spacer(Modifier.width(6.dp))
                                 Text("Emulator")
                             }
+                            OutlinedButton(
+                                onClick = onOpenGitHubCloudBuild,
+                                modifier = Modifier.testTag("cloud_ci_after_build"),
+                            ) {
+                                Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("GitHub CI")
+                            }
                         }
                     } else if (!buildResult.success) {
-                        Button(
-                            onClick = onAskGeminiToFix,
-                            modifier = Modifier.testTag("gemini_fix_errors_button"),
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Ask AI to Fix Errors")
+                            Button(
+                                onClick = onAskGeminiToFix,
+                                modifier = Modifier.testTag("gemini_fix_errors_button"),
+                            ) {
+                                Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Ask AI to Fix Errors")
+                            }
+                            OutlinedButton(
+                                onClick = onOpenGitHubCloudBuild,
+                                modifier = Modifier.testTag("cloud_ci_on_failure"),
+                            ) {
+                                Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Cloud CI")
+                            }
                         }
                     }
                 }
@@ -375,7 +409,7 @@ private fun BuildConsoleTab(
             if (logs.isEmpty()) {
                 item {
                     Text(
-                        text = "Choose Debug APK, Release APK, or Release AAB above and tap Build to compile Java, package binary/proto resources, dex bytecode, and sign offline.",
+                        text = "Choose Debug APK, Release APK, or Release AAB above to compile Java 8-25 or Kotlin offline with streaming ZIP64 packaging, or tap Cloud CI for multi-GB external Gradle/NDK builds on GitHub Actions.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -538,7 +572,9 @@ private fun ArtifactInspectorTab(
 fun formatBytes(bytes: Long): String {
     if (bytes < 1024) return "$bytes B"
     val kb = bytes / 1024.0
-    if (kb < 1024) return String.format("%.1f KB", kb)
+    if (kb < 1024) return String.format(Locale.US, "%.1f KB", kb)
     val mb = kb / 1024.0
-    return String.format("%.2f MB", mb)
+    if (mb < 1024) return String.format(Locale.US, "%.2f MB", mb)
+    val gb = mb / 1024.0
+    return String.format(Locale.US, "%.2f GB", gb)
 }

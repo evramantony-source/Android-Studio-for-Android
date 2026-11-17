@@ -8,6 +8,7 @@ import com.example.model.BuildDiagnostic
 import com.example.model.BuildResult
 import com.example.model.BuildVariant
 import com.example.model.DiagnosticSeverity
+import com.example.model.JavaVersionOption
 import com.example.model.ReleaseSigningConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -38,6 +39,7 @@ class OfflineApkBuilder(
         variant: BuildVariant = BuildVariant.DEBUG_APK,
         releaseSigning: ReleaseSigningConfig? = null,
         targetMinSdk: Int? = null,
+        targetJavaVersion: JavaVersionOption = JavaVersionOption.JAVA_17,
         onProgress: (String) -> Unit = {},
     ): BuildResult = withContext(Dispatchers.IO) {
         val ctx = requireNotNull(context) { "Android Context is required for asset extraction" }
@@ -68,6 +70,7 @@ class OfflineApkBuilder(
             keyAlias = keyAlias,
             usedReleaseKey = activeSigning != null && keystoreFile != debugKeystoreFile,
             targetMinSdk = targetMinSdk,
+            targetJavaVersion = targetJavaVersion,
             onProgress = onProgress,
         )
     }
@@ -83,6 +86,7 @@ class OfflineApkBuilder(
         keyAlias: String = "",
         usedReleaseKey: Boolean = false,
         targetMinSdk: Int? = null,
+        targetJavaVersion: JavaVersionOption = JavaVersionOption.JAVA_17,
         onProgress: (String) -> Unit = {},
     ): BuildResult {
         val startMs = System.currentTimeMillis()
@@ -105,23 +109,37 @@ class OfflineApkBuilder(
                 if (variant.isBundle) "outputs/bundle" else "outputs/apk",
             ).apply { mkdirs() }
 
-            log("▶ Target variant: ${variant.label}")
+            log("▶ Target variant: ${variant.label} • Toolchain: ${targetJavaVersion.label}")
             if (variant.isRelease && !usedReleaseKey) {
                 log("⚠ No custom Release Keystore selected; using local fallback signing key. Create a Release Keystore in Keystore Manager for Play Store uploads.")
             }
 
-            // 1. Compile XML resources -> R.java + resources.arsc (+ proto resources for AAB)
-            log("[1/5] Compiling resources (strings.xml, colors.xml)...")
+            // 1. Compile XML resources -> R.java + resources.arsc (+ layouts/ids/drawables + proto for AAB)
+            log("[1/5] Compiling resources (strings, colors, layouts, drawables)...")
             val stringsFile = File(projectDir, "res/values/strings.xml")
             val colorsFile = File(projectDir, "res/values/colors.xml")
+            val layoutDir = File(projectDir, "res/layout")
+            val layoutFiles = if (layoutDir.exists() && layoutDir.isDirectory) {
+                layoutDir.listFiles()?.filter { it.isFile && it.name.endsWith(".xml", ignoreCase = true) }
+                    ?.sortedBy { it.name }
+                    ?.map { it.name to it.readText() }
+                    .orEmpty()
+            } else emptyList()
+            val drawableDir = File(projectDir, "res/drawable")
+            val drawableFiles = if (drawableDir.exists() && drawableDir.isDirectory) {
+                drawableDir.listFiles()?.filter { it.isFile }?.sortedBy { it.name }.orEmpty()
+            } else emptyList()
+
             val compiledRes = ResourceTableCompiler.compile(
                 packageName = packageName,
                 stringsXml = stringsFile.takeIf { it.exists() }?.readText(),
                 colorsXml = colorsFile.takeIf { it.exists() }?.readText(),
+                layoutFiles = layoutFiles,
+                drawableNames = drawableFiles.map { it.name },
             )
             val rFileDir = File(genDir, packageName.replace('.', '/')).apply { mkdirs() }
             File(rFileDir, "R.java").writeText(compiledRes.rJavaSource)
-            log("      Generated R.java (${compiledRes.stringCount} strings, ${compiledRes.colorCount} colors) & resources.arsc (${compiledRes.resourcesArsc.size} bytes)")
+            log("      R.java: ${compiledRes.stringCount} strings, ${compiledRes.colorCount} colors, ${compiledRes.layoutCount} layouts, ${compiledRes.idCount} ids")
 
             // 2. Encode AndroidManifest.xml -> binary AXML (or proto XmlNode for AAB)
             val manifestFile = File(projectDir, "AndroidManifest.xml")
@@ -180,10 +198,42 @@ class OfflineApkBuilder(
             }
             log("      Encoded manifest (${manifestBytes.size} bytes, minSdk=$manifestMinSdk)")
 
-            // 3. Transpile optional Kotlin (.kt) files and compile via Eclipse JDT (ecj)
+            // Encode compiled layout & XML drawable entries
+            val encodedResXmlEntries = linkedMapOf<String, ByteArray>()
+            layoutFiles.forEach { (name, xml) ->
+                val encoded = runCatching {
+                    if (variant.isBundle) {
+                        ProtobufWriter.encodeProtoXml(xml, BinaryXmlEncoder.ANDROID_ATTR_IDS, compiledRes.resourceIds)
+                    } else {
+                        BinaryXmlEncoder.encodeManifest(xml, compiledRes.resourceIds)
+                    }
+                }.getOrNull()
+                if (encoded != null) {
+                    encodedResXmlEntries["res/layout/$name"] = encoded
+                }
+            }
+            drawableFiles.forEach { file ->
+                val rel = "res/drawable/${file.name}"
+                if (file.name.endsWith(".xml", ignoreCase = true)) {
+                    val encoded = runCatching {
+                        val xml = file.readText()
+                        if (variant.isBundle) {
+                            ProtobufWriter.encodeProtoXml(xml, BinaryXmlEncoder.ANDROID_ATTR_IDS, compiledRes.resourceIds)
+                        } else {
+                            BinaryXmlEncoder.encodeManifest(xml, compiledRes.resourceIds)
+                        }
+                    }.getOrNull()
+                    if (encoded != null) encodedResXmlEntries[rel] = encoded
+                } else {
+                    encodedResXmlEntries[rel] = file.readBytes()
+                }
+            }
+
+            // 3. Transpile Kotlin (.kt) and modern Java (11/17/21/25) -> Java 8 and compile via ECJ
             val kotlinGenDir = File(buildDir, "kotlin-gen").apply { mkdirs() }
+            val javaGenDir = File(buildDir, "java-gen").apply { mkdirs() }
             val ktFiles = collectFilesWithExt(File(projectDir, "src"), ".kt")
-            val kotlinOriginMap = mutableMapOf<String, Pair<String, Map<Int, Int>>>()
+            val sourceOriginMap = mutableMapOf<String, Pair<String, Map<Int, Int>>>()
             if (ktFiles.isNotEmpty()) {
                 log("[3/5] Transpiling ${ktFiles.size} Kotlin (.kt) source(s) -> Java 8...")
                 ktFiles.forEach { ktFile ->
@@ -199,11 +249,36 @@ class OfflineApkBuilder(
                     )
                     outJavaFile.writeText(res.javaSource)
                     val genRel = outJavaFile.relativeTo(projectDir).invariantSeparatorsPath
-                    kotlinOriginMap[genRel] = origRel to res.lineMap
+                    sourceOriginMap[genRel] = origRel to res.lineMap
                 }
             }
 
-            val javaFiles = collectFilesWithExt(File(projectDir, "src"), ".java") +
+            val rawJavaFiles = collectFilesWithExt(File(projectDir, "src"), ".java")
+            val preparedJavaFiles = if (targetJavaVersion.majorVersion > 8 && rawJavaFiles.isNotEmpty()) {
+                val loweredList = mutableListOf<File>()
+                val loweredFeatures = linkedSetOf<String>()
+                rawJavaFiles.forEach { jFile ->
+                    val origRel = jFile.relativeTo(projectDir).invariantSeparatorsPath
+                    val res = ModernJavaTranspiler.transpileToJava8(jFile.readText())
+                    if (res.rewrittenFeatures.isNotEmpty()) {
+                        loweredFeatures.addAll(res.rewrittenFeatures)
+                    }
+                    val subRel = jFile.relativeTo(File(projectDir, "src")).invariantSeparatorsPath
+                    val outJavaFile = File(javaGenDir, subRel).apply { parentFile?.mkdirs() }
+                    outJavaFile.writeText(res.java8Source)
+                    val genRel = outJavaFile.relativeTo(projectDir).invariantSeparatorsPath
+                    sourceOriginMap[genRel] = origRel to res.lineMap
+                    loweredList.add(outJavaFile)
+                }
+                if (loweredFeatures.isNotEmpty()) {
+                    log("      Lowered ${targetJavaVersion.badge} features (${loweredFeatures.joinToString(", ")}) -> DEX bytecode")
+                }
+                loweredList
+            } else {
+                rawJavaFiles
+            }
+
+            val javaFiles = preparedJavaFiles +
                 collectFilesWithExt(kotlinGenDir, ".java") +
                 collectFilesWithExt(genDir, ".java")
             if (javaFiles.isEmpty()) {
@@ -218,8 +293,12 @@ class OfflineApkBuilder(
                     diagnostics = diagnostics,
                 )
             }
-            val modeDesc = if (variant.isRelease) "Release (stripped debug symbols)" else "Debug"
-            log("[3/5] Compiling ${javaFiles.size} source unit(s) with Eclipse JDT (Java 8, $modeDesc)...")
+            val modeDesc = if (variant.isRelease) "Release" else "Debug"
+            log("[3/5] Compiling ${javaFiles.size} source unit(s) (${targetJavaVersion.badge}, $modeDesc)...")
+
+            val extraLibs = collectClasspathJars(projectDir)
+            val classpathEntries = (listOf(stubsJar.absolutePath) + extraLibs.map { it.absolutePath })
+                .joinToString(File.pathSeparator)
 
             val ecjOut = StringWriter()
             val ecjErr = StringWriter()
@@ -234,7 +313,7 @@ class OfflineApkBuilder(
                 add("-bootclasspath")
                 add(stubsJar.absolutePath)
                 add("-classpath")
-                add(stubsJar.absolutePath)
+                add(classpathEntries)
                 add("-d")
                 add(classesDir.absolutePath)
                 javaFiles.forEach { add(it.absolutePath) }
@@ -248,7 +327,7 @@ class OfflineApkBuilder(
             }.trim()
 
             if (combinedEcjOutput.isNotEmpty()) {
-                diagnostics.addAll(parseEcjDiagnostics(combinedEcjOutput, projectDir, kotlinOriginMap))
+                diagnostics.addAll(parseEcjDiagnostics(combinedEcjOutput, projectDir, sourceOriginMap))
                 combinedEcjOutput.lines().take(30).forEach { line ->
                     if (line.isNotBlank()) log("      $line")
                 }
@@ -268,12 +347,13 @@ class OfflineApkBuilder(
             val classFiles = collectFilesWithExt(classesDir, ".class")
             log("      Compiled ${classFiles.size} .class file(s)")
 
-            // 4. Convert .class -> classes.dex via dalvik-dx
-            log("[4/5] Converting JVM bytecode to Dalvik DEX (classes.dex)...")
-            val dexFile = File(dexDir, "classes.dex")
+            // 4. Convert .class (+ optional .jar libs) -> Multi-DEX classes*.dex via dalvik-dx
+            log("[4/5] Converting JVM bytecode to Dalvik Multi-DEX...")
+            val dxInputs = listOf(classesDir.absolutePath) + extraLibs.map { it.absolutePath }
             val dxArgs = DxMain.Arguments().apply {
-                outName = dexFile.absolutePath
-                fileNames = arrayOf(classesDir.absolutePath)
+                multiDex = true
+                outName = dexDir.absolutePath
+                fileNames = dxInputs.toTypedArray()
                 minSdkVersion = manifestMinSdk
                 if (variant.isRelease) {
                     optimize = true
@@ -281,7 +361,15 @@ class OfflineApkBuilder(
                 makeOptionsObjects()
             }
             val dxResult = DxMain.run(dxArgs)
-            if (dxResult != 0 || !dexFile.exists()) {
+            val dexFiles = dexDir.listFiles { f -> f.isFile && f.name.endsWith(".dex") }
+                ?.sortedWith(
+                    compareBy<File>(
+                        { if (it.name == "classes.dex") 0 else 1 },
+                        { it.name },
+                    ),
+                )
+                .orEmpty()
+            if (dxResult != 0 || dexFiles.isEmpty()) {
                 log("✖ DEX conversion failed (exit code $dxResult).")
                 return BuildResult(
                     success = false,
@@ -292,7 +380,23 @@ class OfflineApkBuilder(
                     diagnostics = diagnostics,
                 )
             }
-            log("      Generated classes.dex (${dexFile.length()} bytes)")
+            val totalDexBytes = dexFiles.sumOf { it.length() }
+            log("      Generated ${dexFiles.size} DEX shard(s) (${totalDexBytes} bytes total)")
+
+            // Collect optional native .so shared libraries (lib/<abi>/*.so or jniLibs/<abi>/*.so)
+            val nativeSoFiles = collectNativeLibs(projectDir)
+            if (nativeSoFiles.isNotEmpty()) {
+                log("      Bundling ${nativeSoFiles.size} native .so library(s)")
+            }
+
+            // Compute estimated payload footprint so we warn transparently near OS/Play 4GB cap
+            val assetsDir = File(projectDir, "assets")
+            val totalAssetBytes = if (assetsDir.exists()) {
+                assetsDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+            } else 0L
+            if (totalAssetBytes > 3_800_000_000L) {
+                log("⚠ Large project payload (${totalAssetBytes / (1024 * 1024)} MB). ZIP64 streaming enabled; note Android's on-device PackageInstaller rejects single APKs >4 GB (use AAB or on-demand DLC for >4 GB assets).")
+            }
 
             // 5. Package & Sign (APK or AAB)
             val loadedSigner = KeystoreManager.inspectKeystore(
@@ -317,8 +421,10 @@ class OfflineApkBuilder(
                     bundleConfigPb = bundleConfigBytes,
                     resourcesPb = resourcesPbBytes,
                     manifestPb = manifestBytes,
-                    classesDex = dexFile.readBytes(),
-                    assetsDir = File(projectDir, "assets"),
+                    dexFiles = dexFiles,
+                    resXmlEntries = encodedResXmlEntries,
+                    nativeLibs = nativeSoFiles,
+                    assetsDir = assetsDir,
                 )
                 KeystoreManager.signJarArchive(
                     unsignedZip = unsignedAab,
@@ -335,8 +441,10 @@ class OfflineApkBuilder(
                     outputApk = unsignedApk,
                     resourcesArsc = compiledRes.resourcesArsc,
                     manifestAxml = manifestBytes,
-                    classesDex = dexFile.readBytes(),
-                    assetsDir = File(projectDir, "assets"),
+                    dexFiles = dexFiles,
+                    resXmlEntries = encodedResXmlEntries,
+                    nativeLibs = nativeSoFiles,
+                    assetsDir = assetsDir,
                 )
 
                 val signerConfig = loadedSigner.toApkSignerConfig()
@@ -353,7 +461,11 @@ class OfflineApkBuilder(
             }
 
             val entries = inspectZipEntries(finalArtifact)
-            val artifactHash = KeystoreManager.sha256Hex(finalArtifact)
+            val artifactHash = if (finalArtifact.length() < 512L * 1024L * 1024L) {
+                KeystoreManager.sha256Hex(finalArtifact)
+            } else {
+                "large-artifact-${finalArtifact.length()}"
+            }
             val elapsed = System.currentTimeMillis() - startMs
             log("✔ ${variant.shortLabel} succeeded in ${elapsed}ms -> ${finalArtifact.name} (${finalArtifact.length()} bytes)")
 
@@ -558,10 +670,13 @@ class OfflineApkBuilder(
         outputApk: File,
         resourcesArsc: ByteArray,
         manifestAxml: ByteArray,
-        classesDex: ByteArray,
+        dexFiles: List<File>,
+        resXmlEntries: Map<String, ByteArray>,
+        nativeLibs: List<Pair<String, File>>,
         assetsDir: File,
     ) {
-        ZipOutputStream(outputApk.outputStream().buffered()).use { zos ->
+        val copyBuffer = ByteArray(64 * 1024)
+        ZipOutputStream(outputApk.outputStream().buffered(64 * 1024)).use { zos ->
             val arscCrc = CRC32().apply { update(resourcesArsc) }.value
             val arscEntry = ZipEntry("resources.arsc").apply {
                 method = ZipEntry.STORED
@@ -577,15 +692,29 @@ class OfflineApkBuilder(
             zos.write(manifestAxml)
             zos.closeEntry()
 
-            zos.putNextEntry(ZipEntry("classes.dex"))
-            zos.write(classesDex)
-            zos.closeEntry()
+            resXmlEntries.forEach { (relPath, bytes) ->
+                zos.putNextEntry(ZipEntry(relPath))
+                zos.write(bytes)
+                zos.closeEntry()
+            }
+
+            dexFiles.forEach { dex ->
+                zos.putNextEntry(ZipEntry(dex.name))
+                streamFileToZip(dex, zos, copyBuffer)
+                zos.closeEntry()
+            }
+
+            nativeLibs.forEach { (zipRelPath, soFile) ->
+                zos.putNextEntry(ZipEntry(zipRelPath))
+                streamFileToZip(soFile, zos, copyBuffer)
+                zos.closeEntry()
+            }
 
             if (assetsDir.exists() && assetsDir.isDirectory) {
                 assetsDir.walkTopDown().filter { it.isFile }.forEach { file ->
                     val rel = file.relativeTo(assetsDir).invariantSeparatorsPath
                     zos.putNextEntry(ZipEntry("assets/$rel"))
-                    file.inputStream().use { it.copyTo(zos) }
+                    streamFileToZip(file, zos, copyBuffer)
                     zos.closeEntry()
                 }
             }
@@ -597,10 +726,13 @@ class OfflineApkBuilder(
         bundleConfigPb: ByteArray,
         resourcesPb: ByteArray,
         manifestPb: ByteArray,
-        classesDex: ByteArray,
+        dexFiles: List<File>,
+        resXmlEntries: Map<String, ByteArray>,
+        nativeLibs: List<Pair<String, File>>,
         assetsDir: File,
     ) {
-        ZipOutputStream(outputAab.outputStream().buffered()).use { zos ->
+        val copyBuffer = ByteArray(64 * 1024)
+        ZipOutputStream(outputAab.outputStream().buffered(64 * 1024)).use { zos ->
             zos.putNextEntry(ZipEntry("BundleConfig.pb"))
             zos.write(bundleConfigPb)
             zos.closeEntry()
@@ -613,24 +745,70 @@ class OfflineApkBuilder(
             zos.write(resourcesPb)
             zos.closeEntry()
 
-            zos.putNextEntry(ZipEntry("base/dex/classes.dex"))
-            zos.write(classesDex)
-            zos.closeEntry()
+            resXmlEntries.forEach { (relPath, bytes) ->
+                zos.putNextEntry(ZipEntry("base/$relPath"))
+                zos.write(bytes)
+                zos.closeEntry()
+            }
+
+            dexFiles.forEach { dex ->
+                zos.putNextEntry(ZipEntry("base/dex/${dex.name}"))
+                streamFileToZip(dex, zos, copyBuffer)
+                zos.closeEntry()
+            }
+
+            nativeLibs.forEach { (zipRelPath, soFile) ->
+                zos.putNextEntry(ZipEntry("base/$zipRelPath"))
+                streamFileToZip(soFile, zos, copyBuffer)
+                zos.closeEntry()
+            }
 
             if (assetsDir.exists() && assetsDir.isDirectory) {
                 assetsDir.walkTopDown().filter { it.isFile }.forEach { file ->
                     val rel = file.relativeTo(assetsDir).invariantSeparatorsPath
                     zos.putNextEntry(ZipEntry("base/assets/$rel"))
-                    file.inputStream().use { it.copyTo(zos) }
+                    streamFileToZip(file, zos, copyBuffer)
                     zos.closeEntry()
                 }
             }
         }
     }
 
+    private fun streamFileToZip(file: File, zos: ZipOutputStream, buffer: ByteArray) {
+        file.inputStream().use { input ->
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                zos.write(buffer, 0, read)
+            }
+        }
+    }
+
+    private fun collectClasspathJars(projectDir: File): List<File> {
+        val libsDir = File(projectDir, "libs")
+        if (!libsDir.exists() || !libsDir.isDirectory) return emptyList()
+        return libsDir.walkTopDown().filter { it.isFile && it.name.endsWith(".jar", ignoreCase = true) }.toList()
+    }
+
+    private fun collectNativeLibs(projectDir: File): List<Pair<String, File>> {
+        val collected = mutableListOf<Pair<String, File>>()
+        listOf("lib", "jniLibs").forEach { rootName ->
+            val root = File(projectDir, rootName)
+            if (root.exists() && root.isDirectory) {
+                root.walkTopDown()
+                    .filter { it.isFile && it.name.endsWith(".so", ignoreCase = true) }
+                    .forEach { so ->
+                        val rel = so.relativeTo(root).invariantSeparatorsPath
+                        collected.add("lib/$rel" to so)
+                    }
+            }
+        }
+        return collected
+    }
+
     private fun inspectZipEntries(zipFile: File): List<ApkEntryInfo> {
         return ZipFile(zipFile).use { zip ->
-            zip.entries().asSequence().map { entry ->
+            zip.entries().asSequence().take(400).map { entry ->
                 ApkEntryInfo(
                     name = entry.name,
                     compressedSize = entry.compressedSize,

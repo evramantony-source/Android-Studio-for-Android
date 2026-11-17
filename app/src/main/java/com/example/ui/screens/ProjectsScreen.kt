@@ -78,19 +78,25 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.SportsEsports
+import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import com.example.ai.AiModelOption
 import com.example.ai.AiProvider
 import com.example.ai.AiUsageSummary
+import com.example.github.GitHubRepoSummary
 import com.example.model.AndroidMinSdk
 import com.example.model.EditorSettings
+import com.example.model.JavaVersionOption
 import com.example.model.ProjectLanguage
 import com.example.model.ProjectMetadata
 import com.example.model.ProjectTemplate
 import com.example.model.ReleaseSigningConfig
 import com.example.ui.panels.AiUsageDialog
+import com.example.ui.panels.GitHubSheetDialog
 import com.example.ui.panels.ModelMenuDialog
 import com.example.ui.panels.ProviderKeysDialog
 import com.example.ui.panels.ReleaseKeystoreDialog
@@ -102,6 +108,7 @@ import java.text.NumberFormat
 @Composable
 fun ProjectsScreen(
     projects: List<ProjectMetadata>,
+    isLoadingProjects: Boolean = false,
     editorSettings: EditorSettings,
     activeProvider: AiProvider,
     providerApiKeys: Map<AiProvider, String>,
@@ -110,10 +117,14 @@ fun ProjectsScreen(
     isFetchingModels: Boolean,
     aiUsageSummary: AiUsageSummary,
     releaseSigningConfig: ReleaseSigningConfig,
+    githubToken: String = "",
+    githubUser: String = "",
+    githubRepos: List<GitHubRepoSummary> = emptyList(),
+    isGitHubBusy: Boolean = false,
     statusBanner: String?,
     onClearStatusBanner: () -> Unit,
     onOpenProject: (ProjectMetadata) -> Unit,
-    onCreateProject: (String, String, ProjectTemplate, ProjectLanguage, Int) -> Unit,
+    onCreateProject: (String, String, ProjectTemplate, ProjectLanguage, JavaVersionOption, Int) -> Unit,
     onDeleteProject: (String) -> Unit,
     onUpdateSettings: ((EditorSettings) -> EditorSettings) -> Unit,
     onSelectModel: (AiProvider, String) -> Unit,
@@ -123,6 +134,9 @@ fun ProjectsScreen(
     onGenerateKeystore: (String, String, String, String) -> Unit,
     onImportKeystore: (Uri, String, String) -> Unit,
     onClearKeystore: () -> Unit,
+    onConnectGitHub: (String) -> Unit = {},
+    onDisconnectGitHub: () -> Unit = {},
+    onRefreshGitHubRepos: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var createDialogTemplate by remember { mutableStateOf<ProjectTemplate?>(null) }
@@ -132,6 +146,7 @@ fun ProjectsScreen(
     var showModelMenuDialog by remember { mutableStateOf(false) }
     var showKeysDialog by remember { mutableStateOf(false) }
     var showKeystoreDialog by remember { mutableStateOf(false) }
+    var showGitHubDialog by remember { mutableStateOf(false) }
     var showHomeMenu by remember { mutableStateOf(false) }
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -144,7 +159,7 @@ fun ProjectsScreen(
         }
     }
 
-    val activeModelId = providerModels[activeProvider].orEmpty().ifBlank { activeProvider.defaultModelId }
+    val activeModelId = com.example.ai.AiModelsCatalog.normalizeModelId(activeProvider, providerModels[activeProvider])
     val builtProjectsCount = remember(projects) { projects.count { it.lastBuildSuccess == true } }
 
     Scaffold(
@@ -239,6 +254,15 @@ fun ProjectsScreen(
                                     showKeystoreDialog = true
                                 },
                                 modifier = Modifier.testTag("home_keystore_button"),
+                            )
+                            DropdownMenuItem(
+                                text = { Text("GitHub Account") },
+                                leadingIcon = { Icon(Icons.Default.CloudUpload, contentDescription = null) },
+                                onClick = {
+                                    showHomeMenu = false
+                                    showGitHubDialog = true
+                                },
+                                modifier = Modifier.testTag("home_github_account_button"),
                             )
                             DropdownMenuItem(
                                 text = { Text("IDE Settings") },
@@ -398,6 +422,8 @@ fun ProjectsScreen(
                                             Box(contentAlignment = Alignment.Center) {
                                                 Icon(
                                                     imageVector = when (template) {
+                                                        ProjectTemplate.ARCADE_SHOOTER -> Icons.Default.SportsEsports
+                                                        ProjectTemplate.VOXEL_LAUNCHER_STUDIO -> Icons.Default.ViewInAr
                                                         ProjectTemplate.CANVAS_DRAW -> Icons.Default.Palette
                                                         ProjectTemplate.CALCULATOR -> Icons.Default.Build
                                                         ProjectTemplate.NOTES_APP -> Icons.Default.EditNote
@@ -433,9 +459,43 @@ fun ProjectsScreen(
                 // Recent Projects
                 item {
                     Text(
-                        text = "Your Projects (${projects.size})",
+                        text = if (isLoadingProjects && projects.isEmpty()) "Your Projects" else "Your Projects (${projects.size})",
                         style = MaterialTheme.typography.titleLarge,
                     )
+                }
+
+                if (isLoadingProjects && projects.isEmpty()) {
+                    item {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceContainer,
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("projects_loading_card"),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(18.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            ) {
+                                androidx.compose.material3.CircularProgressIndicator(
+                                    modifier = Modifier.size(26.dp),
+                                    strokeWidth = 3.dp,
+                                )
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        text = "Loading projects & templates...",
+                                        style = MaterialTheme.typography.titleSmall,
+                                    )
+                                    Text(
+                                        text = "Preparing DroidForge Studio workspace",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
 
                 items(projects, key = { it.id }) { project ->
@@ -462,6 +522,8 @@ fun ProjectsScreen(
                                 Box(contentAlignment = Alignment.Center) {
                                     Icon(
                                         when (project.template) {
+                                            ProjectTemplate.ARCADE_SHOOTER -> Icons.Default.SportsEsports
+                                            ProjectTemplate.VOXEL_LAUNCHER_STUDIO -> Icons.Default.ViewInAr
                                             ProjectTemplate.CANVAS_DRAW -> Icons.Default.Palette
                                             ProjectTemplate.CALCULATOR -> Icons.Default.Build
                                             ProjectTemplate.NOTES_APP -> Icons.Default.EditNote
@@ -481,8 +543,14 @@ fun ProjectsScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
+                                val langLabel = if (project.language == ProjectLanguage.JAVA) {
+                                    project.javaVersion.badge
+                                } else {
+                                    project.language.displayName
+                                }
+                                val ghSuffix = project.githubLink?.fullName?.let { " • $it" }.orEmpty()
                                 Text(
-                                    text = "${project.packageName} • ${project.language.displayName} • API ${project.minSdkVersion}",
+                                    text = "${project.packageName} • $langLabel • API ${project.minSdkVersion}$ghSuffix",
                                     fontFamily = JetBrainsMonoFontFamily,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -533,9 +601,9 @@ fun ProjectsScreen(
         CreateProjectDialog(
             initialTemplate = template,
             onDismiss = { createDialogTemplate = null },
-            onConfirm = { name, pkg, selectedTemplate, language, minSdk ->
+            onConfirm = { name, pkg, selectedTemplate, language, javaVersion, minSdk ->
                 createDialogTemplate = null
-                onCreateProject(name, pkg, selectedTemplate, language, minSdk)
+                onCreateProject(name, pkg, selectedTemplate, language, javaVersion, minSdk)
             },
         )
     }
@@ -609,6 +677,29 @@ fun ProjectsScreen(
             onImportKeystore = onImportKeystore,
             onClearKeystore = onClearKeystore,
             onDismiss = { showKeystoreDialog = false },
+        )
+    }
+
+    if (showGitHubDialog) {
+        GitHubSheetDialog(
+            project = null,
+            githubToken = githubToken,
+            githubUser = githubUser,
+            githubRepos = githubRepos,
+            pendingChanges = emptyList(),
+            workflowRuns = emptyList(),
+            isGitHubBusy = isGitHubBusy,
+            onConnectToken = onConnectGitHub,
+            onDisconnectGitHub = onDisconnectGitHub,
+            onRefreshRepos = onRefreshGitHubRepos,
+            onCreateAndLinkRepo = { _, _, _ -> },
+            onLinkExistingRepo = { _, _, _ -> },
+            onPushProject = {},
+            onPullProject = {},
+            onScaffoldGradleCi = {},
+            onTriggerCloudBuild = {},
+            onRefreshWorkflowRuns = {},
+            onDismiss = { showGitHubDialog = false },
         )
     }
 }
@@ -686,10 +777,11 @@ private fun StudioMetricCard(
 private fun CreateProjectDialog(
     initialTemplate: ProjectTemplate,
     onDismiss: () -> Unit,
-    onConfirm: (String, String, ProjectTemplate, ProjectLanguage, Int) -> Unit,
+    onConfirm: (String, String, ProjectTemplate, ProjectLanguage, JavaVersionOption, Int) -> Unit,
 ) {
     var selectedTemplate by remember { mutableStateOf(initialTemplate) }
     var selectedLanguage by remember { mutableStateOf(ProjectLanguage.KOTLIN) }
+    var selectedJavaVersion by remember { mutableStateOf(JavaVersionOption.JAVA_25) }
     var selectedMinSdk by remember { mutableStateOf(AndroidMinSdk.API_24) }
     var appName by remember { mutableStateOf(initialTemplate.defaultAppName) }
     var packageName by remember { mutableStateOf(initialTemplate.defaultPackage) }
@@ -700,7 +792,7 @@ private fun CreateProjectDialog(
         text = {
             Column(
                 modifier = Modifier
-                    .heightIn(max = 430.dp)
+                    .heightIn(max = 460.dp)
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -740,6 +832,28 @@ private fun CreateProjectDialog(
                         )
                     }
                 }
+
+                Text("Java Toolchain Version (8 – 25)", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    JavaVersionOption.entries.forEach { jv ->
+                        FilterChip(
+                            selected = selectedJavaVersion == jv,
+                            onClick = { selectedJavaVersion = jv },
+                            label = { Text(jv.badge, style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.testTag("create_java_${jv.majorVersion}"),
+                        )
+                    }
+                }
+                Text(
+                    text = selectedJavaVersion.highlights,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
 
                 Text("Minimum Android Version", style = MaterialTheme.typography.labelLarge)
                 Row(
@@ -799,6 +913,7 @@ private fun CreateProjectDialog(
                         packageName,
                         selectedTemplate,
                         selectedLanguage,
+                        selectedJavaVersion,
                         selectedMinSdk.apiLevel,
                     )
                 },

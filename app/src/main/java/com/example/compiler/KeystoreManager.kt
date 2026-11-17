@@ -15,7 +15,6 @@ import java.security.Signature
 import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.text.SimpleDateFormat
-import java.util.Base64
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
@@ -143,43 +142,50 @@ object KeystoreManager {
         signedOutput: File,
         signer: LoadedSigner,
     ) {
-        val entriesData = linkedMapOf<String, ByteArray>()
-        ZipFile(unsignedZip).use { zip ->
-            val entries = zip.entries()
-            while (entries.hasMoreElements()) {
-                val entry = entries.nextElement()
-                if (!entry.isDirectory && !entry.name.startsWith("META-INF/")) {
-                    entriesData[entry.name] = zip.getInputStream(entry).use { it.readBytes() }
-                }
-            }
-        }
-
-        val b64 = Base64.getEncoder()
         val sha256 = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(64 * 1024)
 
-        // Build MANIFEST.MF
         val mainHeader = buildString {
             appendManifestLine(this, "Manifest-Version", "1.0")
             appendManifestLine(this, "Created-By", "DroidForge Studio")
             append("\r\n")
         }
-        val manifestSections = linkedMapOf<String, String>()
         val manifestAll = StringBuilder(mainHeader)
-        for ((name, bytes) in entriesData) {
-            val digestB64 = b64.encodeToString(sha256.digest(bytes))
-            val section = buildString {
-                appendManifestLine(this, "Name", name)
-                appendManifestLine(this, "SHA-256-Digest", digestB64)
-                append("\r\n")
+        val manifestSections = linkedMapOf<String, String>()
+        val entryNames = mutableListOf<String>()
+
+        // Pass 1: stream each entry incrementally to compute SHA-256 manifest digests without holding payloads in RAM
+        ZipFile(unsignedZip).use { zip ->
+            val entries = zip.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                if (entry.isDirectory || entry.name.startsWith("META-INF/")) continue
+                entryNames.add(entry.name)
+                sha256.reset()
+                zip.getInputStream(entry).use { input ->
+                    while (true) {
+                        val read = input.read(buffer)
+                        if (read <= 0) break
+                        sha256.update(buffer, 0, read)
+                    }
+                }
+                val digestB64 = base64Encode(sha256.digest())
+                val section = buildString {
+                    appendManifestLine(this, "Name", entry.name)
+                    appendManifestLine(this, "SHA-256-Digest", digestB64)
+                    append("\r\n")
+                }
+                manifestSections[entry.name] = section
+                manifestAll.append(section)
             }
-            manifestSections[name] = section
-            manifestAll.append(section)
         }
         val manifestBytes = manifestAll.toString().toByteArray(Charsets.UTF_8)
 
         // Build .SF
-        val manifestDigestB64 = b64.encodeToString(sha256.digest(manifestBytes))
-        val mainAttrDigestB64 = b64.encodeToString(sha256.digest(mainHeader.toByteArray(Charsets.UTF_8)))
+        sha256.reset()
+        val manifestDigestB64 = base64Encode(sha256.digest(manifestBytes))
+        sha256.reset()
+        val mainAttrDigestB64 = base64Encode(sha256.digest(mainHeader.toByteArray(Charsets.UTF_8)))
         val sfBuilder = StringBuilder().apply {
             appendManifestLine(this, "Signature-Version", "1.0")
             appendManifestLine(this, "Created-By", "DroidForge Studio")
@@ -187,7 +193,8 @@ object KeystoreManager {
             appendManifestLine(this, "SHA-256-Digest-Manifest-Main-Attributes", mainAttrDigestB64)
             append("\r\n")
             for ((name, section) in manifestSections) {
-                val secDigest = b64.encodeToString(sha256.digest(section.toByteArray(Charsets.UTF_8)))
+                sha256.reset()
+                val secDigest = base64Encode(sha256.digest(section.toByteArray(Charsets.UTF_8)))
                 appendManifestLine(this, "Name", name)
                 appendManifestLine(this, "SHA-256-Digest", secDigest)
                 append("\r\n")
@@ -208,7 +215,8 @@ object KeystoreManager {
             .ifBlank { "DROIDFRG" }
 
         signedOutput.parentFile?.mkdirs()
-        ZipOutputStream(signedOutput.outputStream().buffered()).use { zos ->
+        // Pass 2: write signature metadata, then stream every entry directly from ZipFile to ZipOutputStream
+        ZipOutputStream(signedOutput.outputStream().buffered(64 * 1024)).use { zos ->
             zos.putNextEntry(ZipEntry("META-INF/MANIFEST.MF"))
             zos.write(manifestBytes)
             zos.closeEntry()
@@ -221,10 +229,26 @@ object KeystoreManager {
             zos.write(pkcs7Bytes)
             zos.closeEntry()
 
-            for ((name, bytes) in entriesData) {
-                zos.putNextEntry(ZipEntry(name))
-                zos.write(bytes)
-                zos.closeEntry()
+            ZipFile(unsignedZip).use { zip ->
+                for (name in entryNames) {
+                    val orig = zip.getEntry(name) ?: continue
+                    val outEntry = ZipEntry(orig.name)
+                    if (orig.method == ZipEntry.STORED && orig.size >= 0L && orig.crc >= 0L) {
+                        outEntry.method = ZipEntry.STORED
+                        outEntry.size = orig.size
+                        outEntry.compressedSize = orig.size
+                        outEntry.crc = orig.crc
+                    }
+                    zos.putNextEntry(outEntry)
+                    zip.getInputStream(orig).use { input ->
+                        while (true) {
+                            val read = input.read(buffer)
+                            if (read <= 0) break
+                            zos.write(buffer, 0, read)
+                        }
+                    }
+                    zos.closeEntry()
+                }
             }
         }
     }
@@ -245,6 +269,26 @@ object KeystoreManager {
     fun fingerprint(certDer: ByteArray, algorithm: String): String {
         val digest = MessageDigest.getInstance(algorithm).digest(certDer)
         return digest.joinToString(":") { "%02X".format(it) }
+    }
+
+    private fun base64Encode(input: ByteArray): String {
+        val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        val sb = StringBuilder(((input.size + 2) / 3) * 4)
+        var i = 0
+        while (i < input.size) {
+            val b0 = input[i++].toInt() and 0xFF
+            val hasB1 = i < input.size
+            val b1 = if (hasB1) input[i++].toInt() and 0xFF else 0
+            val hasB2 = i < input.size
+            val b2 = if (hasB2) input[i++].toInt() and 0xFF else 0
+
+            val triple = (b0 shl 16) or (b1 shl 8) or b2
+            sb.append(alphabet[(triple ushr 18) and 0x3F])
+            sb.append(alphabet[(triple ushr 12) and 0x3F])
+            sb.append(if (hasB1) alphabet[(triple ushr 6) and 0x3F] else '=')
+            sb.append(if (hasB2) alphabet[triple and 0x3F] else '=')
+        }
+        return sb.toString()
     }
 
     private fun appendManifestLine(sb: StringBuilder, key: String, value: String) {

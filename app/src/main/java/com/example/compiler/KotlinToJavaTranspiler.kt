@@ -880,7 +880,11 @@ object KotlinToJavaTranspiler {
             "text" to "setText",
             "textSize" to "setTextSize",
             "textColor" to "setTextColor",
+            "textAlign" to "setTextAlign",
+            "textScaleX" to "setTextScaleX",
+            "typeface" to "setTypeface",
             "hint" to "setHint",
+            "hintTextColor" to "setHintTextColor",
             "gravity" to "setGravity",
             "orientation" to "setOrientation",
             "background" to "setBackground",
@@ -892,6 +896,10 @@ object KotlinToJavaTranspiler {
             "strokeWidth" to "setStrokeWidth",
             "strokeCap" to "setStrokeCap",
             "strokeJoin" to "setStrokeJoin",
+            "alpha" to "setAlpha",
+            "antiAlias" to "setAntiAlias",
+            "isAntiAlias" to "setAntiAlias",
+            "letterSpacing" to "setLetterSpacing",
             "columnCount" to "setColumnCount",
             "rowCount" to "setRowCount",
             "visibility" to "setVisibility",
@@ -946,27 +954,20 @@ object KotlinToJavaTranspiler {
             return "return ${rewriteExpression(inner, arrayVars, listVars, varTypes, expectedArrayType)}"
         }
 
-        // 3. Inline `if (cond) a else b` expression
-        if (s.startsWith("if ") || s.startsWith("if(")) {
-            val openP = s.indexOf('(')
-            val closeP = if (openP >= 0) findClosingParen(s, openP) else -1
-            if (closeP > openP) {
-                val afterCond = s.substring(closeP + 1).trim()
-                if (!afterCond.startsWith("{") && afterCond.contains(" else ")) {
-                    val cond = rewriteExpression(s.substring(openP + 1, closeP), arrayVars, listVars, varTypes)
-                    val elseIdx = afterCond.indexOf(" else ")
-                    val thenPart = rewriteExpression(afterCond.substring(0, elseIdx).trim(), arrayVars, listVars, varTypes)
-                    val elsePart = rewriteExpression(afterCond.substring(elseIdx + 6).trim(), arrayVars, listVars, varTypes)
-                    return "(($cond) ? ($thenPart) : ($elsePart))"
-                }
-            }
-        }
+        // 3. Inline `if (cond) a else b` expressions (top-level or nested inside arguments/assignments)
+        s = rewriteInlineIfExpressions(s, arrayVars, listVars, varTypes)
 
         // 4. Balanced array & list factory calls (supports nested parens like Color.parseColor(...))
         s = replaceBalancedCall(s, "intArrayOf") { args -> "new int[]{$args}" }
         s = replaceBalancedCall(s, "floatArrayOf") { args -> "new float[]{$args}" }
         s = replaceBalancedCall(s, "longArrayOf") { args -> "new long[]{$args}" }
         s = replaceBalancedCall(s, "booleanArrayOf") { args -> "new boolean[]{$args}" }
+        s = replaceBalancedCall(s, "IntArray") { args -> "new int[$args]" }
+        s = replaceBalancedCall(s, "FloatArray") { args -> "new float[$args]" }
+        s = replaceBalancedCall(s, "LongArray") { args -> "new long[$args]" }
+        s = replaceBalancedCall(s, "DoubleArray") { args -> "new double[$args]" }
+        s = replaceBalancedCall(s, "BooleanArray") { args -> "new boolean[$args]" }
+        s = replaceBalancedCall(s, "ByteArray") { args -> "new byte[$args]" }
         s = replaceBalancedCall(s, "arrayOf") { args ->
             val elemType = expectedArrayType?.removeSuffix("[]") ?: inferArrayLiteralElementType(args)
             "new $elemType[]{$args}"
@@ -978,25 +979,36 @@ object KotlinToJavaTranspiler {
         s = s.replace(Regex("""\.matches\(\s*Regex\(([^)]+)\)\s*\)"""), ".matches($1)")
         s = s.replace(Regex("""\bRegex\(([^)]+)\)\.matches\(([^)]+)\)"""), "$2.matches($1)")
         s = s.replace(".isBlank()", ".trim().isEmpty()")
+        s = s.replace(".removeAt(", ".remove(")
 
         // 6. Android & Kotlin property getters / extensions
         s = s.replace(Regex("""(\b[A-Za-z_]\w*)\.text\.toString\(\)"""), "$1.getText().toString()")
         s = s.replace(Regex("""(\b[A-Za-z_]\w*)\.text\b(?!\s*\()"""), "$1.getText()")
         s = s.replace(Regex("""(\b[A-Za-z_]\w*)\.action\b(?!\s*\()"""), "$1.getAction()")
-        s = s.replace(Regex("""(\b[A-Za-z_]\w*)\.x\b(?!\s*\()"""), "$1.getX()")
-        s = s.replace(Regex("""(\b[A-Za-z_]\w*)\.y\b(?!\s*\()"""), "$1.getY()")
-        s = s.replace(Regex("""(\b[A-Za-z_][\w.()]*)\.toString\(\)\.toDouble\(\)"""), "Double.parseDouble($1.toString())")
-        s = s.replace(Regex("""(\b[A-Za-z_][\w.()]*)\.toDouble\(\)""")) { m ->
-            val inner = m.groupValues[1]
-            val t = varTypes[inner]
-            if (t == "String" || inner.endsWith(".getText().toString()")) {
-                "Double.parseDouble($inner)"
+        val xyGetterTypes = setOf("MotionEvent", "android.view.MotionEvent", "View", "android.view.View", "DragEvent")
+        s = s.replace(Regex("""(\b[A-Za-z_]\w*)\.x\b(?!\s*\()""")) { m ->
+            val target = m.groupValues[1]
+            val t = varTypes[target]
+            if (t in xyGetterTypes || (t == null && (target == "event" || target == "ev" || target == "motionEvent"))) {
+                "$target.getX()"
             } else {
-                "((double) ($inner))"
+                m.value
             }
         }
-        s = s.replace(Regex("""(\b[A-Za-z_][\w.()]*)\.toInt\(\)"""), "((int) ($1))")
-        s = s.replace(Regex("""(\b[A-Za-z_][\w.()]*)\.toLong\(\)"""), "((long) ($1))")
+        s = s.replace(Regex("""(\b[A-Za-z_]\w*)\.y\b(?!\s*\()""")) { m ->
+            val target = m.groupValues[1]
+            val t = varTypes[target]
+            if (t in xyGetterTypes || (t == null && (target == "event" || target == "ev" || target == "motionEvent"))) {
+                "$target.getY()"
+            } else {
+                m.value
+            }
+        }
+        s = s.replace(Regex("""(\b[A-Za-z_][\w.()]*)\.toString\(\)\.toDouble\(\)"""), "Double.parseDouble($1.toString())")
+        s = replaceTrailingNumberConversion(s, ".toDouble()", "double", varTypes)
+        s = replaceTrailingNumberConversion(s, ".toFloat()", "float", varTypes)
+        s = replaceTrailingNumberConversion(s, ".toInt()", "int", varTypes)
+        s = replaceTrailingNumberConversion(s, ".toLong()", "long", varTypes)
         s = s.replace(Regex("""(\b[A-Za-z_]\w*)\.toString\(\)""")) { m ->
             val target = m.groupValues[1]
             when (varTypes[target]) {
@@ -1006,11 +1018,12 @@ object KotlinToJavaTranspiler {
         }
         s = s.replace(Regex("""\bthis@([A-Za-z_]\w*)"""), "$1.this")
 
-        // 7. `.size` -> `.length` for arrays or `.size()` for lists
+        // 7. `.size` -> `.length` for arrays or `.size()` for lists, plus list[i] -> list.get(i)
         s = s.replace(Regex("""(\b[A-Za-z_]\w*)\.size\b(?!\s*\()""")) { m ->
             val target = m.groupValues[1]
             if (target in arrayVars) "$target.length" else "$target.size()"
         }
+        s = replaceListIndexing(s, listVars)
 
         // 8. Nullable operators
         s = s.replace("!!", "")
@@ -1031,6 +1044,127 @@ object KotlinToJavaTranspiler {
         s = insertNewForConstructors(s)
 
         return s
+    }
+
+    private fun rewriteInlineIfExpressions(
+        input: String,
+        arrayVars: Set<String>,
+        listVars: Set<String>,
+        varTypes: Map<String, String>,
+    ): String {
+        if (!input.contains("if") || !input.contains("else")) return input
+        var cur = input
+        var guard = 0
+        while (guard++ < 12) {
+            var replacedAny = false
+            var i = 0
+            var inStr = false
+            var esc = false
+            val len = cur.length
+            while (i < len) {
+                val c = cur[i]
+                if (esc) { esc = false; i++; continue }
+                if (c == '\\' && inStr) { esc = true; i++; continue }
+                if (c == '"') { inStr = !inStr; i++; continue }
+                if (!inStr && c == 'i' && i + 1 < len && cur[i + 1] == 'f') {
+                    val prevOk = i == 0 || (!cur[i - 1].isLetterOrDigit() && cur[i - 1] != '_' && cur[i - 1] != '.')
+                    var afterIf = i + 2
+                    while (afterIf < len && cur[afterIf].isWhitespace()) afterIf++
+                    if (prevOk && afterIf < len && cur[afterIf] == '(') {
+                        val closeP = findClosingParen(cur, afterIf)
+                        if (closeP > afterIf) {
+                            var thenStart = closeP + 1
+                            while (thenStart < len && cur[thenStart].isWhitespace()) thenStart++
+                            if (thenStart < len && cur[thenStart] != '{') {
+                                val (elseWordStart, elseWordEnd) = findInlineElseKeyword(cur, thenStart)
+                                if (elseWordStart > thenStart) {
+                                    var elseStart = elseWordEnd
+                                    while (elseStart < len && cur[elseStart].isWhitespace()) elseStart++
+                                    val elseEnd = findInlineElseEnd(cur, elseStart)
+                                    if (elseEnd > elseStart) {
+                                        val cond = rewriteExpression(cur.substring(afterIf + 1, closeP), arrayVars, listVars, varTypes)
+                                        val thenPart = rewriteExpression(cur.substring(thenStart, elseWordStart).trim(), arrayVars, listVars, varTypes)
+                                        val elsePart = rewriteExpression(cur.substring(elseStart, elseEnd).trim(), arrayVars, listVars, varTypes)
+                                        cur = cur.substring(0, i) + "(($cond) ? ($thenPart) : ($elsePart))" + cur.substring(elseEnd)
+                                        replacedAny = true
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                i++
+            }
+            if (!replacedAny) break
+        }
+        return cur
+    }
+
+    private fun findInlineElseKeyword(s: String, start: Int): Pair<Int, Int> {
+        var i = start
+        var p = 0
+        var b = 0
+        var inStr = false
+        var esc = false
+        var nestedIfs = 0
+        val len = s.length
+        while (i < len) {
+            val c = s[i]
+            if (esc) { esc = false; i++; continue }
+            if (c == '\\' && inStr) { esc = true; i++; continue }
+            if (c == '"') { inStr = !inStr; i++; continue }
+            if (!inStr) {
+                when (c) {
+                    '(' -> p++
+                    ')' -> { if (p == 0 && b == 0) return -1 to -1; p-- }
+                    '[' -> b++
+                    ']' -> { if (b == 0) return -1 to -1; b-- }
+                    ',', ';' -> if (p == 0 && b == 0) return -1 to -1
+                    'i' -> if (p == 0 && b == 0 && s.startsWith("if", i) &&
+                        (i == 0 || !s[i - 1].isLetterOrDigit() && s[i - 1] != '_') &&
+                        (i + 2 >= len || (!s[i + 2].isLetterOrDigit() && s[i + 2] != '_'))
+                    ) {
+                        nestedIfs++
+                    }
+                    'e' -> if (p == 0 && b == 0 && s.startsWith("else", i) &&
+                        (i == 0 || !s[i - 1].isLetterOrDigit() && s[i - 1] != '_') &&
+                        (i + 4 >= len || (!s[i + 4].isLetterOrDigit() && s[i + 4] != '_'))
+                    ) {
+                        if (nestedIfs == 0) return i to (i + 4)
+                        nestedIfs--
+                    }
+                }
+            }
+            i++
+        }
+        return -1 to -1
+    }
+
+    private fun findInlineElseEnd(s: String, start: Int): Int {
+        var i = start
+        var p = 0
+        var b = 0
+        var inStr = false
+        var esc = false
+        val len = s.length
+        while (i < len) {
+            val c = s[i]
+            if (esc) { esc = false; i++; continue }
+            if (c == '\\' && inStr) { esc = true; i++; continue }
+            if (c == '"') { inStr = !inStr; i++; continue }
+            if (!inStr) {
+                when (c) {
+                    '(' -> p++
+                    ')' -> { if (p == 0 && b == 0) return i; p-- }
+                    '[' -> b++
+                    ']' -> { if (b == 0) return i; b-- }
+                    ',', ';' -> if (p == 0 && b == 0) return i
+                }
+            }
+            i++
+        }
+        return len
     }
 
     private fun replaceKotlinBitwiseInfix(input: String): String {
@@ -1310,10 +1444,12 @@ object KotlinToJavaTranspiler {
             e.startsWith("\"") -> "String"
             e.startsWith("'") -> "char"
             e == "true" || e == "false" -> "boolean"
-            e.startsWith("intArrayOf(") -> "int[]"
-            e.startsWith("floatArrayOf(") -> "float[]"
-            e.startsWith("longArrayOf(") -> "long[]"
-            e.startsWith("booleanArrayOf(") -> "boolean[]"
+            e.startsWith("intArrayOf(") || e.startsWith("IntArray(") -> "int[]"
+            e.startsWith("floatArrayOf(") || e.startsWith("FloatArray(") -> "float[]"
+            e.startsWith("longArrayOf(") || e.startsWith("LongArray(") -> "long[]"
+            e.startsWith("doubleArrayOf(") || e.startsWith("DoubleArray(") -> "double[]"
+            e.startsWith("booleanArrayOf(") || e.startsWith("BooleanArray(") -> "boolean[]"
+            e.startsWith("byteArrayOf(") || e.startsWith("ByteArray(") -> "byte[]"
             e.startsWith("arrayOf(") -> "${inferArrayLiteralElementType(e.removePrefix("arrayOf(").removeSuffix(")"))}[]"
             e.startsWith("mutableListOf<") || e.startsWith("arrayListOf<") -> {
                 val arg = e.substringAfter('<').substringBefore('>')
@@ -1323,6 +1459,14 @@ object KotlinToJavaTranspiler {
             Regex("""^-?\d+(\.\d+)?[Ff]$""").matches(e) -> "float"
             Regex("""^-?\d+\.\d+$""").matches(e) -> "double"
             Regex("""^-?\d+$""").matches(e) -> "int"
+            e == "getWidth()" || e == "getHeight()" || e == "getMeasuredWidth()" || e == "getMeasuredHeight()" -> "int"
+            e.startsWith("Math.max(") || e.startsWith("Math.min(") || e.startsWith("Math.abs(") -> {
+                when {
+                    Regex("""\b\d+(?:\.\d+)?[Ff]\b""").containsMatchIn(e) || e.contains(".toFloat()") -> "float"
+                    e.contains(".") && !e.contains("Math.") -> "double"
+                    else -> "int"
+                }
+            }
             e.startsWith("Color.parseColor") || e.startsWith("Color.") -> "int"
             e.startsWith("String.") || e.endsWith(".toString()") || e.endsWith(".trim()") ||
                 e.endsWith(".lowercase()") || e.endsWith(".uppercase()") ||
@@ -1334,13 +1478,13 @@ object KotlinToJavaTranspiler {
             e.contains("System.currentTimeMillis()") -> "long"
             e.contains(".x") || e.contains(".y") || e.contains(".getX()") || e.contains(".getY()") -> "float"
             e.startsWith("findViewById<") -> e.substringAfter('<').substringBefore('>')
-            Regex("""^[A-Z][\w.]*\(.*\)$""").matches(e) -> e.substringBefore('(').substringBefore('<')
+            Regex("""^[A-Z][\w.]*(?:<[^>]+>)?\(.*\)$""").matches(e) -> e.substringBefore('(').trim()
             e in varTypes -> varTypes[e]!!
             !e.contains("\"") && Regex("""\s[+\-*/%]\s""").containsMatchIn(e) -> {
                 val tokens = Regex("""[A-Za-z_]\w*""").findAll(e).map { varTypes[it.value] }.toList()
                 when {
-                    tokens.any { it == "double" } || Regex("""\d+\.\d+""").containsMatchIn(e) -> "double"
-                    tokens.any { it == "float" } -> "float"
+                    tokens.any { it == "double" } || Regex("""\b\d+\.\d+\b(?![Ff])""").containsMatchIn(e) -> "double"
+                    tokens.any { it == "float" } || Regex("""\b\d+(?:\.\d+)?[Ff]\b""").containsMatchIn(e) || e.contains("nextFloat(") -> "float"
                     tokens.any { it == "long" } || Regex("""\b\d+[Ll]\b""").containsMatchIn(e) -> "long"
                     tokens.any { it == "String" } -> "String"
                     else -> "int"
@@ -1348,6 +1492,92 @@ object KotlinToJavaTranspiler {
             }
             else -> "Object"
         }
+    }
+
+    private fun replaceTrailingNumberConversion(
+        input: String,
+        suffix: String,
+        javaCast: String,
+        varTypes: Map<String, String>,
+    ): String {
+        var out = input
+        var idx = out.indexOf(suffix)
+        var safety = 0
+        while (idx > 0 && safety++ < 25) {
+            var end = idx - 1
+            while (end >= 0 && out[end].isWhitespace()) end--
+            var start = end
+            if (end >= 0 && out[end] == ')') {
+                var depth = 0
+                while (start >= 0) {
+                    when (out[start]) {
+                        ')' -> depth++
+                        '(' -> {
+                            depth--
+                            if (depth == 0) {
+                                // include preceding identifier/method chain like Math.max(...)
+                                while (start > 0 && (out[start - 1].isLetterOrDigit() || out[start - 1] == '_' || out[start - 1] == '.')) {
+                                    start--
+                                }
+                                break
+                            }
+                        }
+                    }
+                    start--
+                }
+            } else {
+                while (start >= 0 && (out[start].isLetterOrDigit() || out[start] == '_' || out[start] == '.' || out[start] == '(' || out[start] == ')')) {
+                    if (out[start] == '(') {
+                        var j = start - 1
+                        while (j >= 0 && (out[j].isLetterOrDigit() || out[j] == '_' || out[j] == '.')) j--
+                        start = j + 1
+                    }
+                    start--
+                }
+                start++
+            }
+            if (start in 0..end) {
+                val target = out.substring(start, end + 1).trim()
+                val replacement = if (suffix == ".toDouble()" && (varTypes[target] == "String" || target.endsWith(".getText().toString()"))) {
+                    "Double.parseDouble($target)"
+                } else {
+                    "(($javaCast) ($target))"
+                }
+                out = out.substring(0, start) + replacement + out.substring(idx + suffix.length)
+                idx = out.indexOf(suffix, start + replacement.length)
+            } else {
+                idx = out.indexOf(suffix, idx + suffix.length)
+            }
+        }
+        return out
+    }
+
+    private fun replaceListIndexing(input: String, listVars: Set<String>): String {
+        if (listVars.isEmpty()) return input
+        var out = input
+        for (listName in listVars) {
+            val regex = Regex("""\b${Regex.escape(listName)}\[""")
+            var safety = 0
+            var searchFrom = 0
+            while (safety++ < 30) {
+                val m = regex.find(out, searchFrom) ?: break
+                val openBracket = m.range.last
+                var depth = 1
+                var i = openBracket + 1
+                while (i < out.length && depth > 0) {
+                    if (out[i] == '[') depth++
+                    else if (out[i] == ']') depth--
+                    i++
+                }
+                if (depth != 0) break
+                val closeBracket = i - 1
+                val indexExpr = out.substring(openBracket + 1, closeBracket).trim()
+                val replacement = "$listName.get($indexExpr)"
+                out = out.substring(0, m.range.first) + replacement + out.substring(closeBracket + 1)
+                searchFrom = m.range.first + replacement.length
+            }
+        }
+        return out
     }
 
     private fun inferArrayLiteralElementType(args: String): String {

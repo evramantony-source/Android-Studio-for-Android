@@ -149,6 +149,30 @@ object BinaryXmlEncoder {
         "usesPermissionFlags" to 0x01010644,
         "localeConfig" to 0x0101065b,
         "enableOnBackInvokedCallback" to 0x0101066c,
+        // Common Layout & View attributes for res/layout/*.xml
+        "id" to 0x010100d0,
+        "background" to 0x010100d4,
+        "padding" to 0x010100d5,
+        "paddingLeft" to 0x010100d6,
+        "paddingTop" to 0x010100d7,
+        "paddingRight" to 0x010100d8,
+        "paddingBottom" to 0x010100d9,
+        "visibility" to 0x010100dc,
+        "gravity" to 0x010100af,
+        "orientation" to 0x010100c4,
+        "layout_width" to 0x010100f4,
+        "layout_height" to 0x010100f5,
+        "layout_weight" to 0x01010181,
+        "layout_gravity" to 0x010100b3,
+        "layout_margin" to 0x010100f6,
+        "text" to 0x0101014f,
+        "hint" to 0x01010150,
+        "textSize" to 0x01010095,
+        "textColor" to 0x01010098,
+        "textStyle" to 0x01010097,
+        "src" to 0x01010119,
+        "inputType" to 0x01010220,
+        "columnCount" to 0x01010377,
     )
 
     // Verified android.R.style resource IDs
@@ -586,6 +610,10 @@ object BinaryXmlEncoder {
         if (raw.startsWith("@android:color/")) {
             val colorName = raw.removePrefix("@android:color/")
             ANDROID_COLOR_IDS[colorName]?.let { return TYPE_REFERENCE to it }
+        }
+        if (raw.startsWith("@+")) {
+            val key = raw.removePrefix("@+")
+            resourceIds[key]?.let { return TYPE_REFERENCE to it }
         }
         if (raw.startsWith("@")) {
             val key = raw.removePrefix("@")

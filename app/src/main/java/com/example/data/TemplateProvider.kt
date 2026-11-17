@@ -692,6 +692,534 @@ object TemplateProvider {
                 """.trimIndent() + "\n"
             }
 
+            ProjectTemplate.ARCADE_SHOOTER -> {
+                files["src/$pkgPath/MainActivity.java"] = """
+                    package $packageName;
+
+                    import android.app.Activity;
+                    import android.os.Bundle;
+
+                    public class MainActivity extends Activity {
+                        private ShooterView gameView;
+
+                        @Override
+                        protected void onCreate(Bundle savedInstanceState) {
+                            super.onCreate(savedInstanceState);
+                            gameView = new ShooterView(this);
+                            setContentView(gameView);
+                        }
+                    }
+                """.trimIndent() + "\n"
+
+                files["src/$pkgPath/ShooterView.java"] = """
+                    package $packageName;
+
+                    import android.content.Context;
+                    import android.graphics.Canvas;
+                    import android.graphics.Color;
+                    import android.graphics.Paint;
+                    import android.graphics.Path;
+                    import android.os.Handler;
+                    import android.os.Looper;
+                    import android.view.MotionEvent;
+                    import android.view.View;
+                    import java.util.ArrayList;
+                    import java.util.Random;
+
+                    public class ShooterView extends View {
+
+                        private static class Bullet {
+                            float x;
+                            float y;
+                            Bullet(float x, float y) { this.x = x; this.y = y; }
+                        }
+
+                        private static class Enemy {
+                            float x;
+                            float y;
+                            float vy;
+                            int hp;
+                            int maxHp;
+                            Enemy(float x, float y, float vy, int hp) {
+                                this.x = x; this.y = y; this.vy = vy; this.hp = hp; this.maxHp = hp;
+                            }
+                        }
+
+                        private static class Particle {
+                            float x;
+                            float y;
+                            float vx;
+                            float vy;
+                            int life;
+                            int color;
+                            Particle(float x, float y, float vx, float vy, int color) {
+                                this.x = x; this.y = y; this.vx = vx; this.vy = vy; this.life = 18; this.color = color;
+                            }
+                        }
+
+                        private static class Star {
+                            float x;
+                            float y;
+                            float speed;
+                            Star(float x, float y, float speed) { this.x = x; this.y = y; this.speed = speed; }
+                        }
+
+                        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                        private final Handler handler = new Handler(Looper.getMainLooper());
+                        private final Random rng = new Random();
+                        private final ArrayList<Bullet> bullets = new ArrayList<Bullet>();
+                        private final ArrayList<Enemy> enemies = new ArrayList<Enemy>();
+                        private final ArrayList<Particle> particles = new ArrayList<Particle>();
+                        private final ArrayList<Star> stars = new ArrayList<Star>();
+
+                        private float playerX = 450f;
+                        private float playerY = 1200f;
+                        private int score = 0;
+                        private int wave = 1;
+                        private int lives = 3;
+                        private int tickCount = 0;
+                        private boolean gameOver = false;
+
+                        private final Runnable loop = new Runnable() {
+                            @Override
+                            public void run() {
+                                updateFrame();
+                                invalidate();
+                                handler.postDelayed(this, 16);
+                            }
+                        };
+
+                        public ShooterView(Context context) {
+                            super(context);
+                            for (int i = 0; i < 42; i++) {
+                                stars.add(new Star(rng.nextFloat() * 1000f, rng.nextFloat() * 1600f, 1.5f + rng.nextFloat() * 4f));
+                            }
+                            handler.postDelayed(loop, 16);
+                        }
+
+                        @Override
+                        protected void onSizeChanged(int w, int h, int oldw, int oldh) {
+                            super.onSizeChanged(w, h, oldw, oldh);
+                            if (w > 0 && h > 0) {
+                                playerX = w * 0.5f;
+                                playerY = h - 130f;
+                            }
+                        }
+
+                        private void resetGame() {
+                            bullets.clear();
+                            enemies.clear();
+                            particles.clear();
+                            score = 0;
+                            wave = 1;
+                            lives = 3;
+                            tickCount = 0;
+                            gameOver = false;
+                            playerX = getWidth() * 0.5f;
+                        }
+
+                        private void updateFrame() {
+                            int w = getWidth();
+                            int h = getHeight();
+                            if (w <= 0 || h <= 0) return;
+
+                            for (int i = 0; i < stars.size(); i++) {
+                                Star s = stars.get(i);
+                                s.y += s.speed;
+                                if (s.y > h) {
+                                    s.y = 0f;
+                                    s.x = rng.nextFloat() * w;
+                                }
+                            }
+
+                            if (gameOver) return;
+                            tickCount++;
+                            playerY = h - 130f;
+
+                            if (tickCount % 10 == 0) {
+                                bullets.add(new Bullet(playerX - 18f, playerY - 46f));
+                                bullets.add(new Bullet(playerX + 18f, playerY - 46f));
+                            }
+
+                            int spawnInterval = Math.max(18, 46 - wave * 3);
+                            if (tickCount % spawnInterval == 0) {
+                                float ex = 50f + rng.nextFloat() * Math.max(100f, w - 100f);
+                                int hp = 1 + (wave / 2);
+                                float vy = 3.2f + wave * 0.55f;
+                                enemies.add(new Enemy(ex, -40f, vy, hp));
+                            }
+
+                            for (int i = bullets.size() - 1; i >= 0; i--) {
+                                Bullet b = bullets.get(i);
+                                b.y -= 20f;
+                                if (b.y < -30f) bullets.remove(i);
+                            }
+
+                            for (int i = enemies.size() - 1; i >= 0; i--) {
+                                Enemy e = enemies.get(i);
+                                e.y += e.vy;
+
+                                if (Math.abs(e.x - playerX) < 48f && Math.abs(e.y - playerY) < 48f) {
+                                    enemies.remove(i);
+                                    lives--;
+                                    spawnExplosion(e.x, e.y, Color.parseColor("#F87171"));
+                                    if (lives <= 0) gameOver = true;
+                                    continue;
+                                }
+
+                                if (e.y > h + 40f) {
+                                    enemies.remove(i);
+                                    continue;
+                                }
+
+                                boolean hit = false;
+                                for (int j = bullets.size() - 1; j >= 0; j--) {
+                                    Bullet b = bullets.get(j);
+                                    if (Math.abs(b.x - e.x) < 34f && Math.abs(b.y - e.y) < 34f) {
+                                        bullets.remove(j);
+                                        e.hp--;
+                                        spawnExplosion(b.x, b.y, Color.parseColor("#38BDF8"));
+                                        if (e.hp <= 0) {
+                                            score += 100;
+                                            wave = 1 + score / 800;
+                                            spawnExplosion(e.x, e.y, Color.parseColor("#FBBF24"));
+                                            enemies.remove(i);
+                                            hit = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (hit) continue;
+                            }
+
+                            for (int i = particles.size() - 1; i >= 0; i--) {
+                                Particle p = particles.get(i);
+                                p.x += p.vx;
+                                p.y += p.vy;
+                                p.life--;
+                                if (p.life <= 0) particles.remove(i);
+                            }
+                        }
+
+                        private void spawnExplosion(float x, float y, int color) {
+                            for (int i = 0; i < 6; i++) {
+                                float vx = (rng.nextFloat() - 0.5f) * 10f;
+                                float vy = (rng.nextFloat() - 0.5f) * 10f;
+                                particles.add(new Particle(x, y, vx, vy, color));
+                            }
+                        }
+
+                        @Override
+                        protected void onDraw(Canvas canvas) {
+                            super.onDraw(canvas);
+                            int w = getWidth();
+                            int h = getHeight();
+                            canvas.drawColor(Color.parseColor("#060A14"));
+
+                            paint.setStyle(Paint.Style.FILL);
+                            paint.setColor(Color.parseColor("#64748B"));
+                            for (int i = 0; i < stars.size(); i++) {
+                                Star s = stars.get(i);
+                                canvas.drawCircle(s.x % Math.max(1, w), s.y % Math.max(1, h), 2.5f, paint);
+                            }
+
+                            // Laser bolts
+                            paint.setColor(Color.parseColor("#38BDF8"));
+                            for (int i = 0; i < bullets.size(); i++) {
+                                Bullet b = bullets.get(i);
+                                canvas.drawRoundRect(b.x - 4f, b.y - 14f, b.x + 4f, b.y + 14f, 4f, 4f, paint);
+                            }
+
+                            // Enemy ships
+                            for (int i = 0; i < enemies.size(); i++) {
+                                Enemy e = enemies.get(i);
+                                paint.setColor(Color.parseColor("#F43F5E"));
+                                canvas.drawCircle(e.x, e.y, 26f, paint);
+                                paint.setColor(Color.parseColor("#FDA4AF"));
+                                canvas.drawCircle(e.x, e.y - 6f, 10f, paint);
+                                if (e.maxHp > 1) {
+                                    paint.setColor(Color.parseColor("#34D399"));
+                                    float frac = (float) e.hp / (float) e.maxHp;
+                                    canvas.drawRect(e.x - 24f, e.y - 36f, e.x - 24f + 48f * frac, e.y - 30f, paint);
+                                }
+                            }
+
+                            // Particles
+                            for (int i = 0; i < particles.size(); i++) {
+                                Particle p = particles.get(i);
+                                paint.setColor(p.color);
+                                canvas.drawCircle(p.x, p.y, 4f, paint);
+                            }
+
+                            // Player Fighter Jet
+                            Path ship = new Path();
+                            ship.moveTo(playerX, playerY - 40f);
+                            ship.lineTo(playerX + 34f, playerY + 26f);
+                            ship.lineTo(playerX, playerY + 12f);
+                            ship.lineTo(playerX - 34f, playerY + 26f);
+                            ship.close();
+                            paint.setColor(Color.parseColor("#22D3EE"));
+                            canvas.drawPath(ship, paint);
+                            paint.setColor(Color.parseColor("#FBBF24"));
+                            canvas.drawCircle(playerX, playerY + 22f, 8f, paint);
+
+                            // HUD
+                            paint.setColor(Color.WHITE);
+                            paint.setTextSize(34f);
+                            paint.setTextAlign(Paint.Align.LEFT);
+                            canvas.drawText("SCORE " + score + "   WAVE " + wave, 28f, 52f, paint);
+                            paint.setColor(Color.parseColor("#F87171"));
+                            paint.setTextAlign(Paint.Align.RIGHT);
+                            canvas.drawText("HP x" + lives, w - 28f, 52f, paint);
+
+                            if (gameOver) {
+                                paint.setColor(Color.parseColor("#CC000000"));
+                                canvas.drawRect(0f, h * 0.35f, w, h * 0.65f, paint);
+                                paint.setColor(Color.parseColor("#F87171"));
+                                paint.setTextAlign(Paint.Align.CENTER);
+                                paint.setTextSize(54f);
+                                canvas.drawText("MISSION FAILED", w * 0.5f, h * 0.47f, paint);
+                                paint.setColor(Color.WHITE);
+                                paint.setTextSize(32f);
+                                canvas.drawText("Tap anywhere to launch again", w * 0.5f, h * 0.56f, paint);
+                            }
+                        }
+
+                        @Override
+                        public boolean onTouchEvent(MotionEvent event) {
+                            if (event.getAction() == MotionEvent.ACTION_DOWN && gameOver) {
+                                resetGame();
+                                invalidate();
+                                return true;
+                            }
+                            if (event.getAction() == MotionEvent.ACTION_DOWN || event.getAction() == MotionEvent.ACTION_MOVE) {
+                                playerX = Math.max(40f, Math.min(getWidth() - 40f, event.getX()));
+                                invalidate();
+                                return true;
+                            }
+                            return super.onTouchEvent(event);
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.VOXEL_LAUNCHER_STUDIO -> {
+                files["src/$pkgPath/MainActivity.java"] = """
+                    package $packageName;
+
+                    import android.app.Activity;
+                    import android.graphics.Color;
+                    import android.os.Bundle;
+                    import android.view.View;
+                    import android.widget.Button;
+                    import android.widget.LinearLayout;
+                    import android.widget.TextView;
+                    import android.widget.Toast;
+
+                    public class MainActivity extends Activity {
+
+                        private VoxelWorldView worldView;
+                        private TextView statusText;
+                        private int javaTarget = 21;
+
+                        @Override
+                        protected void onCreate(Bundle savedInstanceState) {
+                            super.onCreate(savedInstanceState);
+
+                            LinearLayout root = new LinearLayout(this);
+                            root.setOrientation(LinearLayout.VERTICAL);
+                            root.setBackgroundColor(Color.parseColor("#0B1120"));
+
+                            LinearLayout header = new LinearLayout(this);
+                            header.setOrientation(LinearLayout.HORIZONTAL);
+                            header.setBackgroundColor(Color.parseColor("#111827"));
+                            header.setPadding(24, 18, 24, 18);
+
+                            statusText = new TextView(this);
+                            statusText.setText("Voxel Sandbox • JVM JDK " + javaTarget + " • 512MB Heap");
+                            statusText.setTextColor(Color.parseColor("#38BDF8"));
+                            statusText.setTextSize(13);
+                            LinearLayout.LayoutParams statusLp = new LinearLayout.LayoutParams(
+                                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+                            );
+                            header.addView(statusText, statusLp);
+
+                            Button jvmBtn = new Button(this);
+                            jvmBtn.setText("Switch JDK");
+                            jvmBtn.setTextColor(Color.WHITE);
+                            jvmBtn.setBackgroundColor(Color.parseColor("#2563EB"));
+                            jvmBtn.setOnClickListener(new View.OnClickListener() {
+                                @Override
+                                public void onClick(View v) {
+                                    if (javaTarget == 8) javaTarget = 17;
+                                    else if (javaTarget == 17) javaTarget = 21;
+                                    else if (javaTarget == 21) javaTarget = 25;
+                                    else javaTarget = 8;
+                                    statusText.setText("Voxel Sandbox • JVM JDK " + javaTarget + " • Ready");
+                                    Toast.makeText(MainActivity.this, "Runtime target switched to Java " + javaTarget, Toast.LENGTH_SHORT).show();
+                                }
+                            });
+                            header.addView(jvmBtn);
+                            root.addView(header);
+
+                            worldView = new VoxelWorldView(this);
+                            LinearLayout.LayoutParams worldLp = new LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f
+                            );
+                            root.addView(worldView, worldLp);
+
+                            LinearLayout hotbar = new LinearLayout(this);
+                            hotbar.setOrientation(LinearLayout.HORIZONTAL);
+                            hotbar.setBackgroundColor(Color.parseColor("#1E293B"));
+                            hotbar.setPadding(16, 12, 16, 12);
+
+                            String[] blockNames = {"Mine", "Grass", "Stone", "Timber", "Glow"};
+                            final int[] blockIds = {0, 1, 2, 3, 4};
+                            String[] hexColors = {"#475569", "#22C55E", "#64748B", "#B45309", "#FACC15"};
+
+                            for (int i = 0; i < blockNames.length; i++) {
+                                final int id = blockIds[i];
+                                final String label = blockNames[i];
+                                Button slot = new Button(this);
+                                slot.setText(label);
+                                slot.setTextColor(id == 4 ? Color.BLACK : Color.WHITE);
+                                slot.setBackgroundColor(Color.parseColor(hexColors[i]));
+                                LinearLayout.LayoutParams slotLp = new LinearLayout.LayoutParams(
+                                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+                                );
+                                slotLp.setMargins(6, 0, 6, 0);
+                                slot.setLayoutParams(slotLp);
+                                slot.setOnClickListener(new View.OnClickListener() {
+                                    @Override
+                                    public void onClick(View v) {
+                                        worldView.setSelectedBlock(id);
+                                        Toast.makeText(MainActivity.this, "Tool: " + label, Toast.LENGTH_SHORT).show();
+                                    }
+                                });
+                                hotbar.addView(slot);
+                            }
+
+                            root.addView(hotbar);
+                            setContentView(root);
+                        }
+                    }
+                """.trimIndent() + "\n"
+
+                files["src/$pkgPath/VoxelWorldView.java"] = """
+                    package $packageName;
+
+                    import android.content.Context;
+                    import android.graphics.Canvas;
+                    import android.graphics.Color;
+                    import android.graphics.Paint;
+                    import android.view.MotionEvent;
+                    import android.view.View;
+
+                    public class VoxelWorldView extends View {
+
+                        private static final int COLS = 10;
+                        private static final int ROWS = 12;
+                        private final int[] grid = new int[COLS * ROWS];
+                        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                        private int selectedBlock = 1; // 0=Air(Mine), 1=Grass, 2=Stone, 3=Timber, 4=Glow
+
+                        public VoxelWorldView(Context context) {
+                            super(context);
+                            generateTerrain();
+                        }
+
+                        public void setSelectedBlock(int blockId) {
+                            this.selectedBlock = blockId;
+                            invalidate();
+                        }
+
+                        private void generateTerrain() {
+                            for (int r = 0; r < ROWS; r++) {
+                                for (int c = 0; c < COLS; c++) {
+                                    int idx = r * COLS + c;
+                                    if (r == 6) grid[idx] = 1;
+                                    else if (r > 6 && r < 10) grid[idx] = 2;
+                                    else if (r >= 10) grid[idx] = 4;
+                                    else grid[idx] = 0;
+                                }
+                            }
+                            grid[5 * COLS + 3] = 3;
+                            grid[4 * COLS + 3] = 3;
+                            grid[3 * COLS + 3] = 1;
+                            grid[5 * COLS + 7] = 4;
+                        }
+
+                        @Override
+                        protected void onDraw(Canvas canvas) {
+                            super.onDraw(canvas);
+                            float w = Math.max(1f, getWidth());
+                            float h = Math.max(1f, getHeight());
+                            canvas.drawColor(Color.parseColor("#0F172A"));
+
+                            float cellW = w / COLS;
+                            float cellH = h / ROWS;
+
+                            for (int r = 0; r < ROWS; r++) {
+                                for (int c = 0; c < COLS; c++) {
+                                    int block = grid[r * COLS + c];
+                                    float left = c * cellW;
+                                    float top = r * cellH;
+                                    float right = left + cellW;
+                                    float bottom = top + cellH;
+
+                                    if (block != 0) {
+                                        int topColor = Color.parseColor("#22C55E");
+                                        int bodyColor = Color.parseColor("#166534");
+                                        if (block == 2) {
+                                            topColor = Color.parseColor("#94A3B8");
+                                            bodyColor = Color.parseColor("#475569");
+                                        } else if (block == 3) {
+                                            topColor = Color.parseColor("#D97706");
+                                            bodyColor = Color.parseColor("#78350F");
+                                        } else if (block == 4) {
+                                            topColor = Color.parseColor("#FDE047");
+                                            bodyColor = Color.parseColor("#CA8A04");
+                                        }
+                                        paint.setStyle(Paint.Style.FILL);
+                                        paint.setColor(bodyColor);
+                                        canvas.drawRect(left + 2f, top + 2f, right - 2f, bottom - 2f, paint);
+                                        paint.setColor(topColor);
+                                        canvas.drawRect(left + 2f, top + 2f, right - 2f, top + cellH * 0.28f, paint);
+                                    } else {
+                                        paint.setStyle(Paint.Style.STROKE);
+                                        paint.setStrokeWidth(1f);
+                                        paint.setColor(Color.parseColor("#1E293B"));
+                                        canvas.drawRect(left, top, right, bottom, paint);
+                                    }
+                                }
+                            }
+
+                            paint.setStyle(Paint.Style.FILL);
+                            paint.setColor(Color.parseColor("#E2E8F0"));
+                            paint.setTextSize(26f);
+                            paint.setTextAlign(Paint.Align.LEFT);
+                            canvas.drawText("Tap grid cells to mine or build voxels", 20f, 38f, paint);
+                        }
+
+                        @Override
+                        public boolean onTouchEvent(MotionEvent event) {
+                            if (event.getAction() == MotionEvent.ACTION_DOWN || event.getAction() == MotionEvent.ACTION_MOVE) {
+                                float w = Math.max(1f, getWidth());
+                                float h = Math.max(1f, getHeight());
+                                int col = (int) ((event.getX() / w) * COLS);
+                                int row = (int) ((event.getY() / h) * ROWS);
+                                if (col >= 0 && col < COLS && row >= 0 && row < ROWS) {
+                                    grid[row * COLS + col] = selectedBlock;
+                                    invalidate();
+                                }
+                                return true;
+                            }
+                            return super.onTouchEvent(event);
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
             ProjectTemplate.BLANK_ACTIVITY -> {
                 files["src/$pkgPath/MainActivity.java"] = """
                     package $packageName;
@@ -1291,6 +1819,429 @@ object TemplateProvider {
                             val mins = totalSecs / 60
                             val secs = totalSecs % 60
                             readout.text = String.format("%02d:%02d.%d", mins, secs, tenths)
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.ARCADE_SHOOTER -> {
+                files["src/$pkgPath/MainActivity.kt"] = """
+                    package $packageName
+
+                    import android.app.Activity
+                    import android.os.Bundle
+
+                    class MainActivity : Activity() {
+                        override fun onCreate(savedInstanceState: Bundle?) {
+                            super.onCreate(savedInstanceState)
+                            val gameView = ShooterView(this)
+                            setContentView(gameView)
+                        }
+                    }
+                """.trimIndent() + "\n"
+
+                files["src/$pkgPath/ShooterView.kt"] = """
+                    package $packageName
+
+                    import android.content.Context
+                    import android.graphics.Canvas
+                    import android.graphics.Color
+                    import android.graphics.Paint
+                    import android.graphics.Path
+                    import android.os.Handler
+                    import android.os.Looper
+                    import android.view.MotionEvent
+                    import android.view.View
+                    import java.util.ArrayList
+                    import java.util.Random
+
+                    class ShooterView(context: Context) : View(context) {
+
+                        class Bullet(var x: Float, var y: Float)
+                        class Enemy(var x: Float, var y: Float, var vy: Float, var hp: Int, val maxHp: Int)
+                        class Star(var x: Float, var y: Float, val speed: Float)
+
+                        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+                        private val handler = Handler(Looper.getMainLooper())
+                        private val rng = Random()
+                        private val bullets = ArrayList<Bullet>()
+                        private val enemies = ArrayList<Enemy>()
+                        private val stars = ArrayList<Star>()
+
+                        private var playerX = 450f
+                        private var playerY = 1200f
+                        private var score = 0
+                        private var wave = 1
+                        private var lives = 3
+                        private var tickCount = 0
+                        private var gameOver = false
+
+                        private val loop = object : Runnable {
+                            override fun run() {
+                                updateFrame()
+                                invalidate()
+                                handler.postDelayed(this, 16)
+                            }
+                        }
+
+                        init {
+                            for (i in 0 until 42) {
+                                stars.add(Star(rng.nextFloat() * 1000f, rng.nextFloat() * 1600f, 1.5f + rng.nextFloat() * 4f))
+                            }
+                            handler.postDelayed(loop, 16)
+                        }
+
+                        override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+                            super.onSizeChanged(w, h, oldw, oldh)
+                            if (w > 0 && h > 0) {
+                                playerX = w * 0.5f
+                                playerY = h - 130f
+                            }
+                        }
+
+                        private fun resetGame() {
+                            bullets.clear()
+                            enemies.clear()
+                            score = 0
+                            wave = 1
+                            lives = 3
+                            tickCount = 0
+                            gameOver = false
+                            playerX = getWidth() * 0.5f
+                        }
+
+                        private fun updateFrame() {
+                            val w = getWidth()
+                            val h = getHeight()
+                            if (w <= 0 || h <= 0) return
+
+                            for (i in 0 until stars.size) {
+                                val s = stars[i]
+                                s.y += s.speed
+                                if (s.y > h) {
+                                    s.y = 0f
+                                    s.x = rng.nextFloat() * w
+                                }
+                            }
+
+                            if (gameOver) return
+                            tickCount++
+                            playerY = h - 130f
+
+                            if (tickCount % 10 == 0) {
+                                bullets.add(Bullet(playerX - 18f, playerY - 46f))
+                                bullets.add(Bullet(playerX + 18f, playerY - 46f))
+                            }
+
+                            val spawnInterval = Math.max(18, 46 - wave * 3)
+                            if (tickCount % spawnInterval == 0) {
+                                val ex = 50f + rng.nextFloat() * Math.max(100f, w - 100f)
+                                val hp = 1 + (wave / 2)
+                                val vy = 3.2f + wave * 0.55f
+                                enemies.add(Enemy(ex, -40f, vy, hp, hp))
+                            }
+
+                            for (i in bullets.size - 1 downTo 0) {
+                                val b = bullets[i]
+                                b.y -= 20f
+                                if (b.y < -30f) bullets.removeAt(i)
+                            }
+
+                            for (i in enemies.size - 1 downTo 0) {
+                                val e = enemies[i]
+                                e.y += e.vy
+                                if (Math.abs(e.x - playerX) < 48f && Math.abs(e.y - playerY) < 48f) {
+                                    enemies.removeAt(i)
+                                    lives--
+                                    if (lives <= 0) gameOver = true
+                                    continue
+                                }
+                                if (e.y > h + 40f) {
+                                    enemies.removeAt(i)
+                                    continue
+                                }
+                                for (j in bullets.size - 1 downTo 0) {
+                                    val b = bullets[j]
+                                    if (Math.abs(b.x - e.x) < 34f && Math.abs(b.y - e.y) < 34f) {
+                                        bullets.removeAt(j)
+                                        e.hp--
+                                        if (e.hp <= 0) {
+                                            score += 100
+                                            wave = 1 + score / 800
+                                            enemies.removeAt(i)
+                                            break
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        override fun onDraw(canvas: Canvas) {
+                            super.onDraw(canvas)
+                            val w = getWidth()
+                            val h = getHeight()
+                            canvas.drawColor(Color.parseColor("#060A14"))
+
+                            paint.style = Paint.Style.FILL
+                            paint.color = Color.parseColor("#64748B")
+                            for (i in 0 until stars.size) {
+                                val s = stars[i]
+                                canvas.drawCircle(s.x % Math.max(1, w), s.y % Math.max(1, h), 2.5f, paint)
+                            }
+
+                            paint.color = Color.parseColor("#38BDF8")
+                            for (i in 0 until bullets.size) {
+                                val b = bullets[i]
+                                canvas.drawRoundRect(b.x - 4f, b.y - 14f, b.x + 4f, b.y + 14f, 4f, 4f, paint)
+                            }
+
+                            for (i in 0 until enemies.size) {
+                                val e = enemies[i]
+                                paint.color = Color.parseColor("#F43F5E")
+                                canvas.drawCircle(e.x, e.y, 26f, paint)
+                                paint.color = Color.parseColor("#FDA4AF")
+                                canvas.drawCircle(e.x, e.y - 6f, 10f, paint)
+                            }
+
+                            val ship = Path()
+                            ship.moveTo(playerX, playerY - 40f)
+                            ship.lineTo(playerX + 34f, playerY + 26f)
+                            ship.lineTo(playerX, playerY + 12f)
+                            ship.lineTo(playerX - 34f, playerY + 26f)
+                            ship.close()
+                            paint.color = Color.parseColor("#22D3EE")
+                            canvas.drawPath(ship, paint)
+
+                            paint.color = Color.WHITE
+                            paint.textSize = 34f
+                            paint.textAlign = Paint.Align.LEFT
+                            canvas.drawText("SCORE ${'$'}score   WAVE ${'$'}wave", 28f, 52f, paint)
+                            paint.color = Color.parseColor("#F87171")
+                            paint.textAlign = Paint.Align.RIGHT
+                            canvas.drawText("HP x${'$'}lives", w - 28f, 52f, paint)
+
+                            if (gameOver) {
+                                paint.color = Color.parseColor("#CC000000")
+                                canvas.drawRect(0f, h * 0.35f, w.toFloat(), h * 0.65f, paint)
+                                paint.color = Color.parseColor("#F87171")
+                                paint.textAlign = Paint.Align.CENTER
+                                paint.textSize = 54f
+                                canvas.drawText("MISSION FAILED", w * 0.5f, h * 0.47f, paint)
+                                paint.color = Color.WHITE
+                                paint.textSize = 32f
+                                canvas.drawText("Tap anywhere to launch again", w * 0.5f, h * 0.56f, paint)
+                            }
+                        }
+
+                        override fun onTouchEvent(event: MotionEvent): Boolean {
+                            if (event.action == MotionEvent.ACTION_DOWN && gameOver) {
+                                resetGame()
+                                invalidate()
+                                return true
+                            }
+                            if (event.action == MotionEvent.ACTION_DOWN || event.action == MotionEvent.ACTION_MOVE) {
+                                playerX = Math.max(40f, Math.min(getWidth() - 40f, event.x))
+                                invalidate()
+                                return true
+                            }
+                            return super.onTouchEvent(event)
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.VOXEL_LAUNCHER_STUDIO -> {
+                files["src/$pkgPath/MainActivity.kt"] = """
+                    package $packageName
+
+                    import android.app.Activity
+                    import android.graphics.Color
+                    import android.os.Bundle
+                    import android.widget.Button
+                    import android.widget.LinearLayout
+                    import android.widget.TextView
+                    import android.widget.Toast
+
+                    class MainActivity : Activity() {
+
+                        private var javaTarget = 21
+
+                        override fun onCreate(savedInstanceState: Bundle?) {
+                            super.onCreate(savedInstanceState)
+
+                            val root = LinearLayout(this)
+                            root.orientation = LinearLayout.VERTICAL
+                            root.setBackgroundColor(Color.parseColor("#0B1120"))
+
+                            val header = LinearLayout(this)
+                            header.orientation = LinearLayout.HORIZONTAL
+                            header.setBackgroundColor(Color.parseColor("#111827"))
+                            header.setPadding(24, 18, 24, 18)
+
+                            val statusText = TextView(this)
+                            statusText.text = "Voxel Sandbox • JVM JDK ${'$'}javaTarget • 512MB Heap"
+                            statusText.setTextColor(Color.parseColor("#38BDF8"))
+                            statusText.textSize = 13f
+                            val statusLp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                            header.addView(statusText, statusLp)
+
+                            val jvmBtn = Button(this)
+                            jvmBtn.text = "Switch JDK"
+                            jvmBtn.setTextColor(Color.WHITE)
+                            jvmBtn.setBackgroundColor(Color.parseColor("#2563EB"))
+                            jvmBtn.setOnClickListener {
+                                if (javaTarget == 8) javaTarget = 17
+                                else if (javaTarget == 17) javaTarget = 21
+                                else if (javaTarget == 21) javaTarget = 25
+                                else javaTarget = 8
+                                statusText.text = "Voxel Sandbox • JVM JDK ${'$'}javaTarget • Ready"
+                                Toast.makeText(this@MainActivity, "Runtime target switched to Java ${'$'}javaTarget", Toast.LENGTH_SHORT).show()
+                            }
+                            header.addView(jvmBtn)
+                            root.addView(header)
+
+                            val worldView = VoxelWorldView(this)
+                            val worldLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+                            root.addView(worldView, worldLp)
+
+                            val hotbar = LinearLayout(this)
+                            hotbar.orientation = LinearLayout.HORIZONTAL
+                            hotbar.setBackgroundColor(Color.parseColor("#1E293B"))
+                            hotbar.setPadding(16, 12, 16, 12)
+
+                            val blockNames = arrayOf("Mine", "Grass", "Stone", "Timber", "Glow")
+                            val hexColors = arrayOf("#475569", "#22C55E", "#64748B", "#B45309", "#FACC15")
+
+                            for (i in 0 until blockNames.size) {
+                                val id = i
+                                val label = blockNames[i]
+                                val slot = Button(this)
+                                slot.text = label
+                                slot.setTextColor(if (id == 4) Color.BLACK else Color.WHITE)
+                                slot.setBackgroundColor(Color.parseColor(hexColors[i]))
+                                val slotLp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                                slotLp.setMargins(6, 0, 6, 0)
+                                slot.layoutParams = slotLp
+                                slot.setOnClickListener {
+                                    worldView.setSelectedBlock(id)
+                                    Toast.makeText(this@MainActivity, "Tool: ${'$'}label", Toast.LENGTH_SHORT).show()
+                                }
+                                hotbar.addView(slot)
+                            }
+
+                            root.addView(hotbar)
+                            setContentView(root)
+                        }
+                    }
+                """.trimIndent() + "\n"
+
+                files["src/$pkgPath/VoxelWorldView.kt"] = """
+                    package $packageName
+
+                    import android.content.Context
+                    import android.graphics.Canvas
+                    import android.graphics.Color
+                    import android.graphics.Paint
+                    import android.view.MotionEvent
+                    import android.view.View
+
+                    class VoxelWorldView(context: Context) : View(context) {
+
+                        private val cols = 10
+                        private val rows = 12
+                        private val grid = IntArray(cols * rows)
+                        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+                        private var selectedBlock = 1
+
+                        init {
+                            generateTerrain()
+                        }
+
+                        fun setSelectedBlock(blockId: Int) {
+                            selectedBlock = blockId
+                            invalidate()
+                        }
+
+                        private fun generateTerrain() {
+                            for (r in 0 until rows) {
+                                for (c in 0 until cols) {
+                                    val idx = r * cols + c
+                                    if (r == 6) grid[idx] = 1
+                                    else if (r > 6 && r < 10) grid[idx] = 2
+                                    else if (r >= 10) grid[idx] = 4
+                                    else grid[idx] = 0
+                                }
+                            }
+                            grid[5 * cols + 3] = 3
+                            grid[4 * cols + 3] = 3
+                            grid[3 * cols + 3] = 1
+                            grid[5 * cols + 7] = 4
+                        }
+
+                        override fun onDraw(canvas: Canvas) {
+                            super.onDraw(canvas)
+                            val w = Math.max(1f, getWidth().toFloat())
+                            val h = Math.max(1f, getHeight().toFloat())
+                            canvas.drawColor(Color.parseColor("#0F172A"))
+
+                            val cellW = w / cols
+                            val cellH = h / rows
+
+                            for (r in 0 until rows) {
+                                for (c in 0 until cols) {
+                                    val block = grid[r * cols + c]
+                                    val left = c * cellW
+                                    val top = r * cellH
+                                    val right = left + cellW
+                                    val bottom = top + cellH
+
+                                    if (block != 0) {
+                                        var topColor = Color.parseColor("#22C55E")
+                                        var bodyColor = Color.parseColor("#166534")
+                                        if (block == 2) {
+                                            topColor = Color.parseColor("#94A3B8")
+                                            bodyColor = Color.parseColor("#475569")
+                                        } else if (block == 3) {
+                                            topColor = Color.parseColor("#D97706")
+                                            bodyColor = Color.parseColor("#78350F")
+                                        } else if (block == 4) {
+                                            topColor = Color.parseColor("#FDE047")
+                                            bodyColor = Color.parseColor("#CA8A04")
+                                        }
+                                        paint.style = Paint.Style.FILL
+                                        paint.color = bodyColor
+                                        canvas.drawRect(left + 2f, top + 2f, right - 2f, bottom - 2f, paint)
+                                        paint.color = topColor
+                                        canvas.drawRect(left + 2f, top + 2f, right - 2f, top + cellH * 0.28f, paint)
+                                    } else {
+                                        paint.style = Paint.Style.STROKE
+                                        paint.strokeWidth = 1f
+                                        paint.color = Color.parseColor("#1E293B")
+                                        canvas.drawRect(left, top, right, bottom, paint)
+                                    }
+                                }
+                            }
+
+                            paint.style = Paint.Style.FILL
+                            paint.color = Color.parseColor("#E2E8F0")
+                            paint.textSize = 26f
+                            paint.textAlign = Paint.Align.LEFT
+                            canvas.drawText("Tap grid cells to mine or build voxels", 20f, 38f, paint)
+                        }
+
+                        override fun onTouchEvent(event: MotionEvent): Boolean {
+                            if (event.action == MotionEvent.ACTION_DOWN || event.action == MotionEvent.ACTION_MOVE) {
+                                val w = Math.max(1f, getWidth().toFloat())
+                                val h = Math.max(1f, getHeight().toFloat())
+                                val col = ((event.x / w) * cols).toInt()
+                                val row = ((event.y / h) * rows).toInt()
+                                if (col >= 0 && col < cols && row >= 0 && row < rows) {
+                                    grid[row * cols + col] = selectedBlock
+                                    invalidate()
+                                }
+                                return true
+                            }
+                            return super.onTouchEvent(event)
                         }
                     }
                 """.trimIndent() + "\n"

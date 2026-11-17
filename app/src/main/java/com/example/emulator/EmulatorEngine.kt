@@ -105,6 +105,24 @@ data class EmulatorProgram(
 
 object EmulatorEngine {
 
+    fun createLiveSession(
+        appName: String,
+        packageName: String,
+        files: List<ProjectFile>,
+    ): LiveVmSession? {
+        val stringsMap = parseStringsXml(files.find { it.relativePath == "res/values/strings.xml" }?.content.orEmpty())
+        val manifestXml = files.find { it.relativePath == "AndroidManifest.xml" }?.content.orEmpty()
+        val resolvedAppName = resolveStringRef(
+            extractManifestAttr(manifestXml, "label") ?: appName,
+            stringsMap,
+        ).ifBlank { appName }
+        return LiveActivityVm.createSession(
+            appName = resolvedAppName,
+            packageName = packageName,
+            files = files,
+        )
+    }
+
     fun parseProject(
         appName: String,
         packageName: String,
@@ -127,7 +145,7 @@ object EmulatorEngine {
         }
 
         val code = mainSource.content
-        val hasCanvas = code.contains("DrawingPadView") || files.any { it.content.contains("onTouchEvent") && it.content.contains("drawPath") }
+        val hasCanvas = code.contains("DrawingPadView")
         val isCalculator = code.contains("GridLayout") && code.contains("onKeyPress")
         val isCounter = code.contains("countDisplay") || (code.contains("count++") && code.contains("count--"))
         val isNotes = code.contains("EditText") && (code.contains("notes") || code.contains("Note"))

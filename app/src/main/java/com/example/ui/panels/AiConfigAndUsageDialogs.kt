@@ -83,7 +83,7 @@ fun ProviderKeysDialog(
 
     val activeKey = keyInputs[selectedProvider].orEmpty()
     val hasBuiltInGemini = selectedProvider == AiProvider.GEMINI && GeminiCodeAssistant.hasBuiltInApiKey()
-    val currentModel = providerModels[selectedProvider].orEmpty().ifBlank { selectedProvider.defaultModelId }
+    val currentModel = AiModelsCatalog.normalizeModelId(selectedProvider, providerModels[selectedProvider])
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -131,7 +131,7 @@ fun ProviderKeysDialog(
                         selectedProvider == AiProvider.GEMINI && activeKey.isBlank() && hasBuiltInGemini ->
                             "Using the built-in GEMINI_API_KEY configured at build time. Paste a custom Google AI Studio key below to override it."
                         selectedProvider == AiProvider.GEMINI ->
-                            "Google AI Studio API key for Gemini 4, Gemini 3, and Gemini 2.5/2.0/1.5 models. Saved locally on this device."
+                            "Google AI Studio API key for Gemini 2.5, Gemini 2.0, and Gemini 3 models. Saved locally on this device."
                         selectedProvider == AiProvider.OPENAI ->
                             "OpenAI API key (sk-...) for GPT-6, GPT-5, GPT-4.5, GPT-4.1, GPT-4o, o4-mini, o3, and o1 models."
                         else ->
@@ -231,12 +231,12 @@ fun ModelMenuDialog(
     var searchQuery by remember { mutableStateOf("") }
     var generationFilter by remember(browsedProvider) { mutableStateOf("All") }
     var customModelInput by remember(browsedProvider, providerModels) {
-        mutableStateOf(providerModels[browsedProvider].orEmpty().ifBlank { browsedProvider.defaultModelId })
+        mutableStateOf(AiModelsCatalog.normalizeModelId(browsedProvider, providerModels[browsedProvider]))
     }
 
     val filterOptions = remember(browsedProvider) {
         when (browsedProvider) {
-            AiProvider.GEMINI -> listOf("All", "Gemini 3", "Gemini 4", "2.5 / 2.0", "Live")
+            AiProvider.GEMINI -> listOf("All", "2.5 GA", "2.0", "Gemini 3", "Live")
             AiProvider.OPENAI -> listOf("All", "GPT-6 / 5", "4.1 / 4o", "o-Series", "Live")
             AiProvider.CLAUDE -> listOf("All", "Claude 5", "Claude 4", "Claude 3", "Live")
         }
@@ -254,9 +254,9 @@ fun ModelMenuDialog(
             val matchesGen = when (generationFilter) {
                 "All" -> true
                 "Live" -> option.isLiveFetched
+                "2.5 GA" -> id.contains("2.5")
+                "2.0" -> id.contains("2.0") || id.contains("1.5")
                 "Gemini 3" -> id.contains("gemini-3")
-                "Gemini 4" -> id.contains("gemini-4")
-                "2.5 / 2.0" -> id.contains("2.5") || id.contains("2.0") || id.contains("1.5")
                 "GPT-6 / 5" -> id.startsWith("gpt-6") || id.startsWith("gpt-5")
                 "4.1 / 4o" -> id.contains("4.1") || id.contains("4.5") || id.contains("4o") || id.startsWith("gpt-4") || id.startsWith("gpt-3.5")
                 "o-Series" -> id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4")
@@ -268,7 +268,7 @@ fun ModelMenuDialog(
             matchesQuery && matchesGen
         }
     }
-    val selectedModelId = providerModels[browsedProvider].orEmpty().ifBlank { browsedProvider.defaultModelId }
+    val selectedModelId = AiModelsCatalog.normalizeModelId(browsedProvider, providerModels[browsedProvider])
 
     AlertDialog(
         onDismissRequest = onDismiss,

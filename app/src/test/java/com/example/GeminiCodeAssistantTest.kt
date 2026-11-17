@@ -26,8 +26,16 @@ import org.robolectric.annotation.Config
 class GeminiCodeAssistantTest {
 
     @Test
-    fun usesFastReliableGemini3DefaultModel() {
-        assertEquals("gemini-3.8-flash", GEMINI_MODEL_ID)
+    fun usesFastReliableGemini25DefaultModel() {
+        assertEquals("gemini-2.5-flash", GEMINI_MODEL_ID)
+    }
+
+    @Test
+    fun normalizeModelId_migratesLegacyUnavailableGeminiIdsToDefault() {
+        assertEquals("gemini-2.5-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-4-hydrogen"))
+        assertEquals("gemini-2.5-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-3.8-flash"))
+        assertEquals("gemini-2.5-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "models/gemini-3.6-flash"))
+        assertEquals("gemini-2.5-pro", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-2.5-pro"))
     }
 
     @Test
@@ -163,9 +171,13 @@ class GeminiCodeAssistantTest {
     fun fallbackChain_startsWithSelectedModelAndIncludesReliableFallbacks() {
         val geminiChain = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, "gemini-3.1-pro-preview")
         assertEquals("gemini-3.1-pro-preview", geminiChain.first())
-        assertTrue(geminiChain.contains("gemini-3.8-flash"))
         assertTrue(geminiChain.contains("gemini-2.5-flash"))
+        assertTrue(geminiChain.contains("gemini-2.0-flash"))
         assertEquals(geminiChain.distinct().size, geminiChain.size)
+
+        val migratedChain = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, "gemini-4-hydrogen")
+        assertEquals("gemini-2.5-flash", migratedChain.first())
+        assertFalse(migratedChain.contains("gemini-4-hydrogen"))
 
         val openAiChain = AiModelsCatalog.fallbackChain(AiProvider.OPENAI, "gpt-6-astra")
         assertEquals("gpt-6-astra", openAiChain.first())
@@ -239,8 +251,9 @@ class GeminiCodeAssistantTest {
         val gemini = com.example.ai.AiModelsCatalog.modelsFor(com.example.ai.AiProvider.GEMINI)
         val openai = com.example.ai.AiModelsCatalog.modelsFor(com.example.ai.AiProvider.OPENAI)
         val claude = com.example.ai.AiModelsCatalog.modelsFor(com.example.ai.AiProvider.CLAUDE)
-        assertTrue(gemini.any { it.id == "gemini-4-hydrogen" })
-        assertTrue(gemini.any { it.id == "gemini-3.8-flash" })
+        assertTrue(gemini.any { it.id == "gemini-2.5-flash" })
+        assertTrue(gemini.any { it.id == "gemini-2.5-flash-lite" })
+        assertTrue(gemini.any { it.id == "gemini-2.0-flash" })
         assertTrue(gemini.any { it.id == "gemini-3.1-pro-preview" })
         assertTrue(gemini.any { it.id == "gemini-3-pro-preview" })
         assertTrue(gemini.any { it.id == "gemini-3-flash-preview" })
@@ -277,11 +290,11 @@ class GeminiCodeAssistantTest {
                     totalTokens = 1950,
                     estimatedCostUsd = estCost,
                     lastLatencyMs = 820,
-                    lastModelId = "gemini-3.8-flash",
+                    lastModelId = "gemini-2.5-flash",
                     remainingQuotaNote = "Req left: 99 • Tok left: 190000",
                 ),
             ),
-            byModel = mapOf("gemini-3.8-flash" to 1950L),
+            byModel = mapOf("gemini-2.5-flash" to 1950L),
             lastUpdatedMillis = 123456L,
         )
         val decoded = com.example.ai.AiUsageSummary.fromJson(summary.toJson())
@@ -291,7 +304,7 @@ class GeminiCodeAssistantTest {
         assertEquals(300L, decoded.totalThinkingTokens)
         assertEquals(estCost, decoded.totalEstimatedCostUsd, 0.00001)
         assertEquals("Req left: 99 • Tok left: 190000", decoded.byProvider[com.example.ai.AiProvider.GEMINI]?.remainingQuotaNote)
-        assertEquals(1950L, decoded.byModel["gemini-3.8-flash"])
+        assertEquals(1950L, decoded.byModel["gemini-2.5-flash"])
     }
 
     @Test
@@ -340,6 +353,25 @@ class GeminiCodeAssistantTest {
             assertEquals(140L, restored[0].messages[1].steps[0].durationMs)
         } finally {
             dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aiProviderToolSpecsIncludeAllNineGitHubTools() {
+        val toolNames = com.example.ai.ProviderApiClient.buildSharedToolSpecs().map { it.first }.toSet()
+        val expectedGitHubTools = listOf(
+            "github_status",
+            "github_list_repos",
+            "github_create_repo",
+            "github_link_repo",
+            "github_list_repo_files",
+            "github_read_file",
+            "github_pull_changes",
+            "github_push_changes",
+            "github_trigger_cloud_build",
+        )
+        expectedGitHubTools.forEach { name ->
+            assertTrue("Expected AI tool schema '$name'", toolNames.contains(name))
         }
     }
 }

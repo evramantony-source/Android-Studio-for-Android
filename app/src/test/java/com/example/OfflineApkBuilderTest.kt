@@ -572,4 +572,493 @@ class OfflineApkBuilderTest {
             assertTrue("Expected widgets parsed for Kotlin ${template.name}", parsed.detectedWidgetsCount > 0)
         }
     }
+
+    @Test
+    fun buildsApkWithJava25FeaturesRecordsSwitchTextBlocksAndVar() {
+        val projectDir = tempFolder.newFolder("java25_project")
+        val files = TemplateProvider.generateFiles(
+            template = ProjectTemplate.BLANK_ACTIVITY,
+            appName = "Java25 App",
+            packageName = "com.example.java25",
+            language = ProjectLanguage.JAVA,
+            minSdkVersion = 24,
+        ).toMutableMap()
+        files["src/com/example/java25/MainActivity.java"] = """
+            package com.example.java25;
+
+            import android.app.Activity;
+            import android.os.Bundle;
+            import android.widget.TextView;
+            import java.util.List;
+
+            public class MainActivity extends Activity {
+                public record PlayerStats(String name, int score) {}
+
+                @Override
+                protected void onCreate(Bundle savedInstanceState) {
+                    super.onCreate(savedInstanceState);
+                    var items = List.of("Alpha", "Beta", "Gamma");
+                    var stats = new PlayerStats("Pilot", 420);
+                    String tier = switch (items.size()) {
+                        case 1 -> "Solo";
+                        case 2, 3 -> "Squad";
+                        default -> "Fleet";
+                    };
+                    var banner = ${"\"\"\""}
+                        Hero: Pilot
+                        Status: Online
+                        ${"\"\"\""};
+                    IO.println("Loaded " + stats.name() + " tier=" + tier);
+                    TextView tv = new TextView(this);
+                    tv.setText(stats.name() + " " + tier + " " + banner.trim());
+                    setContentView(tv);
+                }
+            }
+        """.trimIndent()
+        files.forEach { (relPath, content) ->
+            val target = File(projectDir, relPath)
+            target.parentFile?.mkdirs()
+            target.writeText(content)
+        }
+
+        val result = OfflineApkBuilder().buildWithToolchain(
+            projectDir = projectDir,
+            packageName = "com.example.java25",
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = resolveAsset("debug_signing.p12"),
+            targetJavaVersion = com.example.model.JavaVersionOption.JAVA_25,
+        )
+        assertTrue("Expected Java 25 build to succeed, logs=${result.logs}", result.success)
+        val apkFile = File(result.apkPath!!)
+        val verification = ApkVerifier.Builder(apkFile)
+            .setMinCheckedPlatformVersion(24)
+            .build()
+            .verify()
+        assertTrue("Java 25 APK signature failed: ${verification.errors}", verification.isVerified)
+    }
+
+    @Test
+    fun packagesXmlLayoutsDrawablesAndNativeLibsIntoApk() {
+        val projectDir = tempFolder.newFolder("layout_native_project")
+        val files = TemplateProvider.generateFiles(
+            template = ProjectTemplate.BLANK_ACTIVITY,
+            appName = "LayoutNative",
+            packageName = "com.example.layoutnative",
+            language = ProjectLanguage.JAVA,
+            minSdkVersion = 24,
+        ).toMutableMap()
+        files["res/layout/activity_main.xml"] = """
+            <?xml version="1.0" encoding="utf-8"?>
+            <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+                android:orientation="vertical"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent">
+                <TextView
+                    android:id="@+id/title_label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/app_name" />
+                <Button
+                    android:id="@+id/action_btn"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="Launch" />
+            </LinearLayout>
+        """.trimIndent()
+        files["src/com/example/layoutnative/MainActivity.java"] = """
+            package com.example.layoutnative;
+
+            import android.app.Activity;
+            import android.os.Bundle;
+            import android.widget.Button;
+            import android.widget.TextView;
+
+            public class MainActivity extends Activity {
+                @Override
+                protected void onCreate(Bundle savedInstanceState) {
+                    super.onCreate(savedInstanceState);
+                    setContentView(R.layout.activity_main);
+                    TextView label = (TextView) findViewById(R.id.title_label);
+                    Button btn = (Button) findViewById(R.id.action_btn);
+                    btn.setText("Ready: " + label.getText());
+                }
+            }
+        """.trimIndent()
+        files.forEach { (relPath, content) ->
+            val target = File(projectDir, relPath)
+            target.parentFile?.mkdirs()
+            target.writeText(content)
+        }
+        val nativeSo = File(projectDir, "jniLibs/arm64-v8a/libengine.so")
+        nativeSo.parentFile?.mkdirs()
+        nativeSo.writeBytes(byteArrayOf(0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte(), 2, 1, 1, 0))
+
+        val result = OfflineApkBuilder().buildWithToolchain(
+            projectDir = projectDir,
+            packageName = "com.example.layoutnative",
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = resolveAsset("debug_signing.p12"),
+        )
+        assertTrue("Expected layout+native build to succeed, logs=${result.logs}", result.success)
+
+        val apkFile = File(result.apkPath!!)
+        ZipFile(apkFile).use { zip ->
+            assertTrue("Expected res/layout/activity_main.xml in APK", zip.getEntry("res/layout/activity_main.xml") != null)
+            assertTrue("Expected lib/arm64-v8a/libengine.so stored uncompressed in APK", zip.getEntry("lib/arm64-v8a/libengine.so") != null)
+        }
+        val verification = ApkVerifier.Builder(apkFile)
+            .setMinCheckedPlatformVersion(24)
+            .build()
+            .verify()
+        assertTrue("Layout+native APK signature invalid: ${verification.errors}", verification.isVerified)
+    }
+
+    @Test
+    fun liveVmExecutesArcadeShooterAndVoxelTemplatesWithCanvasOps() {
+        listOf(
+            ProjectTemplate.ARCADE_SHOOTER to ProjectLanguage.JAVA,
+            ProjectTemplate.ARCADE_SHOOTER to ProjectLanguage.KOTLIN,
+            ProjectTemplate.VOXEL_LAUNCHER_STUDIO to ProjectLanguage.JAVA,
+            ProjectTemplate.VOXEL_LAUNCHER_STUDIO to ProjectLanguage.KOTLIN,
+        ).forEach { (template, lang) ->
+            val projectFiles = TemplateProvider.generateFiles(
+                template = template,
+                appName = template.defaultAppName,
+                packageName = template.defaultPackage,
+                language = lang,
+                minSdkVersion = 24,
+            ).map { (path, content) ->
+                com.example.model.ProjectFile(
+                    relativePath = path,
+                    content = content,
+                    language = when {
+                        path.endsWith(".kt") -> FileLanguage.KOTLIN
+                        path.endsWith(".java") -> FileLanguage.JAVA
+                        else -> FileLanguage.XML
+                    },
+                )
+            }
+
+            val session = com.example.emulator.EmulatorEngine.createLiveSession(
+                appName = template.defaultAppName,
+                packageName = template.defaultPackage,
+                files = projectFiles,
+            )
+            assertTrue("Expected LiveVmSession created for ${template.name} ($lang)", session != null)
+            assertTrue("Expected onCreate() start() success for ${template.name} ($lang)", session!!.start())
+            session.updateViewportSize(720, 1280)
+
+            fun findCanvas(node: com.example.emulator.VmViewNode?): com.example.emulator.VmViewNode.CustomCanvasView? {
+                return when (node) {
+                    is com.example.emulator.VmViewNode.CustomCanvasView -> node
+                    is com.example.emulator.VmViewNode.Container -> node.children.firstNotNullOfOrNull { findCanvas(it) }
+                    else -> null
+                }
+            }
+
+            val beforeSnapshot = session.buildSnapshot()
+            val canvasBefore = findCanvas(beforeSnapshot)
+            assertTrue("Expected CustomCanvasView rendered for ${template.name} ($lang)", canvasBefore != null)
+            assertTrue(
+                "Expected non-zero Canvas draw ops for ${template.name} ($lang), got=${canvasBefore!!.ops.size}",
+                canvasBefore.ops.size >= 3,
+            )
+
+            // Simulate touch drag + timer tick
+            session.dispatchTouch(canvasBefore.id, 0, 500f, 900f)
+            session.dispatchTouch(canvasBefore.id, 2, 540f, 880f)
+            session.tickTimers(System.currentTimeMillis() + 50L)
+
+            val afterSnapshot = session.buildSnapshot()
+            val canvasAfter = findCanvas(afterSnapshot)
+            assertTrue("Expected CustomCanvasView after tick for ${template.name} ($lang)", canvasAfter != null)
+            assertTrue("Expected >0 ops after tick for ${template.name} ($lang)", canvasAfter!!.ops.isNotEmpty())
+        }
+    }
+
+    @Test
+    fun githubClientGeneratesGradleAndActionsWithJava25() {
+        val meta = com.example.model.ProjectMetadata(
+            id = "test123",
+            name = "DreamVoxel",
+            packageName = "com.example.dreamvoxel",
+            template = ProjectTemplate.VOXEL_LAUNCHER_STUDIO,
+            createdAtMillis = 1000L,
+            updatedAtMillis = 1000L,
+            language = ProjectLanguage.JAVA,
+            javaVersion = com.example.model.JavaVersionOption.JAVA_25,
+            minSdkVersion = 26,
+        )
+        val workflowYaml = com.example.github.GitHubClient.buildWorkflowYaml(meta)
+        val appGradle = com.example.github.GitHubClient.buildAppGradleKts(meta)
+        assertTrue(workflowYaml.contains("java-version: '25'"))
+        assertTrue(workflowYaml.contains("assembleDebug"))
+        assertTrue(appGradle.contains("minSdk = 26"))
+        assertTrue(appGradle.contains("JavaVersion.toVersion(25)"))
+        assertTrue(appGradle.contains("multiDexEnabled = true"))
+    }
+
+    @Test
+    fun supportsAllJavaVersions8Through25AndTranspilesModernFeatures() {
+        assertEquals((8..25).toList(), com.example.model.JavaVersionOption.entries.map { it.majorVersion })
+
+        val compactMain = com.example.compiler.ModernJavaTranspiler.transpileToJava8(
+            """
+            void main() {
+                IO.println("Compact Java 25");
+            }
+            """.trimIndent(),
+        )
+        assertTrue("Expected compact main wrapped in class Main", compactMain.java8Source.contains("public class Main"))
+        assertTrue("Expected IO.println lowered", compactMain.java8Source.contains("System.out.println"))
+
+        val projectDir = tempFolder.newFolder("java8_to_25_project")
+        val files = TemplateProvider.generateFiles(
+            template = ProjectTemplate.BLANK_ACTIVITY,
+            appName = "Java25 Modern",
+            packageName = "com.example.java25modern",
+            language = ProjectLanguage.JAVA,
+            minSdkVersion = 24,
+        ).toMutableMap()
+        files["src/com/example/java25modern/MainActivity.java"] = """
+            package com.example.java25modern;
+
+            import android.app.Activity;
+            import android.os.Bundle;
+            import android.widget.TextView;
+            import java.util.Map;
+
+            public class MainActivity extends Activity {
+                sealed interface Item permits BlockItem {}
+                static final class BlockItem implements Item {
+                    String title() { return "Oak"; }
+                }
+
+                @Override
+                protected void onCreate(Bundle savedInstanceState) {
+                    super.onCreate(savedInstanceState);
+                    Map<String, Integer> bag = Map.of("oak", 4, "stone", 16);
+                    String repeated = "#".repeat(3);
+                    long lineCount = "a\nb\nc".lines().count();
+                    String kind = switch (bag.size()) {
+                        case 1 -> {
+                            yield "single";
+                        }
+                        default -> {
+                            yield "multi";
+                        }
+                    };
+                    Item item = new BlockItem();
+                    TextView tv = new TextView(this);
+                    tv.setText(repeated + ":" + lineCount + ":" + kind + ":" + ((BlockItem) item).title());
+                    setContentView(tv);
+                }
+            }
+        """.trimIndent()
+        files.forEach { (relPath, content) ->
+            val target = File(projectDir, relPath)
+            target.parentFile?.mkdirs()
+            target.writeText(content)
+        }
+
+        val result = OfflineApkBuilder().buildWithToolchain(
+            projectDir = projectDir,
+            packageName = "com.example.java25modern",
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = resolveAsset("debug_signing.p12"),
+            targetJavaVersion = com.example.model.JavaVersionOption.JAVA_25,
+        )
+        assertTrue("Expected modern Java 25 build to succeed, logs=${result.logs}", result.success)
+        val apkFile = File(result.apkPath!!)
+        val verification = ApkVerifier.Builder(apkFile)
+            .setMinCheckedPlatformVersion(24)
+            .build()
+            .verify()
+        assertTrue("Modern Java 25 APK signature failed: ${verification.errors}", verification.isVerified)
+    }
+
+    @Test
+    fun streamingSignJarArchiveVerifiesStoredAndDeflatedEntries() {
+        val keystoreFile = File(tempFolder.newFolder("stream_keys"), "stream.p12")
+        com.example.compiler.KeystoreManager.generatePkcs12Keystore(
+            outputFile = keystoreFile,
+            alias = "streamkey",
+            storePassword = "password123",
+            keyPassword = "password123",
+            commonName = "DroidForge Stream",
+            organization = "DroidForge",
+        )
+        val signer = com.example.compiler.KeystoreManager.inspectKeystore(
+            keystoreFile = keystoreFile,
+            storePassword = "password123",
+            preferredAlias = "streamkey",
+            keyPassword = "password123",
+        )
+
+        val work = tempFolder.newFolder("stream_zip")
+        val unsignedZip = File(work, "unsigned.aab")
+        val signedZip = File(work, "signed.aab")
+        val storedPayload = ByteArray(128 * 1024) { idx -> (idx % 251).toByte() }
+        val deflatedPayload = "droidforge-stream-test-entry\n".repeat(400).toByteArray()
+
+        java.util.zip.ZipOutputStream(unsignedZip.outputStream()).use { zos ->
+            val crc = java.util.zip.CRC32().apply { update(storedPayload) }.value
+            val storedEntry = java.util.zip.ZipEntry("base/assets/large.bin").apply {
+                method = java.util.zip.ZipEntry.STORED
+                size = storedPayload.size.toLong()
+                compressedSize = storedPayload.size.toLong()
+                this.crc = crc
+            }
+            zos.putNextEntry(storedEntry)
+            zos.write(storedPayload)
+            zos.closeEntry()
+
+            zos.putNextEntry(java.util.zip.ZipEntry("base/dex/classes.dex"))
+            zos.write(deflatedPayload)
+            zos.closeEntry()
+        }
+
+        com.example.compiler.KeystoreManager.signJarArchive(
+            unsignedZip = unsignedZip,
+            signedOutput = signedZip,
+            signer = signer,
+        )
+
+        ZipFile(signedZip).use { zip ->
+            val storedOut = zip.getEntry("base/assets/large.bin")!!
+            assertEquals(java.util.zip.ZipEntry.STORED, storedOut.method)
+            assertEquals(storedPayload.size.toLong(), storedOut.size)
+        }
+
+        java.util.jar.JarFile(signedZip, true).use { jar ->
+            val entries = jar.entries().toList().filter { !it.isDirectory && !it.name.startsWith("META-INF/") }
+            assertEquals(2, entries.size)
+            entries.forEach { entry ->
+                val bytes = jar.getInputStream(entry).use { it.readBytes() }
+                if (entry.name.endsWith("large.bin")) {
+                    assertTrue(bytes.contentEquals(storedPayload))
+                } else {
+                    assertTrue(bytes.contentEquals(deflatedPayload))
+                }
+                assertTrue("Expected signer certs for ${entry.name}", !entry.certificates.isNullOrEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun liveVmInflatesXmlCustomCanvasAndSurfaceViewWithPointerAndTimerSupport() {
+        val projectFiles = listOf(
+            com.example.model.ProjectFile(
+                relativePath = "res/layout/activity_game.xml",
+                content = """
+                    <?xml version="1.0" encoding="utf-8"?>
+                    <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+                        android:orientation="vertical"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent">
+                        <TextView
+                            android:id="@+id/hud_text"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="HUD Ready" />
+                        <com.example.xmlgame.XmlGameView
+                            android:id="@+id/game_canvas"
+                            android:layout_width="match_parent"
+                            android:layout_height="0dp"
+                            android:layout_weight="1" />
+                        <SurfaceView
+                            android:id="@+id/hud_surface"
+                            android:layout_width="match_parent"
+                            android:layout_height="120dp" />
+                    </LinearLayout>
+                """.trimIndent(),
+                language = FileLanguage.XML,
+            ),
+            com.example.model.ProjectFile(
+                relativePath = "src/com/example/xmlgame/MainActivity.java",
+                content = """
+                    package com.example.xmlgame;
+
+                    import android.app.Activity;
+                    import android.content.Context;
+                    import android.graphics.Canvas;
+                    import android.graphics.Color;
+                    import android.graphics.Paint;
+                    import android.os.Bundle;
+                    import android.os.Handler;
+                    import android.view.MotionEvent;
+                    import android.view.SurfaceHolder;
+                    import android.view.SurfaceView;
+                    import android.view.View;
+                    import android.widget.TextView;
+
+                    public class MainActivity extends Activity {
+                        private int ticks = 0;
+
+                        @Override
+                        protected void onCreate(Bundle savedInstanceState) {
+                            super.onCreate(savedInstanceState);
+                            setContentView(R.layout.activity_game);
+                            SurfaceView sv = (SurfaceView) findViewById(R.id.hud_surface);
+                            SurfaceHolder holder = sv.getHolder();
+                            Canvas sc = holder.lockCanvas();
+                            if (sc != null) {
+                                Paint p = new Paint();
+                                p.setColor(Color.GREEN);
+                                sc.drawRect(0, 0, 100, 40, p);
+                                holder.unlockCanvasAndPost(sc);
+                            }
+                            final TextView hud = (TextView) findViewById(R.id.hud_text);
+                            new Handler().postDelayed(new Runnable() {
+                                @Override
+                                public void run() {
+                                    ticks = ticks + 1;
+                                    hud.setText("Tick " + ticks);
+                                }
+                            }, 16);
+                        }
+                    }
+
+                    class XmlGameView extends View {
+                        private float playerX = 120f;
+                        public XmlGameView(Context context) {
+                            super(context);
+                        }
+                        @Override
+                        protected void onDraw(Canvas canvas) {
+                            Paint p = new Paint();
+                            p.setColor(Color.CYAN);
+                            canvas.drawCircle(playerX, 200f, 30f, p);
+                        }
+                        @Override
+                        public boolean onTouchEvent(MotionEvent event) {
+                            if (event.getPointerCount() >= 1) {
+                                playerX = event.getX();
+                            }
+                            return true;
+                        }
+                    }
+                """.trimIndent(),
+                language = FileLanguage.JAVA,
+            ),
+        )
+
+        val session = com.example.emulator.EmulatorEngine.createLiveSession(
+            appName = "XmlGame",
+            packageName = "com.example.xmlgame",
+            files = projectFiles,
+        )!!
+        assertTrue(session.start())
+        session.updateViewportSize(720, 1280)
+        session.tickTimers(System.currentTimeMillis() + 50L)
+
+        val root = session.buildSnapshot() as com.example.emulator.VmViewNode.Container
+        val canvasNodes = root.children.filterIsInstance<com.example.emulator.VmViewNode.CustomCanvasView>()
+        assertEquals("Expected both XML custom View and SurfaceView canvas nodes", 2, canvasNodes.size)
+        val xmlGameNode = canvasNodes.first()
+        assertEquals(1f, xmlGameNode.layoutWeight)
+        assertTrue("Expected drawCircle op from XML custom view", xmlGameNode.ops.isNotEmpty())
+        val surfaceNode = canvasNodes.last()
+        assertTrue("Expected drawRect op from SurfaceHolder", surfaceNode.ops.isNotEmpty())
+    }
 }

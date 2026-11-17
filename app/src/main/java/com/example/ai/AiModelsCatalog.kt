@@ -187,95 +187,13 @@ data class AiUsageSummary(
 object AiModelsCatalog {
 
     val builtInGeminiModels: List<AiModelOption> = listOf(
-        // Gemini 3 Series (Fastest & Default)
-        AiModelOption(
-            id = "gemini-3.8-flash",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3.8 Flash",
-            badge = "Default",
-            description = "Latest high-speed Gemini 3 Flash for rapid autonomous coding & builds.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gemini-3.6-flash",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3.6 Flash",
-            badge = "Gemini 3",
-            description = "Production Gemini 3 Flash balancing speed, accuracy, and tool use.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gemini-3.5-flash-lite",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3.5 Flash-Lite",
-            badge = "Gemini 3",
-            description = "Ultra-efficient Gemini 3 Flash-Lite for quick edits and low token cost.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gemini-3.1-pro-preview",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3.1 Pro Preview",
-            badge = "Gemini 3",
-            description = "State-of-the-art Gemini 3 reasoning for complex multi-file Android engineering.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gemini-3.1-pro-preview-customtools",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3.1 Pro CustomTools",
-            badge = "Gemini 3",
-            description = "Agent-tuned Gemini 3.1 Pro optimized for custom file & build tool loops.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gemini-3-pro-preview",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3 Pro Preview",
-            badge = "Gemini 3",
-            description = "Core Gemini 3 Pro model with dynamic thinking levels and broad reasoning.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gemini-3-flash-preview",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3 Flash Preview",
-            badge = "Gemini 3",
-            description = "Fast Gemini 3 Flash model tailored for iterative coding and agent flows.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gemini-3.1-flash-lite",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3.1 Flash-Lite",
-            badge = "Gemini 3",
-            description = "Lightweight Gemini 3 model optimized for high-throughput coding checks.",
-            contextWindow = "1M ctx",
-        ),
-        // Gemini 4 Experimental
-        AiModelOption(
-            id = "gemini-4-hydrogen",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 4 Hydrogen",
-            badge = "Exp",
-            description = "Experimental next-gen model (auto-falls back to Flash if unavailable or 503).",
-            contextWindow = "1M ctx",
-        ),
-        // Gemini 2.5 Series
-        AiModelOption(
-            id = "gemini-2.5-pro",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 2.5 Pro",
-            badge = "2.5 Pro",
-            description = "High-accuracy multi-file engineering, thinking, and debugging.",
-            contextWindow = "1M ctx",
-        ),
+        // Gemini 2.5 Series (GA Fastest & Most Reliable)
         AiModelOption(
             id = "gemini-2.5-flash",
             provider = AiProvider.GEMINI,
             label = "Gemini 2.5 Flash",
-            badge = "2.5 Fast",
-            description = "Low-latency coding agent with tool use & adaptive thinking.",
+            badge = "Default",
+            description = "Fast, reliable GA Gemini model for autonomous coding, builds & tool use.",
             contextWindow = "1M ctx",
         ),
         AiModelOption(
@@ -283,10 +201,18 @@ object AiModelsCatalog {
             provider = AiProvider.GEMINI,
             label = "Gemini 2.5 Flash-Lite",
             badge = "2.5 Lite",
-            description = "Fast responses and minimal token cost for quick edits.",
+            description = "Ultra-fast responses and minimal token cost for quick edits.",
             contextWindow = "1M ctx",
         ),
-        // Gemini 2.0 & 1.5 Series
+        AiModelOption(
+            id = "gemini-2.5-pro",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 2.5 Pro",
+            badge = "2.5 Pro",
+            description = "High-accuracy multi-file engineering, deep thinking, and debugging.",
+            contextWindow = "1M ctx",
+        ),
+        // Gemini 2.0 Series (Stable Fallback)
         AiModelOption(
             id = "gemini-2.0-flash",
             provider = AiProvider.GEMINI,
@@ -303,6 +229,40 @@ object AiModelsCatalog {
             description = "Lightweight 2.0 variant for quick syntax fixes and Q&A.",
             contextWindow = "1M ctx",
         ),
+        // Gemini 3 Preview Series
+        AiModelOption(
+            id = "gemini-3-flash-preview",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 3 Flash Preview",
+            badge = "Gemini 3",
+            description = "Preview Gemini 3 Flash model (auto-falls back to 2.5 Flash if busy).",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "gemini-3-pro-preview",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 3 Pro Preview",
+            badge = "Gemini 3",
+            description = "Preview Gemini 3 Pro model with dynamic thinking levels.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "gemini-3.1-pro-preview",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 3.1 Pro Preview",
+            badge = "Gemini 3",
+            description = "Preview Gemini 3.1 Pro for complex multi-file Android engineering.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "gemini-3.1-pro-preview-customtools",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 3.1 Pro CustomTools",
+            badge = "Gemini 3",
+            description = "Agent-tuned Gemini 3.1 Pro optimized for custom file & build tool loops.",
+            contextWindow = "1M ctx",
+        ),
+        // Gemini 1.5 Legacy Series
         AiModelOption(
             id = "gemini-1.5-pro",
             provider = AiProvider.GEMINI,
@@ -678,16 +638,33 @@ object AiModelsCatalog {
         return merged.values.toList()
     }
 
+    private val LEGACY_UNAVAILABLE_GEMINI_MODELS = setOf(
+        "gemini-4-hydrogen",
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+    )
+
+    fun normalizeModelId(provider: AiProvider, rawModelId: String?): String {
+        val cleaned = rawModelId.orEmpty().trim().removePrefix("models/")
+        if (cleaned.isEmpty()) return provider.defaultModelId
+        if (provider == AiProvider.GEMINI && cleaned.lowercase() in LEGACY_UNAVAILABLE_GEMINI_MODELS) {
+            return GEMINI_MODEL_ID
+        }
+        return cleaned
+    }
+
     fun fallbackChain(provider: AiProvider, primaryModelId: String): List<String> {
-        val cleanPrimary = primaryModelId.trim().removePrefix("models/").ifBlank { provider.defaultModelId }
+        val cleanPrimary = normalizeModelId(provider, primaryModelId)
         val pool = when (provider) {
             AiProvider.GEMINI -> listOf(
-                "gemini-3.8-flash",
-                "gemini-3.6-flash",
-                "gemini-3.5-flash-lite",
                 "gemini-2.5-flash",
-                "gemini-2.5-flash-lite",
                 "gemini-2.0-flash",
+                "gemini-2.5-flash-lite",
+                "gemini-2.0-flash-lite",
+                "gemini-2.5-pro",
+                "gemini-3-flash-preview",
             )
             AiProvider.OPENAI -> listOf(
                 "gpt-5-mini",

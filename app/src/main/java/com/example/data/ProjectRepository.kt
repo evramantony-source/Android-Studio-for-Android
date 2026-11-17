@@ -16,6 +16,8 @@ import com.example.ai.TokenUsageDelta
 import com.example.model.BuildVariant
 import com.example.model.EditorSettings
 import com.example.model.FileLanguage
+import com.example.model.GitHubRepoLink
+import com.example.model.JavaVersionOption
 import com.example.model.ProjectFile
 import com.example.model.ProjectLanguage
 import com.example.model.ProjectMetadata
@@ -28,9 +30,15 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.io.OutputStream
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+
+data class GitHubPendingChange(
+    val path: String,
+    val status: String, // "added", "modified", "deleted"
+)
 
 private val Context.editorDataStore by preferencesDataStore(name = "droidforge_editor_prefs")
 
@@ -62,6 +70,8 @@ class ProjectRepository(
         val AI_USAGE_JSON = stringPreferencesKey("ai_usage_summary_json")
         val RELEASE_SIGNING_JSON = stringPreferencesKey("release_signing_json")
         val BUILD_VARIANT = stringPreferencesKey("preferred_build_variant")
+        val GITHUB_TOKEN = stringPreferencesKey("github_pat_token")
+        val GITHUB_USER = stringPreferencesKey("github_user_login")
     }
 
     val activeProvider: Flow<AiProvider> = context.editorDataStore.data.map { prefs ->
@@ -84,9 +94,9 @@ class ProjectRepository(
 
     val providerModels: Flow<Map<AiProvider, String>> = context.editorDataStore.data.map { prefs ->
         mapOf(
-            AiProvider.GEMINI to (prefs[PrefKeys.GEMINI_MODEL_ID_KEY]?.takeIf { it.isNotBlank() } ?: GEMINI_MODEL_ID),
-            AiProvider.OPENAI to (prefs[PrefKeys.OPENAI_MODEL_ID_KEY]?.takeIf { it.isNotBlank() } ?: AiProvider.OPENAI.defaultModelId),
-            AiProvider.CLAUDE to (prefs[PrefKeys.CLAUDE_MODEL_ID_KEY]?.takeIf { it.isNotBlank() } ?: AiProvider.CLAUDE.defaultModelId),
+            AiProvider.GEMINI to AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, prefs[PrefKeys.GEMINI_MODEL_ID_KEY]),
+            AiProvider.OPENAI to AiModelsCatalog.normalizeModelId(AiProvider.OPENAI, prefs[PrefKeys.OPENAI_MODEL_ID_KEY]),
+            AiProvider.CLAUDE to AiModelsCatalog.normalizeModelId(AiProvider.CLAUDE, prefs[PrefKeys.CLAUDE_MODEL_ID_KEY]),
         )
     }
 
@@ -95,7 +105,7 @@ class ProjectRepository(
     }
 
     val geminiModelId: Flow<String> = context.editorDataStore.data.map { prefs ->
-        prefs[PrefKeys.GEMINI_MODEL_ID_KEY]?.takeIf { it.isNotBlank() } ?: GEMINI_MODEL_ID
+        AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, prefs[PrefKeys.GEMINI_MODEL_ID_KEY])
     }
 
     val aiUsageSummary: Flow<AiUsageSummary> = context.editorDataStore.data.map { prefs ->
@@ -105,6 +115,23 @@ class ProjectRepository(
     val preferredBuildVariant: Flow<BuildVariant> = context.editorDataStore.data.map { prefs ->
         runCatching { BuildVariant.valueOf(prefs[PrefKeys.BUILD_VARIANT].orEmpty()) }
             .getOrDefault(BuildVariant.DEBUG_APK)
+    }
+
+    val githubToken: Flow<String> = context.editorDataStore.data.map { prefs ->
+        prefs[PrefKeys.GITHUB_TOKEN].orEmpty()
+    }
+
+    val githubUser: Flow<String> = context.editorDataStore.data.map { prefs ->
+        prefs[PrefKeys.GITHUB_USER].orEmpty()
+    }
+
+    suspend fun saveGitHubAuth(token: String, username: String) {
+        context.editorDataStore.edit { prefs ->
+            val cleanedToken = token.trim()
+            val cleanedUser = username.trim()
+            if (cleanedToken.isEmpty()) prefs.remove(PrefKeys.GITHUB_TOKEN) else prefs[PrefKeys.GITHUB_TOKEN] = cleanedToken
+            if (cleanedUser.isEmpty()) prefs.remove(PrefKeys.GITHUB_USER) else prefs[PrefKeys.GITHUB_USER] = cleanedUser
+        }
     }
 
     val releaseSigningConfig: Flow<ReleaseSigningConfig> = context.editorDataStore.data.map { prefs ->
@@ -147,13 +174,14 @@ class ProjectRepository(
             }
             if (cleanedKey.isEmpty()) prefs.remove(keyPref) else prefs[keyPref] = cleanedKey
 
-            val cleanedModel = modelId.trim().removePrefix("models/")
+            val rawCleanedModel = modelId.trim().removePrefix("models/")
+            val normalizedModel = if (rawCleanedModel.isEmpty()) "" else AiModelsCatalog.normalizeModelId(provider, rawCleanedModel)
             val modelPref = when (provider) {
                 AiProvider.GEMINI -> PrefKeys.GEMINI_MODEL_ID_KEY
                 AiProvider.OPENAI -> PrefKeys.OPENAI_MODEL_ID_KEY
                 AiProvider.CLAUDE -> PrefKeys.CLAUDE_MODEL_ID_KEY
             }
-            if (cleanedModel.isEmpty()) prefs.remove(modelPref) else prefs[modelPref] = cleanedModel
+            if (normalizedModel.isEmpty()) prefs.remove(modelPref) else prefs[modelPref] = normalizedModel
         }
     }
 
@@ -167,9 +195,12 @@ class ProjectRepository(
 
     suspend fun saveGeminiModelId(modelId: String) {
         context.editorDataStore.edit { prefs ->
-            val cleaned = modelId.trim().removePrefix("models/")
-            if (cleaned.isEmpty()) prefs.remove(PrefKeys.GEMINI_MODEL_ID_KEY)
-            else prefs[PrefKeys.GEMINI_MODEL_ID_KEY] = cleaned
+            val rawCleaned = modelId.trim().removePrefix("models/")
+            if (rawCleaned.isEmpty()) {
+                prefs.remove(PrefKeys.GEMINI_MODEL_ID_KEY)
+            } else {
+                prefs[PrefKeys.GEMINI_MODEL_ID_KEY] = AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, rawCleaned)
+            }
         }
     }
 
@@ -293,9 +324,10 @@ class ProjectRepository(
         packageName: String,
         template: ProjectTemplate,
         language: ProjectLanguage = ProjectLanguage.JAVA,
+        javaVersion: JavaVersionOption = JavaVersionOption.JAVA_17,
         minSdkVersion: Int = 24,
     ): ProjectMetadata = withContext(Dispatchers.IO) {
-        createProjectInternal(name, packageName, template, language, minSdkVersion)
+        createProjectInternal(name, packageName, template, language, javaVersion, minSdkVersion)
     }
 
     private fun createProjectInternal(
@@ -303,6 +335,7 @@ class ProjectRepository(
         packageName: String,
         template: ProjectTemplate,
         language: ProjectLanguage = ProjectLanguage.JAVA,
+        javaVersion: JavaVersionOption = JavaVersionOption.JAVA_17,
         minSdkVersion: Int = 24,
     ): ProjectMetadata {
         val safeMinSdk = minSdkVersion.coerceIn(21, 35)
@@ -329,6 +362,7 @@ class ProjectRepository(
             createdAtMillis = now,
             updatedAtMillis = now,
             language = language,
+            javaVersion = javaVersion,
             minSdkVersion = safeMinSdk,
         )
         writeMetadata(projectDir, meta)
@@ -338,6 +372,7 @@ class ProjectRepository(
     suspend fun updateProjectConfig(
         projectId: String,
         language: ProjectLanguage,
+        javaVersion: JavaVersionOption,
         minSdkVersion: Int,
     ): ProjectMetadata? = withContext(Dispatchers.IO) {
         val dir = getProjectDir(projectId)
@@ -351,11 +386,77 @@ class ProjectRepository(
         }
         val updatedMeta = current.copy(
             language = language,
+            javaVersion = javaVersion,
             minSdkVersion = safeMinSdk,
             updatedAtMillis = System.currentTimeMillis(),
         )
         writeMetadata(dir, updatedMeta)
         updatedMeta
+    }
+
+    suspend fun saveGitHubRepoLink(
+        projectId: String,
+        link: GitHubRepoLink?,
+    ): ProjectMetadata? = withContext(Dispatchers.IO) {
+        val dir = getProjectDir(projectId)
+        val current = readMetadata(dir) ?: return@withContext null
+        val updated = current.copy(
+            githubLink = link,
+            updatedAtMillis = System.currentTimeMillis(),
+        )
+        writeMetadata(dir, updated)
+        updated
+    }
+
+    suspend fun collectProjectFileHashes(projectId: String): Map<String, String> = withContext(Dispatchers.IO) {
+        val dir = getProjectDir(projectId)
+        if (!dir.exists()) return@withContext emptyMap()
+        val digest = MessageDigest.getInstance("SHA-256")
+        val map = linkedMapOf<String, String>()
+        dir.walkTopDown()
+            .filter { file ->
+                if (!file.isFile) return@filter false
+                val rel = file.relativeTo(dir).invariantSeparatorsPath
+                rel != "project.json" && !rel.startsWith("build/") && !rel.startsWith(".droidforge/")
+            }
+            .sortedBy { it.relativeTo(dir).invariantSeparatorsPath }
+            .forEach { file ->
+                val rel = file.relativeTo(dir).invariantSeparatorsPath
+                digest.reset()
+                val buf = ByteArray(16 * 1024)
+                file.inputStream().use { ins ->
+                    while (true) {
+                        val n = ins.read(buf)
+                        if (n <= 0) break
+                        digest.update(buf, 0, n)
+                    }
+                }
+                map[rel] = digest.digest().joinToString("") { "%02x".format(it) }
+            }
+        map
+    }
+
+    suspend fun computeGitHubPendingChanges(
+        projectId: String,
+        link: GitHubRepoLink?,
+    ): List<GitHubPendingChange> {
+        val current = collectProjectFileHashes(projectId)
+        val previous = link?.lastPushedHashes.orEmpty()
+        if (link == null || previous.isEmpty()) {
+            return current.keys.map { GitHubPendingChange(it, "added") }
+        }
+        val changes = mutableListOf<GitHubPendingChange>()
+        for ((path, hash) in current) {
+            val prevHash = previous[path]
+            if (prevHash == null) changes.add(GitHubPendingChange(path, "added"))
+            else if (prevHash != hash) changes.add(GitHubPendingChange(path, "modified"))
+        }
+        for (oldPath in previous.keys) {
+            if (!current.containsKey(oldPath)) {
+                changes.add(GitHubPendingChange(oldPath, "deleted"))
+            }
+        }
+        return changes.sortedBy { it.path }
     }
 
     private fun updateManifestMinSdk(xml: String, minSdkVersion: Int): String {
@@ -543,7 +644,23 @@ class ProjectRepository(
             put("createdAtMillis", meta.createdAtMillis)
             put("updatedAtMillis", meta.updatedAtMillis)
             put("language", meta.language.name)
+            put("javaVersion", meta.javaVersion.majorVersion)
             put("minSdkVersion", meta.minSdkVersion)
+            meta.githubLink?.let { link ->
+                put(
+                    "githubLink",
+                    JSONObject().apply {
+                        put("owner", link.owner)
+                        put("repo", link.repo)
+                        put("branch", link.branch)
+                        put("lastCommitSha", link.lastCommitSha)
+                        put("lastPushedAtMillis", link.lastPushedAtMillis)
+                        val hashesObj = JSONObject()
+                        link.lastPushedHashes.forEach { (k, v) -> hashesObj.put(k, v) }
+                        put("lastPushedHashes", hashesObj)
+                    },
+                )
+            }
             meta.lastBuildSuccess?.let { put("lastBuildSuccess", it) }
             meta.lastApkSizeBytes?.let { put("lastApkSizeBytes", it) }
             meta.lastBuildTimestamp?.let { put("lastBuildTimestamp", it) }
@@ -563,7 +680,26 @@ class ProjectRepository(
             val language = runCatching {
                 ProjectLanguage.valueOf(obj.optString("language", ProjectLanguage.JAVA.name))
             }.getOrDefault(ProjectLanguage.JAVA)
+            val javaVersion = JavaVersionOption.fromMajor(obj.optInt("javaVersion", 17))
             val minSdk = obj.optInt("minSdkVersion", 24).coerceIn(21, 35)
+            val ghObj = obj.optJSONObject("githubLink")
+            val githubLink = ghObj?.let { g ->
+                val hashes = linkedMapOf<String, String>()
+                val hObj = g.optJSONObject("lastPushedHashes")
+                hObj?.keys()?.forEach { k -> hashes[k] = hObj.optString(k) }
+                val owner = g.optString("owner")
+                val repo = g.optString("repo")
+                if (owner.isNotBlank() && repo.isNotBlank()) {
+                    GitHubRepoLink(
+                        owner = owner,
+                        repo = repo,
+                        branch = g.optString("branch", "main").ifBlank { "main" },
+                        lastCommitSha = g.optString("lastCommitSha", ""),
+                        lastPushedAtMillis = g.optLong("lastPushedAtMillis", 0L),
+                        lastPushedHashes = hashes,
+                    )
+                } else null
+            }
             ProjectMetadata(
                 id = obj.getString("id"),
                 name = obj.getString("name"),
@@ -574,7 +710,9 @@ class ProjectRepository(
                 createdAtMillis = obj.optLong("createdAtMillis", dir.lastModified()),
                 updatedAtMillis = obj.optLong("updatedAtMillis", dir.lastModified()),
                 language = language,
+                javaVersion = javaVersion,
                 minSdkVersion = minSdk,
+                githubLink = githubLink,
                 lastBuildSuccess = if (obj.has("lastBuildSuccess")) obj.getBoolean("lastBuildSuccess") else null,
                 lastApkSizeBytes = if (obj.has("lastApkSizeBytes")) obj.getLong("lastApkSizeBytes") else null,
                 lastBuildTimestamp = if (obj.has("lastBuildTimestamp")) obj.getLong("lastBuildTimestamp") else null,
@@ -584,6 +722,7 @@ class ProjectRepository(
     }
 
     companion object {
+        const val METADATA_FILE = "project.json"
         private val BINARY_EXTENSIONS = setOf(
             "png", "jpg", "jpeg", "webp", "gif", "bmp", "ico",
             "ttf", "otf", "woff", "woff2",

@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.DeleteOutline
@@ -50,6 +51,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -109,7 +112,10 @@ import com.example.ai.AiUsageSummary
 import com.example.ai.ChatMessage
 import com.example.ai.ProjectChatThread
 import com.example.ai.SuggestedCodeBlock
+import com.example.data.GitHubPendingChange
 import com.example.emulator.EmulatorPanel
+import com.example.github.GitHubRepoSummary
+import com.example.github.GitHubWorkflowRun
 import com.example.model.AiAttachment
 import com.example.model.AndroidMinSdk
 import com.example.model.BuildDiagnostic
@@ -117,6 +123,7 @@ import com.example.model.BuildResult
 import com.example.model.BuildVariant
 import com.example.model.EditorSettings
 import com.example.model.FileLanguage
+import com.example.model.JavaVersionOption
 import com.example.model.ProjectFile
 import com.example.model.ProjectLanguage
 import com.example.model.ProjectMetadata
@@ -126,6 +133,7 @@ import com.example.ui.editor.CodeEditor
 import com.example.ui.panels.AiUsageDialog
 import com.example.ui.panels.BuildPanel
 import com.example.ui.panels.GeminiPanel
+import com.example.ui.panels.GitHubSheetDialog
 import com.example.ui.panels.ModelMenuDialog
 import com.example.ui.panels.ProjectSearchDialog
 import com.example.ui.panels.ProviderKeysDialog
@@ -163,12 +171,18 @@ fun IdeWorkspaceScreen(
     aiMessages: List<ChatMessage>,
     pendingAiAttachments: List<AiAttachment> = emptyList(),
     aiState: AiUiState,
+    githubToken: String = "",
+    githubUser: String = "",
+    githubRepos: List<GitHubRepoSummary> = emptyList(),
+    githubPendingChanges: List<GitHubPendingChange> = emptyList(),
+    githubWorkflowRuns: List<GitHubWorkflowRun> = emptyList(),
+    isGitHubBusy: Boolean = false,
     onSelectFile: (String) -> Unit,
     onCloseTab: (String) -> Unit,
     onCreateFile: (String) -> Unit,
     onDeleteFile: (String) -> Unit,
     onImportProjectFileUri: (Uri) -> Unit = {},
-    onUpdateProjectConfig: (ProjectLanguage, Int) -> Unit = { _, _ -> },
+    onUpdateProjectConfig: (ProjectLanguage, JavaVersionOption, Int) -> Unit = { _, _, _ -> },
     onUpdateContent: (String) -> Unit,
     onSelectBuildVariant: (BuildVariant) -> Unit,
     onBuildApk: (BuildVariant?) -> Unit,
@@ -200,6 +214,16 @@ fun IdeWorkspaceScreen(
     onStopGemini: () -> Unit,
     onApplyGeminiCode: (SuggestedCodeBlock) -> Unit,
     onClearAiChat: () -> Unit,
+    onConnectGitHub: (String) -> Unit = {},
+    onDisconnectGitHub: () -> Unit = {},
+    onRefreshGitHubRepos: () -> Unit = {},
+    onCreateAndLinkGitHubRepo: (String, String, Boolean) -> Unit = { _, _, _ -> },
+    onLinkExistingGitHubRepo: (String, String, String) -> Unit = { _, _, _ -> },
+    onPushGitHub: (String) -> Unit = {},
+    onPullGitHub: () -> Unit = {},
+    onScaffoldGradleCi: () -> Unit = {},
+    onTriggerCloudBuild: () -> Unit = {},
+    onRefreshWorkflowRuns: () -> Unit = {},
     onUpdateSettings: ((EditorSettings) -> EditorSettings) -> Unit,
     onBackToProjects: () -> Unit,
     modifier: Modifier = Modifier,
@@ -223,6 +247,7 @@ fun IdeWorkspaceScreen(
     var showKeysDialog by remember { mutableStateOf(false) }
     var showUsageDialog by remember { mutableStateOf(false) }
     var showProjectConfigDialog by remember { mutableStateOf(false) }
+    var showGitHubDialog by remember { mutableStateOf(false) }
     var pendingCameraUri by remember { mutableStateOf<Uri?>(null) }
 
     val exportApkLauncher = rememberLauncherForActivityResult(
@@ -378,8 +403,13 @@ fun IdeWorkspaceScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
+                                val langLabel = if (project.language == ProjectLanguage.JAVA) {
+                                    project.javaVersion.badge
+                                } else {
+                                    project.language.displayName
+                                }
                                 Text(
-                                    text = "${project.language.displayName} • API ${project.minSdkVersion} • ${selectedBuildVariant.shortLabel}",
+                                    text = "$langLabel • API ${project.minSdkVersion} • ${selectedBuildVariant.shortLabel}",
                                     fontFamily = JetBrainsMonoFontFamily,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -389,16 +419,42 @@ fun IdeWorkspaceScreen(
                             }
                         },
                         actions = {
+                            IconButton(
+                                onClick = { showGitHubDialog = true },
+                                modifier = Modifier.testTag("topbar_github_push_button"),
+                            ) {
+                                BadgedBox(
+                                    badge = {
+                                        if (githubPendingChanges.isNotEmpty()) {
+                                            Badge {
+                                                Text(
+                                                    text = if (githubPendingChanges.size > 99) "99+" else githubPendingChanges.size.toString(),
+                                                )
+                                            }
+                                        }
+                                    },
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CloudUpload,
+                                        contentDescription = "Push to GitHub",
+                                        tint = if (project.githubLink != null) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                    )
+                                }
+                            }
                             Button(
                                 onClick = { onBuildApk(null) },
                                 enabled = !isBuilding,
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                 colors = ButtonDefaults.buttonColors(
                                     containerColor = MaterialTheme.colorScheme.secondary,
                                     contentColor = MaterialTheme.colorScheme.onSecondary,
                                 ),
                                 modifier = Modifier
-                                    .padding(end = 4.dp)
+                                    .padding(end = 2.dp)
                                     .testTag("build_apk_button"),
                             ) {
                                 if (isBuilding) {
@@ -408,14 +464,14 @@ fun IdeWorkspaceScreen(
                                         color = MaterialTheme.colorScheme.onSecondary,
                                     )
                                 } else {
-                                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
                                 }
                                 Spacer(Modifier.width(4.dp))
                                 Text(
                                     text = when {
-                                        isBuilding -> "Building"
+                                        isBuilding -> "..."
                                         selectedBuildVariant == BuildVariant.RELEASE_AAB -> "AAB"
-                                        selectedBuildVariant == BuildVariant.RELEASE_APK -> "Release"
+                                        selectedBuildVariant == BuildVariant.RELEASE_APK -> "Rel"
                                         else -> "Build"
                                     },
                                     maxLines = 1,
@@ -475,6 +531,15 @@ fun IdeWorkspaceScreen(
                                         },
                                     )
                                     HorizontalDivider()
+                                    DropdownMenuItem(
+                                        text = { Text("GitHub Push & Cloud CI") },
+                                        leadingIcon = { Icon(Icons.Default.CloudUpload, contentDescription = null) },
+                                        onClick = {
+                                            showMoreMenu = false
+                                            showGitHubDialog = true
+                                        },
+                                        modifier = Modifier.testTag("workspace_github_menu_item"),
+                                    )
                                     DropdownMenuItem(
                                         text = { Text("Release Keystore Manager") },
                                         leadingIcon = { Icon(Icons.Default.VerifiedUser, contentDescription = null) },
@@ -580,6 +645,19 @@ fun IdeWorkspaceScreen(
                                     },
                                     tag = "toggle_emulator_button",
                                 )
+                                val pushLabel = when {
+                                    project.githubLink != null && githubPendingChanges.isNotEmpty() ->
+                                        "Push (${githubPendingChanges.size})"
+                                    project.githubLink != null -> "GitHub"
+                                    else -> "Push"
+                                }
+                                WorkspaceStripChip(
+                                    icon = Icons.Default.CloudUpload,
+                                    label = pushLabel,
+                                    selected = showGitHubDialog || (project.githubLink != null && githubPendingChanges.isNotEmpty()),
+                                    onClick = { showGitHubDialog = true },
+                                    tag = "workspace_github_push_chip",
+                                )
                                 WorkspaceStripChip(
                                     icon = Icons.Default.Terminal,
                                     label = "Console",
@@ -603,7 +681,11 @@ fun IdeWorkspaceScreen(
                                 )
                                 WorkspaceStripChip(
                                     icon = Icons.Default.Settings,
-                                    label = "${project.language.displayName} • API ${project.minSdkVersion}",
+                                    label = if (project.language == ProjectLanguage.JAVA) {
+                                        "${project.javaVersion.badge} • API ${project.minSdkVersion}"
+                                    } else {
+                                        "${project.language.displayName} • API ${project.minSdkVersion}"
+                                    },
                                     selected = showProjectConfigDialog,
                                     onClick = { showProjectConfigDialog = true },
                                     tag = "project_config_chip",
@@ -769,6 +851,7 @@ fun IdeWorkspaceScreen(
                                     },
                                     onExportArtifact = { launchExportArtifact() },
                                     onShareArtifact = { path -> shareBuiltArtifact(path) },
+                                    onOpenGitHubCloudBuild = { showGitHubDialog = true },
                                     onClose = { showBuildPanel = false },
                                     modifier = Modifier.height(280.dp),
                                 )
@@ -998,11 +1081,12 @@ fun IdeWorkspaceScreen(
     if (showProjectConfigDialog) {
         ProjectConfigDialog(
             currentLanguage = project.language,
+            currentJavaVersion = project.javaVersion,
             currentMinSdk = project.minSdkVersion,
             onDismiss = { showProjectConfigDialog = false },
-            onSave = { lang, minSdk ->
+            onSave = { lang, javaVer, minSdk ->
                 showProjectConfigDialog = false
-                onUpdateProjectConfig(lang, minSdk)
+                onUpdateProjectConfig(lang, javaVer, minSdk)
             },
         )
     }
@@ -1060,6 +1144,29 @@ fun IdeWorkspaceScreen(
             usageSummary = aiUsageSummary,
             onResetUsage = onResetAiUsage,
             onDismiss = { showUsageDialog = false },
+        )
+    }
+
+    if (showGitHubDialog) {
+        GitHubSheetDialog(
+            project = project,
+            githubToken = githubToken,
+            githubUser = githubUser,
+            githubRepos = githubRepos,
+            pendingChanges = githubPendingChanges,
+            workflowRuns = githubWorkflowRuns,
+            isGitHubBusy = isGitHubBusy,
+            onConnectToken = onConnectGitHub,
+            onDisconnectGitHub = onDisconnectGitHub,
+            onRefreshRepos = onRefreshGitHubRepos,
+            onCreateAndLinkRepo = onCreateAndLinkGitHubRepo,
+            onLinkExistingRepo = onLinkExistingGitHubRepo,
+            onPushProject = onPushGitHub,
+            onPullProject = onPullGitHub,
+            onScaffoldGradleCi = onScaffoldGradleCi,
+            onTriggerCloudBuild = onTriggerCloudBuild,
+            onRefreshWorkflowRuns = onRefreshWorkflowRuns,
+            onDismiss = { showGitHubDialog = false },
         )
     }
 }
@@ -1255,20 +1362,22 @@ private fun NewFileDialog(
 @Composable
 private fun ProjectConfigDialog(
     currentLanguage: ProjectLanguage,
+    currentJavaVersion: JavaVersionOption,
     currentMinSdk: Int,
     onDismiss: () -> Unit,
-    onSave: (ProjectLanguage, Int) -> Unit,
+    onSave: (ProjectLanguage, JavaVersionOption, Int) -> Unit,
 ) {
     var selectedLang by remember { mutableStateOf(currentLanguage) }
+    var selectedJava by remember { mutableStateOf(currentJavaVersion) }
     var selectedSdk by remember { mutableStateOf(AndroidMinSdk.fromApiLevel(currentMinSdk)) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("App Language & Min SDK") },
+        title = { Text("App Language, Java & Min SDK") },
         text = {
             Column(
                 modifier = Modifier
-                    .heightIn(max = 360.dp)
+                    .heightIn(max = 420.dp)
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
@@ -1286,6 +1395,27 @@ private fun ProjectConfigDialog(
                         )
                     }
                 }
+                Text("Java Version (8 – 25)", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    JavaVersionOption.entries.forEach { jv ->
+                        FilterChip(
+                            selected = selectedJava == jv,
+                            onClick = { selectedJava = jv },
+                            label = { Text(jv.badge, style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.testTag("config_java_${jv.majorVersion}"),
+                        )
+                    }
+                }
+                Text(
+                    text = selectedJava.highlights,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 Text("Minimum Android Version (syncs to AndroidManifest.xml)", style = MaterialTheme.typography.labelLarge)
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     AndroidMinSdk.entries.forEach { sdk ->
@@ -1316,7 +1446,7 @@ private fun ProjectConfigDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onSave(selectedLang, selectedSdk.apiLevel) }) {
+            Button(onClick = { onSave(selectedLang, selectedJava, selectedSdk.apiLevel) }) {
                 Text("Save")
             }
         },

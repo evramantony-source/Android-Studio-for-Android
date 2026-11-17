@@ -21,6 +21,7 @@ object ResourceTableCompiler {
     private const val RES_TABLE_TYPE_SPEC_TYPE: Short = 0x0202
 
     private const val TYPE_STRING: Byte = 0x03
+    private const val TYPE_INT_DEC: Byte = 0x10
     private const val TYPE_INT_COLOR_ARGB8: Byte = 0x1c
 
     data class CompiledResources(
@@ -29,6 +30,9 @@ object ResourceTableCompiler {
         val resourceIds: Map<String, Int>,
         val stringCount: Int,
         val colorCount: Int,
+        val layoutCount: Int = 0,
+        val idCount: Int = 0,
+        val drawableCount: Int = 0,
         val strings: List<Pair<String, String>> = emptyList(),
         val colors: List<Pair<String, Int>> = emptyList(),
     )
@@ -40,20 +44,38 @@ object ResourceTableCompiler {
         packageName: String,
         stringsXml: String?,
         colorsXml: String?,
+        layoutFiles: List<Pair<String, String>> = emptyList(),
+        drawableNames: List<String> = emptyList(),
     ): CompiledResources {
         val strings = parseStrings(stringsXml).ifEmpty {
             listOf(StringEntry("app_name", "App"))
         }
         val colors = parseColors(colorsXml)
+        val layouts = layoutFiles.map { (name, _) ->
+            name.substringAfterLast('/').substringBeforeLast('.').trim()
+        }.filter { it.isNotEmpty() }.distinct()
+        val ids = extractIdsFromLayouts(layoutFiles.map { it.second })
+        val drawables = drawableNames.map {
+            it.substringAfterLast('/').substringBeforeLast('.').trim()
+        }.filter { it.isNotEmpty() }.distinct()
 
         val resourceIds = linkedMapOf<String, Int>()
+
+        // Dynamic sequential type IDs starting at 1 so R.java and resources.arsc always match
+        var nextTypeId = 1
+        val stringTypeId = nextTypeId++
+        val colorTypeId = if (colors.isNotEmpty()) nextTypeId++ else 0
+        val idTypeId = if (ids.isNotEmpty()) nextTypeId++ else 0
+        val layoutTypeId = if (layouts.isNotEmpty()) nextTypeId++ else 0
+        val drawableTypeId = if (drawables.isNotEmpty()) nextTypeId++ else 0
+
         val rBuilder = StringBuilder().apply {
             appendLine("package $packageName;")
             appendLine()
             appendLine("public final class R {")
             appendLine("    public static final class string {")
             strings.forEachIndexed { idx, entry ->
-                val id = 0x7f010000 or idx
+                val id = (0x7f shl 24) or (stringTypeId shl 16) or idx
                 resourceIds["string/${entry.name}"] = id
                 appendLine("        public static final int ${sanitizeJavaId(entry.name)} = 0x${id.toString(16)};")
             }
@@ -61,25 +83,79 @@ object ResourceTableCompiler {
             if (colors.isNotEmpty()) {
                 appendLine("    public static final class color {")
                 colors.forEachIndexed { idx, entry ->
-                    val id = 0x7f020000 or idx
+                    val id = (0x7f shl 24) or (colorTypeId shl 16) or idx
                     resourceIds["color/${entry.name}"] = id
                     appendLine("        public static final int ${sanitizeJavaId(entry.name)} = 0x${id.toString(16)};")
+                }
+                appendLine("    }")
+            }
+            if (ids.isNotEmpty()) {
+                appendLine("    public static final class id {")
+                ids.forEachIndexed { idx, name ->
+                    val id = (0x7f shl 24) or (idTypeId shl 16) or idx
+                    resourceIds["id/$name"] = id
+                    appendLine("        public static final int ${sanitizeJavaId(name)} = 0x${id.toString(16)};")
+                }
+                appendLine("    }")
+            }
+            if (layouts.isNotEmpty()) {
+                appendLine("    public static final class layout {")
+                layouts.forEachIndexed { idx, name ->
+                    val id = (0x7f shl 24) or (layoutTypeId shl 16) or idx
+                    resourceIds["layout/$name"] = id
+                    appendLine("        public static final int ${sanitizeJavaId(name)} = 0x${id.toString(16)};")
+                }
+                appendLine("    }")
+            }
+            if (drawables.isNotEmpty()) {
+                appendLine("    public static final class drawable {")
+                drawables.forEachIndexed { idx, name ->
+                    val id = (0x7f shl 24) or (drawableTypeId shl 16) or idx
+                    resourceIds["drawable/$name"] = id
+                    appendLine("        public static final int ${sanitizeJavaId(name)} = 0x${id.toString(16)};")
                 }
                 appendLine("    }")
             }
             appendLine("}")
         }
 
-        val arscBytes = encodeResourcesArsc(packageName, strings, colors)
+        val arscBytes = encodeResourcesArsc(
+            packageName = packageName,
+            strings = strings,
+            colors = colors,
+            ids = ids,
+            layouts = layouts,
+            drawables = drawables,
+            stringTypeId = stringTypeId,
+            colorTypeId = colorTypeId,
+            idTypeId = idTypeId,
+            layoutTypeId = layoutTypeId,
+            drawableTypeId = drawableTypeId,
+        )
         return CompiledResources(
             rJavaSource = rBuilder.toString(),
             resourcesArsc = arscBytes,
             resourceIds = resourceIds,
             stringCount = strings.size,
             colorCount = colors.size,
+            layoutCount = layouts.size,
+            idCount = ids.size,
+            drawableCount = drawables.size,
             strings = strings.map { it.name to it.value },
             colors = colors.map { it.name to it.argb },
         )
+    }
+
+    private fun extractIdsFromLayouts(layoutXmls: List<String>): List<String> {
+        val found = linkedSetOf<String>()
+        val idRegex = Regex("""@\+?id/([A-Za-z0-9_]+)""")
+        layoutXmls.forEach { xml ->
+            idRegex.findAll(xml).forEach { m ->
+                val name = m.groupValues[1].trim()
+                if (name.isNotEmpty()) found.add(name)
+            }
+        }
+        return found.toList()
     }
 
     private fun parseStrings(xml: String?): List<StringEntry> {
@@ -161,30 +237,44 @@ object ResourceTableCompiler {
         packageName: String,
         strings: List<StringEntry>,
         colors: List<ColorEntry>,
+        ids: List<String>,
+        layouts: List<String>,
+        drawables: List<String>,
+        stringTypeId: Int,
+        colorTypeId: Int,
+        idTypeId: Int,
+        layoutTypeId: Int,
+        drawableTypeId: Int,
     ): ByteArray {
-        val globalStrings = strings.map { it.value }
+        val layoutPaths = layouts.map { "res/layout/$it.xml" }
+        val drawablePaths = drawables.map { "res/drawable/$it.xml" }
+        val globalStrings = strings.map { it.value } + layoutPaths + drawablePaths
         val globalPool = BinaryXmlEncoder.encodeUtf8StringPool(globalStrings)
 
         val typeNames = buildList {
             add("string")
             if (colors.isNotEmpty()) add("color")
+            if (ids.isNotEmpty()) add("id")
+            if (layouts.isNotEmpty()) add("layout")
+            if (drawables.isNotEmpty()) add("drawable")
         }
         val typeStringPool = BinaryXmlEncoder.encodeUtf8StringPool(typeNames)
 
-        val keyNames = buildList {
+        val keyNames = linkedSetOf<String>().apply {
             strings.forEach { add(it.name) }
             colors.forEach { add(it.name) }
-        }
+            ids.forEach { add(it) }
+            layouts.forEach { add(it) }
+            drawables.forEach { add(it) }
+        }.toList()
         val keyStringPool = BinaryXmlEncoder.encodeUtf8StringPool(keyNames)
         val keyIndexMap = keyNames.withIndex().associate { (i, name) -> name to i }
 
         val typeChunks = mutableListOf<ByteArray>()
-        typeChunks.add(
-            encodeTypeSpec(typeId = 1, entryCount = strings.size),
-        )
+        typeChunks.add(encodeTypeSpec(typeId = stringTypeId, entryCount = strings.size))
         typeChunks.add(
             encodeTypeChunk(
-                typeId = 1,
+                typeId = stringTypeId,
                 entries = strings.mapIndexed { idx, entry ->
                     EncodedEntry(
                         keyIndex = keyIndexMap.getValue(entry.name),
@@ -196,15 +286,65 @@ object ResourceTableCompiler {
         )
 
         if (colors.isNotEmpty()) {
-            typeChunks.add(encodeTypeSpec(typeId = 2, entryCount = colors.size))
+            typeChunks.add(encodeTypeSpec(typeId = colorTypeId, entryCount = colors.size))
             typeChunks.add(
                 encodeTypeChunk(
-                    typeId = 2,
+                    typeId = colorTypeId,
                     entries = colors.map { entry ->
                         EncodedEntry(
                             keyIndex = keyIndexMap.getValue(entry.name),
                             dataType = TYPE_INT_COLOR_ARGB8,
                             data = entry.argb,
+                        )
+                    },
+                ),
+            )
+        }
+
+        if (ids.isNotEmpty()) {
+            typeChunks.add(encodeTypeSpec(typeId = idTypeId, entryCount = ids.size))
+            typeChunks.add(
+                encodeTypeChunk(
+                    typeId = idTypeId,
+                    entries = ids.map { name ->
+                        EncodedEntry(
+                            keyIndex = keyIndexMap.getValue(name),
+                            dataType = TYPE_INT_DEC,
+                            data = 0,
+                        )
+                    },
+                ),
+            )
+        }
+
+        val layoutPoolOffset = strings.size
+        if (layouts.isNotEmpty()) {
+            typeChunks.add(encodeTypeSpec(typeId = layoutTypeId, entryCount = layouts.size))
+            typeChunks.add(
+                encodeTypeChunk(
+                    typeId = layoutTypeId,
+                    entries = layouts.mapIndexed { idx, name ->
+                        EncodedEntry(
+                            keyIndex = keyIndexMap.getValue(name),
+                            dataType = TYPE_STRING,
+                            data = layoutPoolOffset + idx,
+                        )
+                    },
+                ),
+            )
+        }
+
+        val drawablePoolOffset = strings.size + layouts.size
+        if (drawables.isNotEmpty()) {
+            typeChunks.add(encodeTypeSpec(typeId = drawableTypeId, entryCount = drawables.size))
+            typeChunks.add(
+                encodeTypeChunk(
+                    typeId = drawableTypeId,
+                    entries = drawables.mapIndexed { idx, name ->
+                        EncodedEntry(
+                            keyIndex = keyIndexMap.getValue(name),
+                            dataType = TYPE_STRING,
+                            data = drawablePoolOffset + idx,
                         )
                     },
                 ),

@@ -1,27 +1,26 @@
 package com.example.emulator
 
+import android.graphics.Paint
+import android.graphics.Typeface
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -58,6 +57,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -67,7 +67,11 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -75,9 +79,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material3.CircularProgressIndicator
 import com.example.model.ProjectFile
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 
 private data class DrawnStroke(
     val color: Color,
@@ -99,34 +108,83 @@ fun EmulatorPanel(
     var restartNonce by remember { mutableIntStateOf(0) }
     var showLogcat by remember { mutableStateOf(false) }
     var toastText by remember { mutableStateOf<String?>(null) }
-    var dialogMessage by remember { mutableStateOf<String?>(null) }
+    var fallbackDialogMessage by remember { mutableStateOf<String?>(null) }
+    var vmFrameTick by remember { mutableIntStateOf(0) }
 
-    val program = remember(appName, packageName, files, restartNonce) {
-        EmulatorEngine.parseProject(appName, packageName, files)
-    }
+    var liveSession by remember(appName, packageName, restartNonce) { mutableStateOf<LiveVmSession?>(null) }
+    var program by remember(appName, packageName, restartNonce) { mutableStateOf<EmulatorProgram?>(null) }
+    var isBootingVm by remember(appName, packageName, restartNonce) { mutableStateOf(true) }
 
-    val runtimeState = remember(program, restartNonce) {
-        mutableStateMapOf<String, String>().apply {
-            putAll(program.initialState)
-        }
+    val runtimeState = remember(restartNonce) {
+        mutableStateMapOf<String, String>()
     }
     val strokes = remember(restartNonce) { mutableStateListOf<DrawnStroke>() }
     val activeStrokePoints = remember(restartNonce) { mutableStateListOf<Offset>() }
-    val logcat = remember(program.packageName, restartNonce) {
-        mutableStateListOf(
-            "I/ActivityTaskManager: START u0 {cmp=${program.packageName}/.MainActivity}",
-            "D/DroidForgeVM: Parsed ${program.detectedWidgetsCount} widget(s) from ${files.size} project file(s)",
-            "I/MainActivity: onCreate() completed",
-        )
+    val logcat = remember(packageName, restartNonce) {
+        mutableStateListOf("I/ActivityTaskManager: START u0 {cmp=$packageName/.MainActivity}")
+    }
+
+    LaunchedEffect(appName, packageName, files, restartNonce) {
+        isBootingVm = true
+        yield()
+        val (bootedSession, parsedProgram) = withContext(Dispatchers.Default) {
+            val session = EmulatorEngine.createLiveSession(appName, packageName, files)?.let { s ->
+                if (s.start()) s else null
+            }
+            val prog = EmulatorEngine.parseProject(appName, packageName, files)
+            session to prog
+        }
+        liveSession = bootedSession
+        program = parsedProgram
+        runtimeState.clear()
+        runtimeState.putAll(parsedProgram.initialState)
+        if (bootedSession != null) {
+            logcat.add("D/DroidForgeVM: Live AST VM executing ${files.size} project file(s)")
+            logcat.addAll(bootedSession.logs)
+            bootedSession.logs.clear()
+        } else {
+            logcat.add("D/DroidForgeVM: Fallback layout (${parsedProgram.detectedWidgetsCount} widgets)")
+        }
+        isBootingVm = false
     }
 
     fun appendLog(line: String) {
         logcat.add(line)
-        if (logcat.size > 60) logcat.removeAt(0)
+        if (logcat.size > 120) logcat.removeAt(0)
     }
 
-    // Live timer coroutine when PulseTimer template is running
-    val timerRunning = runtimeState["timerRunning"] == "true"
+    fun syncFromLiveVm() {
+        val session = liveSession ?: return
+        while (session.logs.isNotEmpty()) {
+            appendLog(session.logs.removeAt(0))
+        }
+        if (session.toastQueue.isNotEmpty()) {
+            toastText = session.toastQueue.removeAt(session.toastQueue.lastIndex)
+            session.toastQueue.clear()
+        }
+    }
+
+    // 60fps Live VM frame pump for Handler.postDelayed / game loops / animations
+    LaunchedEffect(liveSession, restartNonce) {
+        val session = liveSession ?: return@LaunchedEffect
+        syncFromLiveVm()
+        while (isActive) {
+            withFrameNanos { _ ->
+                val ticked = session.tickTimers(System.currentTimeMillis())
+                if (ticked) {
+                    vmFrameTick++
+                    syncFromLiveVm()
+                }
+            }
+        }
+    }
+
+    val vmSnapshot = remember(liveSession, vmFrameTick, restartNonce) {
+        liveSession?.buildSnapshot()
+    }
+
+    // Fallback timer coroutine when Live VM is absent & static PulseTimer fallback is active
+    val timerRunning = !isBootingVm && liveSession == null && runtimeState["timerRunning"] == "true"
     LaunchedEffect(timerRunning, restartNonce) {
         while (timerRunning) {
             delay(100L)
@@ -148,7 +206,7 @@ fun EmulatorPanel(
         }
     }
 
-    fun handleAction(kind: EmulatorActionKind, arg: String) {
+    fun handleFallbackAction(kind: EmulatorActionKind, arg: String) {
         when (kind) {
             EmulatorActionKind.INCREMENT -> {
                 val next = (runtimeState["count"]?.toIntOrNull() ?: 0) + 1
@@ -253,7 +311,7 @@ fun EmulatorPanel(
                 appendLog("I/Toast: $arg")
             }
             EmulatorActionKind.SHOW_DIALOG -> {
-                dialogMessage = arg
+                fallbackDialogMessage = arg
                 appendLog("I/AlertDialog: $arg")
             }
             EmulatorActionKind.NONE -> Unit
@@ -281,7 +339,37 @@ fun EmulatorPanel(
                 )
                 Spacer(Modifier.width(8.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Live Android Emulator", style = MaterialTheme.typography.titleMedium)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            text = "Live Android Emulator",
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        val activeSessionBadge = liveSession
+                        if (activeSessionBadge != null && vmSnapshot != null) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.secondaryContainer,
+                                shape = RoundedCornerShape(6.dp),
+                            ) {
+                                val badgeText = if (activeSessionBadge.lastRenderOpsCount > 0) {
+                                    "VM • ${activeSessionBadge.lastRenderOpsCount} ops"
+                                } else {
+                                    "LIVE VM"
+                                }
+                                Text(
+                                    text = badgeText,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                )
+                            }
+                        }
+                    }
                     Text(
                         text = "${profile.label} • ${if (isLandscape) "Landscape" else "Portrait"}",
                         style = MaterialTheme.typography.labelSmall,
@@ -330,14 +418,28 @@ fun EmulatorPanel(
                     FilterChip(
                         selected = profile == item,
                         onClick = { profile = item },
-                        label = { Text(item.label, style = MaterialTheme.typography.labelSmall) },
+                        label = {
+                            Text(
+                                text = item.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        },
                     )
                 }
                 if (!builtApkPath.isNullOrBlank() && builtApkPath.endsWith(".apk")) {
                     FilterChip(
                         selected = false,
                         onClick = { onInstallApk(builtApkPath) },
-                        label = { Text("Install APK", style = MaterialTheme.typography.labelSmall) },
+                        label = {
+                            Text(
+                                text = "Install APK",
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                softWrap = false,
+                            )
+                        },
                         leadingIcon = {
                             Icon(Icons.Default.InstallMobile, contentDescription = null, modifier = Modifier.size(16.dp))
                         },
@@ -354,20 +456,16 @@ fun EmulatorPanel(
                 contentAlignment = Alignment.Center,
             ) {
                 val ratio = if (isLandscape) {
-                    profile.aspectHeight / profile.aspectWidth
+                    (profile.aspectHeight / profile.aspectWidth).coerceAtMost(2.1f)
                 } else {
-                    profile.aspectWidth / profile.aspectHeight
+                    (profile.aspectWidth / profile.aspectHeight).coerceIn(0.45f, 0.85f)
                 }
-                val frameModifier = if (isLandscape) {
-                    Modifier
-                        .fillMaxWidth()
-                        .widthIn(max = 520.dp)
-                        .aspectRatio(ratio.coerceAtMost(2.1f))
-                } else {
-                    Modifier
-                        .fillMaxHeight()
-                        .aspectRatio(ratio.coerceIn(0.45f, 0.85f))
-                }
+                val maxCapW = if (isLandscape) 560.dp else 440.dp
+                val fittedWidth = minOf(maxWidth, maxHeight * ratio).coerceAtMost(maxCapW).coerceAtLeast(180.dp)
+                val fittedHeight = (fittedWidth / ratio).coerceAtMost(maxHeight).coerceAtLeast(200.dp)
+                val frameModifier = Modifier
+                    .width(fittedWidth)
+                    .height(fittedHeight)
 
                 // Realistic Virtual Device Bezel
                 Surface(
@@ -423,7 +521,7 @@ fun EmulatorPanel(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
-                                    text = program.activityTitle,
+                                    text = liveSession?.appName ?: program?.activityTitle ?: appName,
                                     color = Color.White,
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.SemiBold,
@@ -436,15 +534,73 @@ fun EmulatorPanel(
                             Box(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .fillMaxWidth(),
+                                    .fillMaxWidth()
+                                    .onSizeChanged { size ->
+                                        val activeSession = liveSession
+                                        if (activeSession != null && size.width > 0 && size.height > 0) {
+                                            activeSession.updateViewportSize(size.width, size.height)
+                                            vmFrameTick++
+                                        }
+                                    },
                             ) {
-                                RenderEmulatorNode(
-                                    node = program.root,
-                                    state = runtimeState,
-                                    strokes = strokes,
-                                    activeStrokePoints = activeStrokePoints,
-                                    onAction = ::handleAction,
-                                )
+                                val currentSession = liveSession
+                                val currentProgram = program
+                                when {
+                                    isBootingVm || currentProgram == null -> {
+                                        Box(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .background(Color(0xFF0B1120))
+                                                .testTag("emulator_boot_loading"),
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Column(
+                                                horizontalAlignment = Alignment.CenterHorizontally,
+                                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                                modifier = Modifier.padding(16.dp),
+                                            ) {
+                                                CircularProgressIndicator(
+                                                    color = Color(0xFF34D399),
+                                                    strokeWidth = 3.dp,
+                                                    modifier = Modifier.size(34.dp),
+                                                )
+                                                Text(
+                                                    text = "Booting Live Android VM...",
+                                                    color = Color.White,
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    textAlign = TextAlign.Center,
+                                                )
+                                                Text(
+                                                    text = "Compiling AST & Canvas runtime",
+                                                    color = Color(0xFF94A3B8),
+                                                    fontSize = 11.sp,
+                                                    textAlign = TextAlign.Center,
+                                                )
+                                            }
+                                        }
+                                    }
+                                    currentSession != null && vmSnapshot != null -> {
+                                        RenderVmNode(
+                                            node = vmSnapshot,
+                                            session = currentSession,
+                                            onMutate = {
+                                                syncFromLiveVm()
+                                                vmFrameTick++
+                                            },
+                                            modifier = Modifier.fillMaxSize(),
+                                        )
+                                    }
+                                    else -> {
+                                        RenderEmulatorNode(
+                                            node = currentProgram.root,
+                                            state = runtimeState,
+                                            strokes = strokes,
+                                            activeStrokePoints = activeStrokePoints,
+                                            onAction = ::handleFallbackAction,
+                                        )
+                                    }
+                                }
 
                                 // Simulated Android Toast
                                 toastText?.let { msg ->
@@ -529,17 +685,358 @@ fun EmulatorPanel(
         }
     }
 
-    dialogMessage?.let { msg ->
+    val vmDialog = liveSession?.activeDialog
+    if (vmDialog != null) {
+        val activeSession = liveSession
         AlertDialog(
-            onDismissRequest = { dialogMessage = null },
-            title = { Text(program.appName) },
+            onDismissRequest = {
+                activeSession?.dismissDialog(null)
+                vmFrameTick++
+            },
+            title = { Text(vmDialog.first.ifBlank { program?.appName ?: appName }) },
+            text = { Text(vmDialog.second) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        activeSession?.dismissDialog(true)
+                        syncFromLiveVm()
+                        vmFrameTick++
+                    },
+                ) {
+                    Text("OK")
+                }
+            },
+            dismissButton = {
+                if (activeSession?.activeDialogNegative != null) {
+                    TextButton(
+                        onClick = {
+                            activeSession.dismissDialog(false)
+                            syncFromLiveVm()
+                            vmFrameTick++
+                        },
+                    ) {
+                        Text("Cancel")
+                    }
+                }
+            },
+        )
+    }
+
+    fallbackDialogMessage?.let { msg ->
+        AlertDialog(
+            onDismissRequest = { fallbackDialogMessage = null },
+            title = { Text(program?.appName ?: appName) },
             text = { Text(msg) },
             confirmButton = {
-                TextButton(onClick = { dialogMessage = null }) {
+                TextButton(onClick = { fallbackDialogMessage = null }) {
                     Text("OK")
                 }
             },
         )
+    }
+}
+
+@Composable
+private fun RenderVmNode(
+    node: VmViewNode,
+    session: LiveVmSession,
+    onMutate: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (node.visibility == 8) return // View.GONE
+    if (node.visibility == 4) { // View.INVISIBLE
+        Spacer(modifier = modifier)
+        return
+    }
+
+    val shape = RoundedCornerShape((node.cornerRadiusPx / 2.5f).coerceIn(0f, 24f).dp)
+    val baseModifier = modifier
+        .let { m ->
+            val bg = node.backgroundColor
+            if (bg != null) m.background(Color(bg), shape) else m
+        }
+        .padding(
+            start = (node.paddingLeft / 3f).coerceIn(0f, 32f).dp,
+            top = (node.paddingTop / 3f).coerceIn(0f, 32f).dp,
+            end = (node.paddingRight / 3f).coerceIn(0f, 32f).dp,
+            bottom = (node.paddingBottom / 3f).coerceIn(0f, 32f).dp,
+        )
+
+    when (node) {
+        is VmViewNode.Container -> {
+            when {
+                node.kind == "GridLayout" -> {
+                    val cols = node.columns.coerceAtLeast(1)
+                    Column(
+                        modifier = baseModifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        node.children.chunked(cols).forEach { rowChildren ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                rowChildren.forEach { child ->
+                                    RenderVmNode(
+                                        node = child,
+                                        session = session,
+                                        onMutate = onMutate,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                node.kind == "FrameLayout" || node.kind == "RelativeLayout" -> {
+                    Box(modifier = baseModifier) {
+                        node.children.forEach { child ->
+                            RenderVmNode(
+                                node = child,
+                                session = session,
+                                onMutate = onMutate,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
+                }
+
+                !node.orientationVertical -> {
+                    val centeredH = (node.gravity and 0x01) != 0 || (node.gravity and 0x11) == 0x11
+                    Row(
+                        modifier = baseModifier.fillMaxWidth(),
+                        horizontalArrangement = if (centeredH) Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally) else Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        node.children.forEach { child ->
+                            val w = child.layoutWeight
+                            RenderVmNode(
+                                node = child,
+                                session = session,
+                                onMutate = onMutate,
+                                modifier = if (w > 0f) Modifier.weight(w) else Modifier,
+                            )
+                        }
+                    }
+                }
+
+                else -> {
+                    val isScroll = node.kind == "ScrollView"
+                    val anyExplicitWeight = node.children.any { it.layoutWeight > 0f }
+                    val hasWeightedCustomChild = !isScroll && node.children.any { it.layoutWeight > 0f || it is VmViewNode.CustomCanvasView }
+                    val centeredV = (node.gravity and 0x10) != 0 || (node.gravity and 0x11) == 0x11
+                    val colModifier = if (isScroll || (!hasWeightedCustomChild && node.children.size > 6)) {
+                        baseModifier.verticalScroll(rememberScrollState())
+                    } else {
+                        baseModifier
+                    }
+                    Column(
+                        modifier = colModifier,
+                        verticalArrangement = if (centeredV && !hasWeightedCustomChild) {
+                            Arrangement.spacedBy(8.dp, Alignment.CenterVertically)
+                        } else {
+                            Arrangement.spacedBy(8.dp)
+                        },
+                        horizontalAlignment = if ((node.gravity and 0x01) != 0) Alignment.CenterHorizontally else Alignment.Start,
+                    ) {
+                        node.children.forEach { child ->
+                            val w = child.layoutWeight
+                            val childMod = when {
+                                isScroll && child is VmViewNode.CustomCanvasView -> Modifier.fillMaxWidth().height(340.dp)
+                                w > 0f -> Modifier.weight(w).fillMaxWidth()
+                                child is VmViewNode.CustomCanvasView && !anyExplicitWeight -> Modifier.weight(1f).fillMaxWidth()
+                                else -> Modifier
+                            }
+                            RenderVmNode(
+                                node = child,
+                                session = session,
+                                onMutate = onMutate,
+                                modifier = childMod,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        is VmViewNode.Text -> {
+            val alignEnd = (node.gravity and 0x05) == 0x05 || (node.gravity and 0x800005) == 0x800005
+            val alignCenter = (node.gravity and 0x01) != 0
+            Text(
+                text = node.text,
+                fontSize = (node.textSizeSp * 0.78f).coerceIn(9f, 52f).sp,
+                color = node.textColor?.let { Color(it) } ?: Color.White,
+                fontWeight = if (node.isBold) FontWeight.Bold else FontWeight.Normal,
+                fontFamily = if (node.isMonospace) FontFamily.Monospace else FontFamily.SansSerif,
+                textAlign = when {
+                    alignEnd -> TextAlign.End
+                    alignCenter -> TextAlign.Center
+                    else -> TextAlign.Start
+                },
+                modifier = baseModifier.fillMaxWidth().takeIf { node.backgroundColor != null || alignEnd || alignCenter }
+                    ?: baseModifier,
+            )
+        }
+
+        is VmViewNode.ButtonView -> {
+            Button(
+                onClick = {
+                    session.dispatchClick(node.id)
+                    onMutate()
+                },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = node.backgroundColor?.let { Color(it) } ?: Color(0xFF0284C7),
+                    contentColor = node.textColor?.let { Color(it) } ?: Color.White,
+                ),
+                shape = RoundedCornerShape((node.cornerRadiusPx / 2.5f).coerceIn(6f, 18f).dp),
+                modifier = modifier,
+            ) {
+                Text(
+                    text = node.text.ifBlank { "Button" },
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+
+        is VmViewNode.EditTextView -> {
+            OutlinedTextField(
+                value = node.text,
+                onValueChange = { updated ->
+                    session.dispatchEditTextChange(node.id, updated)
+                    onMutate()
+                },
+                placeholder = { Text(node.hint, fontSize = 11.sp) },
+                singleLine = true,
+                modifier = modifier.fillMaxWidth(),
+            )
+        }
+
+        is VmViewNode.CustomCanvasView -> {
+            val paint = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
+            val textPaint = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
+            Canvas(
+                modifier = baseModifier
+                    .fillMaxWidth()
+                    .onSizeChanged { s ->
+                        if (s.width > 0 && s.height > 0) {
+                            session.updateViewportSize(s.width, s.height)
+                            onMutate()
+                        }
+                    }
+                    .pointerInput(node.id, session) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull() ?: continue
+                                val action = when (event.type) {
+                                    PointerEventType.Press -> 0 // MotionEvent.ACTION_DOWN
+                                    PointerEventType.Move -> 2 // MotionEvent.ACTION_MOVE
+                                    PointerEventType.Release -> 1 // MotionEvent.ACTION_UP
+                                    else -> null
+                                }
+                                if (action != null) {
+                                    change.consume()
+                                    session.dispatchTouch(node.id, action, change.position.x, change.position.y)
+                                    onMutate()
+                                }
+                            }
+                        }
+                    },
+            ) {
+                drawIntoCanvas { canvas ->
+                    val native = canvas.nativeCanvas
+                    val initialSave = native.save()
+                    native.clipRect(0f, 0f, size.width, size.height)
+
+                    node.ops.forEach { op ->
+                        when (op) {
+                            is VmCanvasOp.FillColor -> {
+                                native.drawColor(op.argb)
+                            }
+                            is VmCanvasOp.DrawRect -> {
+                                paint.color = op.argb
+                                paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
+                                paint.strokeWidth = op.strokeWidth
+                                if (op.radius > 0f) {
+                                    native.drawRoundRect(op.left, op.top, op.right, op.bottom, op.radius, op.radius, paint)
+                                } else {
+                                    native.drawRect(op.left, op.top, op.right, op.bottom, paint)
+                                }
+                            }
+                            is VmCanvasOp.DrawCircle -> {
+                                paint.color = op.argb
+                                paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
+                                paint.strokeWidth = op.strokeWidth
+                                native.drawCircle(op.cx, op.cy, op.radius, paint)
+                            }
+                            is VmCanvasOp.DrawOval -> {
+                                paint.color = op.argb
+                                paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
+                                paint.strokeWidth = op.strokeWidth
+                                native.drawOval(op.left, op.top, op.right, op.bottom, paint)
+                            }
+                            is VmCanvasOp.DrawLine -> {
+                                paint.color = op.argb
+                                paint.style = Paint.Style.STROKE
+                                paint.strokeWidth = op.strokeWidth
+                                paint.strokeCap = Paint.Cap.ROUND
+                                native.drawLine(op.x1, op.y1, op.x2, op.y2, paint)
+                            }
+                            is VmCanvasOp.DrawArc -> {
+                                paint.color = op.argb
+                                paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
+                                paint.strokeWidth = op.strokeWidth
+                                native.drawArc(
+                                    op.left, op.top, op.right, op.bottom,
+                                    op.startAngle, op.sweepAngle, op.useCenter, paint,
+                                )
+                            }
+                            is VmCanvasOp.DrawPath -> {
+                                val androidPath = android.graphics.Path()
+                                op.segments.forEach { seg ->
+                                    when (seg) {
+                                        is VmPathSegment.MoveTo -> androidPath.moveTo(seg.x, seg.y)
+                                        is VmPathSegment.LineTo -> androidPath.lineTo(seg.x, seg.y)
+                                        is VmPathSegment.QuadTo -> androidPath.quadTo(seg.cx, seg.cy, seg.x, seg.y)
+                                        VmPathSegment.Close -> androidPath.close()
+                                    }
+                                }
+                                paint.color = op.argb
+                                paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
+                                paint.strokeWidth = op.strokeWidth
+                                paint.strokeCap = Paint.Cap.ROUND
+                                paint.strokeJoin = Paint.Join.ROUND
+                                native.drawPath(androidPath, paint)
+                            }
+                            is VmCanvasOp.DrawText -> {
+                                textPaint.color = op.argb
+                                textPaint.textSize = op.textSizePx.coerceAtLeast(10f)
+                                textPaint.typeface = if (op.isBold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                                textPaint.textAlign = when (op.align) {
+                                    "CENTER" -> Paint.Align.CENTER
+                                    "RIGHT" -> Paint.Align.RIGHT
+                                    else -> Paint.Align.LEFT
+                                }
+                                native.drawText(op.text, op.x, op.y, textPaint)
+                            }
+                            VmCanvasOp.Save -> native.save()
+                            VmCanvasOp.Restore -> {
+                                if (native.saveCount > initialSave) native.restore()
+                            }
+                            is VmCanvasOp.Translate -> native.translate(op.dx, op.dy)
+                            is VmCanvasOp.Rotate -> native.rotate(op.degrees, op.px, op.py)
+                            is VmCanvasOp.Scale -> native.scale(op.sx, op.sy, op.px, op.py)
+                        }
+                    }
+
+                    native.restoreToCount(initialSave)
+                }
+            }
+        }
     }
 }
 

@@ -4,6 +4,7 @@ import android.util.Log
 import com.example.BuildConfig
 import com.example.model.AiAttachment
 import com.example.model.BuildDiagnostic
+import com.example.model.JavaVersionOption
 import com.example.model.ProjectFile
 import com.example.model.ProjectLanguage
 import kotlinx.coroutines.CancellationException
@@ -28,12 +29,14 @@ import java.net.UnknownHostException
 import kotlin.coroutines.coroutineContext
 
 private const val TAG = "GeminiCodeAssistant"
-const val GEMINI_MODEL_ID = "gemini-3.8-flash"
+const val GEMINI_MODEL_ID = "gemini-2.5-flash"
 private const val GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 private const val MAX_AGENT_TURNS = 12
-private const val CONNECT_TIMEOUT_MS = 12_000
-private const val READ_TIMEOUT_MS = 45_000
-private const val TURN_TIMEOUT_MS = 90_000L
+private const val CONNECT_TIMEOUT_MS = 10_000
+private const val READ_TIMEOUT_MS = 18_000
+private const val UNARY_FALLBACK_READ_TIMEOUT_MS = 18_000
+private const val ATTEMPT_TIMEOUT_MS = 28_000L
+private const val TURN_TIMEOUT_MS = 120_000L
 private const val STREAM_UI_THROTTLE_MS = 55L
 private const val PRELOAD_CONTEXT_MAX_CHARS = 16_000
 
@@ -133,6 +136,7 @@ class GeminiCodeAssistant {
         projectName: String,
         packageName: String,
         projectLanguage: ProjectLanguage = ProjectLanguage.JAVA,
+        javaVersion: JavaVersionOption = JavaVersionOption.JAVA_17,
         minSdkVersion: Int = 24,
         attachments: List<AiAttachment> = emptyList(),
         activeFile: ProjectFile?,
@@ -149,7 +153,7 @@ class GeminiCodeAssistant {
             "Please inspect the attached image/file(s) and help implement what is shown."
         }
 
-        val requestedModel = modelId.trim().removePrefix("models/").ifBlank { provider.defaultModelId }
+        val requestedModel = AiModelsCatalog.normalizeModelId(provider, modelId)
         val resolvedKey = when (provider) {
             AiProvider.GEMINI -> resolveApiKey(apiKey)
             AiProvider.OPENAI, AiProvider.CLAUDE -> apiKey.trim()
@@ -293,6 +297,7 @@ class GeminiCodeAssistant {
                     apiKey = resolvedKey,
                     thinkingMode = thinkingMode,
                     projectLanguage = projectLanguage,
+                    javaVersion = javaVersion,
                     minSdkVersion = minSdkVersion,
                     imageAttachments = imageAttachments,
                     priorHistory = priorHistory,
@@ -342,6 +347,7 @@ class GeminiCodeAssistant {
                     apiKey = resolvedKey,
                     thinkingMode = thinkingMode,
                     projectLanguage = projectLanguage,
+                    javaVersion = javaVersion,
                     minSdkVersion = minSdkVersion,
                     imageAttachments = imageAttachments,
                     priorHistory = priorHistory,
@@ -388,6 +394,7 @@ class GeminiCodeAssistant {
                     apiKey = resolvedKey,
                     thinkingMode = thinkingMode,
                     projectLanguage = projectLanguage,
+                    javaVersion = javaVersion,
                     minSdkVersion = minSdkVersion,
                     imageAttachments = imageAttachments,
                     priorHistory = priorHistory,
@@ -529,6 +536,7 @@ class GeminiCodeAssistant {
         apiKey: String,
         thinkingMode: AiThinkingMode,
         projectLanguage: ProjectLanguage,
+        javaVersion: JavaVersionOption,
         minSdkVersion: Int,
         imageAttachments: List<AiAttachment>,
         priorHistory: List<ChatMessage>,
@@ -573,6 +581,7 @@ class GeminiCodeAssistant {
                     apiKey = apiKey,
                     thinkingMode = thinkingMode,
                     projectLanguage = projectLanguage,
+                    javaVersion = javaVersion,
                     minSdkVersion = minSdkVersion,
                     contents = conversationContents,
                     onConnected = { connectedModel ->
@@ -719,6 +728,7 @@ class GeminiCodeAssistant {
         apiKey: String,
         thinkingMode: AiThinkingMode,
         projectLanguage: ProjectLanguage,
+        javaVersion: JavaVersionOption,
         minSdkVersion: Int,
         imageAttachments: List<AiAttachment>,
         priorHistory: List<ChatMessage>,
@@ -736,7 +746,7 @@ class GeminiCodeAssistant {
             put(
                 JSONObject()
                     .put("role", "system")
-                    .put("content", buildSystemInstruction(activeModel, projectLanguage, minSdkVersion)),
+                    .put("content", buildSystemInstruction(activeModel, projectLanguage, javaVersion, minSdkVersion)),
             )
             priorHistory.forEach { msg ->
                 put(JSONObject().put("role", if (msg.isUser) "user" else "assistant").put("content", msg.text))
@@ -905,6 +915,7 @@ class GeminiCodeAssistant {
         apiKey: String,
         thinkingMode: AiThinkingMode,
         projectLanguage: ProjectLanguage,
+        javaVersion: JavaVersionOption,
         minSdkVersion: Int,
         imageAttachments: List<AiAttachment>,
         priorHistory: List<ChatMessage>,
@@ -918,7 +929,7 @@ class GeminiCodeAssistant {
         onUsage: (String, TokenUsageDelta, Int) -> Unit,
     ) {
         var activeModel = initialModel
-        val systemText = buildSystemInstruction(activeModel, projectLanguage, minSdkVersion)
+        val systemText = buildSystemInstruction(activeModel, projectLanguage, javaVersion, minSdkVersion)
         val claudeMessages = JSONArray().apply {
             priorHistory.forEach { msg ->
                 put(JSONObject().put("role", if (msg.isUser) "user" else "assistant").put("content", msg.text))
@@ -1135,17 +1146,25 @@ class GeminiCodeAssistant {
         apiKey: String,
         thinkingMode: AiThinkingMode,
         projectLanguage: ProjectLanguage,
+        javaVersion: JavaVersionOption,
         minSdkVersion: Int,
         contents: JSONArray,
         onConnected: (String) -> Unit,
         onStatusUpdate: (String, String) -> Unit,
         onTextDelta: (String) -> Unit,
     ): TurnStreamOutcome {
-        val candidates = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, primaryModelId)
+        val candidates = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, primaryModelId).toMutableList()
+        val attemptedModels = linkedSetOf<String>()
         var lastError: Throwable? = null
+        var discoveredLiveModels = false
 
-        for ((index, candidate) in candidates.withIndex()) {
-            val hasNextCandidate = index < candidates.lastIndex
+        var index = 0
+        while (index < candidates.size) {
+            val candidate = candidates[index]
+            index++
+            if (!attemptedModels.add(candidate)) continue
+
+            var hasNextCandidate = index < candidates.size
             var includeThinkingConfig = true
             var attemptsOnCandidate = 0
 
@@ -1158,22 +1177,25 @@ class GeminiCodeAssistant {
                     thinkingMode = thinkingMode,
                     includeThinkingConfig = includeThinkingConfig,
                     projectLanguage = projectLanguage,
+                    javaVersion = javaVersion,
                     minSdkVersion = minSdkVersion,
                 )
                 try {
-                    val outcome = callModelWithSseFallback(
-                        modelId = candidate,
-                        apiKey = apiKey,
-                        requestBody = requestBody,
-                        onConnected = { onConnected(candidate) },
-                        onFallback = {
-                            onStatusUpdate(
-                                "Retrying $candidate",
-                                "SSE timed out, trying direct response...",
-                            )
-                        },
-                        onTextDelta = onTextDelta,
-                    )
+                    val outcome = withTimeout(ATTEMPT_TIMEOUT_MS) {
+                        callModelWithSseFallback(
+                            modelId = candidate,
+                            apiKey = apiKey,
+                            requestBody = requestBody,
+                            onConnected = { onConnected(candidate) },
+                            onFallback = {
+                                onStatusUpdate(
+                                    "Switching transport ($candidate)",
+                                    "Stream paused — trying fast direct response...",
+                                )
+                            },
+                            onTextDelta = onTextDelta,
+                        )
+                    }
                     return outcome.copy(usedModel = candidate)
                 } catch (e: GeminiApiException) {
                     lastError = e
@@ -1189,42 +1211,67 @@ class GeminiCodeAssistant {
                         continue
                     }
 
-                    if (e.httpCode == 404 && hasNextCandidate) {
-                        val nextModel = candidates[index + 1]
+                    if (!hasNextCandidate && !discoveredLiveModels && shouldFailoverHttpStatus(e.httpCode)) {
+                        discoveredLiveModels = true
+                        appendLiveGeminiCandidates(apiKey, candidates, attemptedModels, onStatusUpdate)
+                        hasNextCandidate = index < candidates.size
+                    }
+
+                    // Fail over immediately whenever another candidate is ready instead of waiting on a busy/404 model.
+                    if (shouldFailoverHttpStatus(e.httpCode) && hasNextCandidate) {
+                        val nextModel = candidates[index]
+                        val statusLabel = if (e.httpCode == 404) {
+                            "Model unavailable (404)"
+                        } else {
+                            "Overload (${e.httpCode}) on $candidate"
+                        }
                         onStatusUpdate(
-                            "Model unavailable (404)",
-                            "$candidate not found — switching to $nextModel...",
+                            statusLabel,
+                            "Switching immediately to $nextModel...",
                         )
                         break
                     }
 
-                    val canRetrySame = isTransientHttpStatus(e.httpCode) && attemptsOnCandidate == 1
-                    if (canRetrySame) {
-                        val nextLabel = if (hasNextCandidate) " (failover ready)" else ""
+                    if (isTransientHttpStatus(e.httpCode) && attemptsOnCandidate == 1) {
                         onStatusUpdate(
                             "High demand (${e.httpCode}) on $candidate",
-                            "Quick retry in 0.4s$nextLabel...",
+                            "Retrying $candidate in 0.35s...",
                         )
-                        delay(400L)
+                        delay(350L)
                         continue
                     }
 
-                    if (shouldFailoverHttpStatus(e.httpCode) && hasNextCandidate) {
-                        val nextModel = candidates[index + 1]
+                    throw e
+                } catch (e: SocketTimeoutException) {
+                    lastError = e
+                    if (!hasNextCandidate && !discoveredLiveModels) {
+                        discoveredLiveModels = true
+                        appendLiveGeminiCandidates(apiKey, candidates, attemptedModels, onStatusUpdate)
+                        hasNextCandidate = index < candidates.size
+                    }
+                    if (hasNextCandidate) {
+                        val nextModel = candidates[index]
                         onStatusUpdate(
-                            "503/Overload — switching model",
-                            "$candidate busy (${e.httpCode}) → switching to $nextModel...",
+                            "$candidate timed out",
+                            "Switching to $nextModel...",
                         )
                         break
                     }
                     throw e
-                } catch (e: SocketTimeoutException) {
-                    lastError = e
+                } catch (e: TimeoutCancellationException) {
+                    // Distinguish inner ATTEMPT_TIMEOUT_MS from outer TURN_TIMEOUT_MS or user cancel
+                    coroutineContext.ensureActive()
+                    lastError = SocketTimeoutException("$candidate timed out after ${ATTEMPT_TIMEOUT_MS / 1000}s")
+                    if (!hasNextCandidate && !discoveredLiveModels) {
+                        discoveredLiveModels = true
+                        appendLiveGeminiCandidates(apiKey, candidates, attemptedModels, onStatusUpdate)
+                        hasNextCandidate = index < candidates.size
+                    }
                     if (hasNextCandidate) {
-                        val nextModel = candidates[index + 1]
+                        val nextModel = candidates[index]
                         onStatusUpdate(
-                            "$candidate timed out",
-                            "Switching to $nextModel...",
+                            "$candidate slow/unresponsive",
+                            "Auto-switching to $nextModel...",
                         )
                         break
                     }
@@ -1233,6 +1280,38 @@ class GeminiCodeAssistant {
             }
         }
         throw lastError ?: GeminiApiException(503, "All Gemini models are experiencing high demand right now.")
+    }
+
+    private suspend fun appendLiveGeminiCandidates(
+        apiKey: String,
+        candidates: MutableList<String>,
+        attemptedModels: Set<String>,
+        onStatusUpdate: (String, String) -> Unit,
+    ) {
+        onStatusUpdate("Discovering live Gemini models", "Checking available models for your API key...")
+        val live = AiModelsCatalog.fetchLiveModels(AiProvider.GEMINI, apiKey).getOrNull().orEmpty()
+        val ranked = live
+            .map { it.id }
+            .filter { id ->
+                id !in attemptedModels &&
+                    id !in candidates &&
+                    !id.contains("embedding", ignoreCase = true) &&
+                    !id.contains("aqa", ignoreCase = true) &&
+                    !id.contains("imagen", ignoreCase = true) &&
+                    !id.contains("veo", ignoreCase = true) &&
+                    !id.contains("tts", ignoreCase = true) &&
+                    !id.contains("robotics", ignoreCase = true)
+            }
+            .sortedWith(
+                compareBy<String>(
+                    { !it.contains("2.5-flash", ignoreCase = true) },
+                    { !it.contains("2.0-flash", ignoreCase = true) },
+                    { !it.contains("flash", ignoreCase = true) },
+                    { it.contains("exp", ignoreCase = true) },
+                ).thenBy { it },
+            )
+            .take(3)
+        candidates.addAll(ranked)
     }
 
     private suspend fun callModelWithSseFallback(
@@ -1287,6 +1366,34 @@ class GeminiCodeAssistant {
                 "search_files" -> executor.searchFiles(call.args.optString("query"))
                 "build_apk" -> executor.buildApk(isRelease = call.args.optBoolean("release", false))
                 "build_aab" -> executor.buildAab()
+                "github_status" -> executor.githubStatus()
+                "github_list_repos" -> executor.githubListRepos()
+                "github_create_repo" -> executor.githubCreateRepo(
+                    name = call.args.optString("name"),
+                    description = call.args.optString("description"),
+                    isPrivate = call.args.optBoolean("private", false),
+                )
+                "github_link_repo" -> executor.githubLinkRepo(
+                    owner = call.args.optString("owner"),
+                    repo = call.args.optString("repo"),
+                    branch = call.args.optString("branch", "main"),
+                )
+                "github_list_repo_files" -> executor.githubListRepoFiles(
+                    owner = call.args.optString("owner"),
+                    repo = call.args.optString("repo"),
+                    branch = call.args.optString("branch"),
+                )
+                "github_read_file" -> executor.githubReadFile(
+                    path = call.args.optString("path"),
+                    owner = call.args.optString("owner"),
+                    repo = call.args.optString("repo"),
+                    branch = call.args.optString("branch"),
+                )
+                "github_pull_changes" -> executor.githubPullChanges()
+                "github_push_changes" -> executor.githubPushChanges(
+                    commitMessage = call.args.optString("commit_message"),
+                )
+                "github_trigger_cloud_build" -> executor.githubTriggerCloudBuild()
                 else -> AgentToolResult(
                     success = false,
                     stepDetail = "Unknown tool '${call.name}'",
@@ -1315,6 +1422,15 @@ class GeminiCodeAssistant {
             "search_files" -> "Searching '${args.optString("query").take(28)}'"
             "build_apk" -> if (args.optBoolean("release", false)) "Building Release APK" else "Building Debug APK"
             "build_aab" -> "Building Signed App Bundle (.aab)"
+            "github_status" -> "Checking GitHub repo & diff status"
+            "github_list_repos" -> "Listing GitHub repositories"
+            "github_create_repo" -> "Creating GitHub repository ${args.optString("name")}"
+            "github_link_repo" -> "Linking GitHub repo ${args.optString("owner")}/${args.optString("repo")}"
+            "github_list_repo_files" -> "Browsing GitHub repo files"
+            "github_read_file" -> "Reading GitHub file $path"
+            "github_pull_changes" -> "Pulling changes from GitHub"
+            "github_push_changes" -> "Pushing changes to GitHub"
+            "github_trigger_cloud_build" -> "Triggering GitHub Actions Cloud Build"
             else -> "Running $name"
         }
     }
@@ -1444,7 +1560,7 @@ class GeminiCodeAssistant {
         val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = CONNECT_TIMEOUT_MS
-            readTimeout = READ_TIMEOUT_MS
+            readTimeout = UNARY_FALLBACK_READ_TIMEOUT_MS
             useCaches = false
             doOutput = true
             setFixedLengthStreamingMode(bodyBytes.size)
@@ -1546,31 +1662,33 @@ class GeminiCodeAssistant {
     private fun buildSystemInstruction(
         modelId: String,
         projectLanguage: ProjectLanguage = ProjectLanguage.JAVA,
+        javaVersion: JavaVersionOption = JavaVersionOption.JAVA_17,
         minSdkVersion: Int = 24,
     ): String {
         val langNote = if (projectLanguage == ProjectLanguage.KOTLIN) {
-            "Active project language: KOTLIN (.kt files in src/). Write clean Kotlin Android SDK code (`class MainActivity : Activity()`, `override fun onCreate(savedInstanceState: Bundle?)`, `val`/`var`, `fun`, lambdas `{ ... }`, `object : ...`, string templates). DroidForge compiles `.kt` via its built-in Kotlin-to-Java-8 transpiler + ECJ + DX."
+            "Active project language: KOTLIN (.kt files in src/). Write clean Kotlin Android SDK code (`class MainActivity : Activity()`, `override fun onCreate(savedInstanceState: Bundle?)`, `val`/`var`, `fun`, lambdas `{ ... }`, `object : ...`, string templates). DroidForge compiles `.kt` via its built-in Kotlin-to-Java transpiler + ECJ + Multi-DEX."
         } else {
-            "Active project language: JAVA 8 (.java files in src/)."
+            "Active project language: ${javaVersion.label} (.java files in src/). Every Java version 8 through 25 (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25) is supported both offline (`ModernJavaTranspiler`) and in GitHub Cloud Builds (`var`, `\"\"\"` text blocks, `record`, `sealed`/`permits`, switch `->`/`yield`, pattern `instanceof`, `List.of`/`Set.of`/`Map.of`, `.repeat()`/`.lines()`, `IO.println`)."
         }
         return """
-            You are an autonomous coding agent powered by $modelId inside DroidForge Studio, an offline-capable Android IDE (Java & Kotlin), APK/AAB builder, and live UI previewer.
+            You are an autonomous coding agent powered by $modelId inside DroidForge Studio, an Android IDE (Java 8–25 & Kotlin), Multi-DEX APK/AAB builder, GitHub-connected workspace, and Live Interactive Android Emulator.
             $langNote
-            Target minSdkVersion: API $minSdkVersion (Android ${com.example.model.AndroidMinSdk.fromApiLevel(minSdkVersion).androidVersion}), targetSdkVersion: 35. Only suggest platform APIs compatible with minSdkVersion API $minSdkVersion (or guard newer APIs with Build.VERSION.SDK_INT).
+            Target minSdkVersion: API $minSdkVersion (Android ${com.example.model.AndroidMinSdk.fromApiLevel(minSdkVersion).androidVersion}), targetSdkVersion: 35.
 
             Execution rules (prioritize speed & accuracy):
-            - Act autonomously WITHOUT asking the user for permission before reading, creating, editing, or deleting files, or building the APK/AAB.
-            - Key project files (active tab, MainActivity, AndroidManifest, values XML) are already pre-loaded in the prompt. Do NOT waste turns calling list_files or read_file on files already included below—jump straight to edit_file or write_file!
-            - Batch independent tool calls together in a single turn whenever possible.
-            - You have full access via tools: list_files, read_file, write_file, edit_file, delete_file, search_files, build_apk, and build_aab.
-            - Prefer edit_file for targeted edits and write_file for new files or full rewrites.
-            - After modifying Java, Kotlin, XML, or Manifest files, call build_apk to verify compilation. If build_apk reports errors, fix them immediately and rebuild. Skip build_apk for pure Q&A.
-            - Do NOT use AndroidX, Jetpack Compose, kotlinx.coroutines, or external Gradle dependencies. Use classic Android SDK APIs (android.app.Activity, android.os.Bundle, android.view.*, android.widget.*, android.graphics.*, android.content.*, android.webkit.*, java.*).
-            - Compiles Java 8 (.java), Kotlin (.kt via built-in transpiler), AndroidManifest.xml, res/values/strings.xml, and res/values/colors.xml into R.java and resources.arsc / resources.pb.
+            - Act autonomously WITHOUT asking permission before reading, creating, editing, or deleting files, or building/pushing.
+            - Key project files are pre-loaded in the prompt. Jump straight to edit_file or write_file!
+            - Batch independent tool calls together whenever possible.
+            - Project & Build tools: list_files, read_file, write_file, edit_file, delete_file, search_files, build_apk, build_aab.
+            - Full GitHub & Cloud CI tools: github_status, github_list_repos, github_create_repo, github_link_repo, github_list_repo_files, github_read_file, github_pull_changes, github_push_changes, github_trigger_cloud_build.
+            - Live Emulator execution: Custom `View` subclasses overriding `onDraw(Canvas)` / `draw(Canvas)`, `SurfaceView` (`SurfaceHolder` `lockCanvas`/`unlockCanvasAndPost`), `onTouchEvent(MotionEvent)` (including `getPointerCount`/`getPointerId`), and `Handler.postDelayed` 60fps loops, plus XML layouts (`res/layout/*.xml` including XML-inflated custom Views & `@+id/*` -> `R.id.*`), `LinearLayout`/`FrameLayout`/`GridLayout`, `Button`, `TextView`, `EditText`, and `AlertDialog` execute live inside the DroidForge VM Emulator!
+            - Offline & >5 GB App/Game Architecture: DroidForge supports Multi-DEX (`classes.dex`, `classes2.dex`...), `res/layout/*.xml`, `res/drawable/*`, `libs/*.jar`, native `.so` libraries under `lib/<abi>/` or `jniLibs/<abi>/`, and streaming 2-pass `.aab` signing (`build_aab`) + ZIP64 packaging. Remember Android OS `PackageInstaller` caps a single `.apk` at ~4 GB, whereas `.aab` bundles, Play Asset Delivery, Cloud Gradle CI (`github_trigger_cloud_build`), and runtime asset/JRE downloaders (e.g., PojavLauncher-style Minecraft Java Edition launchers with runtime OpenJDK + LWJGL + asset/version manifest fetchers & virtual controls) handle >5 GB payloads cleanly!
+            - Prefer classic Android SDK APIs (`android.app.Activity`, `android.view.*`, `android.widget.*`, `android.graphics.*`, `java.*`) unless building an external Gradle project for GitHub Cloud CI.
+            - After modifying code or XML, call build_apk to verify compilation.
 
             Response formatting rules (CRITICAL):
             - Organize your explanation cleanly using short Markdown headings (`### Summary`, `### Changes Made`, `### Build Status`), concise bullet points (`- `), and backticked file paths or symbols (`` `MainActivity.kt` ``).
-            - Keep paragraphs crisp and well-spaced so answers scan effortlessly on a mobile screen.
+            - Keep paragraphs crisp and scannable on mobile screens.
         """.trimIndent()
     }
 
@@ -1580,6 +1698,7 @@ class GeminiCodeAssistant {
         thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
         includeThinkingConfig: Boolean = true,
         projectLanguage: ProjectLanguage = ProjectLanguage.JAVA,
+        javaVersion: JavaVersionOption = JavaVersionOption.JAVA_17,
         minSdkVersion: Int = 24,
     ): String {
         val genConfig = JSONObject().put("temperature", 0.3)
@@ -1594,7 +1713,7 @@ class GeminiCodeAssistant {
                 JSONObject().put(
                     "parts",
                     JSONArray().put(
-                        JSONObject().put("text", buildSystemInstruction(modelId, projectLanguage, minSdkVersion)),
+                        JSONObject().put("text", buildSystemInstruction(modelId, projectLanguage, javaVersion, minSdkVersion)),
                     ),
                 ),
             )

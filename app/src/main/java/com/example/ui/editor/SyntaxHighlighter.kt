@@ -14,8 +14,16 @@ class CodeSyntaxVisualTransformation(
     private val language: FileLanguage,
     private val colors: SyntaxColors,
 ) : VisualTransformation {
+    private var lastSource: String? = null
+    private var lastHighlighted: AnnotatedString? = null
+
     override fun filter(text: AnnotatedString): TransformedText {
-        val highlighted = SyntaxHighlighter.highlight(text.text, language, colors)
+        val raw = text.text
+        val cached = if (raw === lastSource) lastHighlighted else null
+        val highlighted = cached ?: SyntaxHighlighter.highlight(raw, language, colors).also {
+            lastSource = raw
+            lastHighlighted = it
+        }
         return TransformedText(highlighted, OffsetMapping.Identity)
     }
 }
@@ -62,17 +70,26 @@ object SyntaxHighlighter {
         "MutableList", "MutableMap", "Pair", "Regex",
     )
 
+    private const val MAX_HIGHLIGHT_CHARS = 35_000
+
     fun highlight(
         code: String,
         language: FileLanguage,
         colors: SyntaxColors,
     ): AnnotatedString {
-        return when (language) {
-            FileLanguage.JAVA -> highlightJvmLanguage(code, colors, JAVA_KEYWORDS, JAVA_COMMON_TYPES)
-            FileLanguage.KOTLIN -> highlightJvmLanguage(code, colors, KOTLIN_KEYWORDS, KOTLIN_COMMON_TYPES)
-            FileLanguage.XML -> highlightXml(code, colors)
-            FileLanguage.JSON -> highlightJson(code, colors)
-            FileLanguage.TEXT -> AnnotatedString(code)
+        if (language == FileLanguage.TEXT || code.isEmpty()) return AnnotatedString(code)
+        val clipped = if (code.length > MAX_HIGHLIGHT_CHARS) code.substring(0, MAX_HIGHLIGHT_CHARS) else code
+        val styledHead = when (language) {
+            FileLanguage.JAVA -> highlightJvmLanguage(clipped, colors, JAVA_KEYWORDS, JAVA_COMMON_TYPES)
+            FileLanguage.KOTLIN -> highlightJvmLanguage(clipped, colors, KOTLIN_KEYWORDS, KOTLIN_COMMON_TYPES)
+            FileLanguage.XML -> highlightXml(clipped, colors)
+            FileLanguage.JSON -> highlightJson(clipped, colors)
+            FileLanguage.TEXT -> AnnotatedString(clipped)
+        }
+        if (code.length <= MAX_HIGHLIGHT_CHARS) return styledHead
+        return buildAnnotatedString {
+            append(styledHead)
+            append(code.substring(MAX_HIGHLIGHT_CHARS))
         }
     }
 
@@ -214,7 +231,9 @@ object SyntaxHighlighter {
                             if (code[j] == '\\' && j + 1 < len) j += 2 else j++
                         }
                         if (j < len && code[j] == '"') j++
-                        val isKey = j < len && code.drop(j).trimStart().startsWith(":")
+                        var look = j
+                        while (look < len && code[look].isWhitespace()) look++
+                        val isKey = look < len && code[look] == ':'
                         addStyle(
                             SpanStyle(color = if (isKey) colors.xmlAttr else colors.string),
                             i,

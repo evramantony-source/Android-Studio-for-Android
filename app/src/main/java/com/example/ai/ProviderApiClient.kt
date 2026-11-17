@@ -105,6 +105,85 @@ internal object ProviderApiClient {
                 "Compiles and signs an Android App Bundle (.aab) ready for Play Store distribution and returns diagnostics.",
                 JSONObject().put("type", "object").put("properties", JSONObject()),
             ),
+            Triple(
+                "github_status",
+                "Checks connected GitHub account, linked repository, branch, and pending modified/added/deleted files.",
+                JSONObject().put("type", "object").put("properties", JSONObject()),
+            ),
+            Triple(
+                "github_list_repos",
+                "Lists the authenticated user's GitHub repositories.",
+                JSONObject().put("type", "object").put("properties", JSONObject()),
+            ),
+            Triple(
+                "github_create_repo",
+                "Creates a new GitHub repository for the connected account and links it to the active project.",
+                JSONObject().put("type", "object")
+                    .put(
+                        "properties",
+                        JSONObject()
+                            .put("name", strProp("Repository name to create."))
+                            .put("description", strProp("Optional repository description."))
+                            .put("private", boolProp("Set true to make the repository private (default false).")),
+                    )
+                    .put("required", JSONArray().put("name")),
+            ),
+            Triple(
+                "github_link_repo",
+                "Links an existing GitHub repository to the active DroidForge project.",
+                JSONObject().put("type", "object")
+                    .put(
+                        "properties",
+                        JSONObject()
+                            .put("owner", strProp("GitHub repository owner/organization."))
+                            .put("repo", strProp("GitHub repository name."))
+                            .put("branch", strProp("Optional branch name (defaults to main).")),
+                    )
+                    .put("required", JSONArray().put("owner").put("repo")),
+            ),
+            Triple(
+                "github_list_repo_files",
+                "Lists files in the linked GitHub repo or a specified owner/repo/branch.",
+                JSONObject().put("type", "object")
+                    .put(
+                        "properties",
+                        JSONObject()
+                            .put("owner", strProp("Optional GitHub owner (defaults to linked repo owner)."))
+                            .put("repo", strProp("Optional repository name (defaults to linked repo)."))
+                            .put("branch", strProp("Optional branch name (defaults to linked branch or main).")),
+                    ),
+            ),
+            Triple(
+                "github_read_file",
+                "Reads the text content of a file from the linked or specified GitHub repository.",
+                JSONObject().put("type", "object")
+                    .put(
+                        "properties",
+                        JSONObject()
+                            .put("path", strProp("File path inside the GitHub repository."))
+                            .put("owner", strProp("Optional GitHub owner (defaults to linked repo owner)."))
+                            .put("repo", strProp("Optional repository name (defaults to linked repo)."))
+                            .put("branch", strProp("Optional branch name (defaults to linked branch or main).")),
+                    )
+                    .put("required", JSONArray().put("path")),
+            ),
+            Triple(
+                "github_pull_changes",
+                "Pulls and syncs files from the linked GitHub repository into the active project.",
+                JSONObject().put("type", "object").put("properties", JSONObject()),
+            ),
+            Triple(
+                "github_push_changes",
+                "Commits all current project files and pushes them to the linked GitHub repository.",
+                JSONObject().put("type", "object")
+                    .put("properties", JSONObject().put("commit_message", strProp("Git commit message.")))
+                    .put("required", JSONArray().put("commit_message")),
+            ),
+            Triple(
+                "github_trigger_cloud_build",
+                "Generates Gradle & GitHub Actions CI files if needed, pushes updates, and triggers a Cloud Android APK/AAB build on GitHub Actions.",
+                JSONObject().put("type", "object").put("properties", JSONObject()),
+            ),
         )
     }
 
