@@ -35,12 +35,13 @@ internal data class ExternalTurnOutcome(
 
 internal object ProviderApiClient {
 
-    private const val CONNECT_TIMEOUT_MS = 12_000
-    private const val READ_TIMEOUT_MS = 45_000
+    private const val CONNECT_TIMEOUT_MS = 15_000
+    private const val READ_TIMEOUT_MS = 65_000
 
     fun buildSharedToolSpecs(): List<Triple<String, String, JSONObject>> {
         fun strProp(desc: String) = JSONObject().put("type", "string").put("description", desc)
         fun boolProp(desc: String) = JSONObject().put("type", "boolean").put("description", desc)
+        fun intProp(desc: String) = JSONObject().put("type", "integer").put("description", desc)
 
         return listOf(
             Triple(
@@ -142,6 +143,17 @@ internal object ProviderApiClient {
                     .put("required", JSONArray().put("owner").put("repo")),
             ),
             Triple(
+                "github_list_branches",
+                "Lists branches on the linked or specified GitHub repository.",
+                JSONObject().put("type", "object")
+                    .put(
+                        "properties",
+                        JSONObject()
+                            .put("owner", strProp("Optional GitHub owner (defaults to linked repo owner)."))
+                            .put("repo", strProp("Optional repository name (defaults to linked repo).")),
+                    ),
+            ),
+            Triple(
                 "github_list_repo_files",
                 "Lists files in the linked GitHub repo or a specified owner/repo/branch.",
                 JSONObject().put("type", "object")
@@ -168,6 +180,35 @@ internal object ProviderApiClient {
                     .put("required", JSONArray().put("path")),
             ),
             Triple(
+                "github_upload_file",
+                "Uploads a single file from the project (or explicit content) directly to the linked GitHub repository.",
+                JSONObject().put("type", "object")
+                    .put(
+                        "properties",
+                        JSONObject()
+                            .put("remote_path", strProp("Target file path inside the GitHub repository."))
+                            .put("local_path", strProp("Optional relative file path inside the DroidForge project to upload."))
+                            .put("content", strProp("Optional explicit text content if local_path is omitted."))
+                            .put("commit_message", strProp("Optional commit message.")),
+                    )
+                    .put("required", JSONArray().put("remote_path")),
+            ),
+            Triple(
+                "github_download_file",
+                "Downloads a file from the linked or specified GitHub repository and saves it into the active DroidForge project.",
+                JSONObject().put("type", "object")
+                    .put(
+                        "properties",
+                        JSONObject()
+                            .put("remote_path", strProp("Source file path in the GitHub repository."))
+                            .put("local_path", strProp("Optional destination relative path in the DroidForge project (defaults to remote_path)."))
+                            .put("owner", strProp("Optional GitHub owner (defaults to linked repo owner)."))
+                            .put("repo", strProp("Optional repository name (defaults to linked repo)."))
+                            .put("branch", strProp("Optional branch name.")),
+                    )
+                    .put("required", JSONArray().put("remote_path")),
+            ),
+            Triple(
                 "github_pull_changes",
                 "Pulls and syncs files from the linked GitHub repository into the active project.",
                 JSONObject().put("type", "object").put("properties", JSONObject()),
@@ -183,6 +224,29 @@ internal object ProviderApiClient {
                 "github_trigger_cloud_build",
                 "Generates Gradle & GitHub Actions CI files if needed, pushes updates, and triggers a Cloud Android APK/AAB build on GitHub Actions.",
                 JSONObject().put("type", "object").put("properties", JSONObject()),
+            ),
+            Triple(
+                "github_list_workflow_runs",
+                "Lists recent GitHub Actions workflow runs, including statuses, conclusions, branches, and run IDs.",
+                JSONObject().put("type", "object").put("properties", JSONObject()),
+            ),
+            Triple(
+                "github_get_workflow_logs",
+                "Fetches jobs, step failure summaries, and log tails for a GitHub Actions workflow run ID.",
+                JSONObject().put("type", "object")
+                    .put("properties", JSONObject().put("run_id", intProp("GitHub Actions workflow run ID."))),
+            ),
+            Triple(
+                "github_rerun_workflow",
+                "Reruns a GitHub Actions workflow run (all jobs or only failed jobs).",
+                JSONObject().put("type", "object")
+                    .put(
+                        "properties",
+                        JSONObject()
+                            .put("run_id", intProp("GitHub Actions workflow run ID to rerun."))
+                            .put("failed_only", boolProp("Set true to rerun only failed jobs (default false).")),
+                    )
+                    .put("required", JSONArray().put("run_id")),
             ),
         )
     }

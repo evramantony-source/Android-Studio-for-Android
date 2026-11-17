@@ -32,11 +32,11 @@ private const val TAG = "GeminiCodeAssistant"
 const val GEMINI_MODEL_ID = "gemini-2.5-flash"
 private const val GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 private const val MAX_AGENT_TURNS = 12
-private const val CONNECT_TIMEOUT_MS = 10_000
-private const val READ_TIMEOUT_MS = 18_000
-private const val UNARY_FALLBACK_READ_TIMEOUT_MS = 18_000
-private const val ATTEMPT_TIMEOUT_MS = 28_000L
-private const val TURN_TIMEOUT_MS = 120_000L
+private const val CONNECT_TIMEOUT_MS = 15_000
+private const val READ_TIMEOUT_MS = 65_000
+private const val UNARY_FALLBACK_READ_TIMEOUT_MS = 65_000
+private const val ATTEMPT_TIMEOUT_MS = 90_000L
+private const val TURN_TIMEOUT_MS = 240_000L
 private const val STREAM_UI_THROTTLE_MS = 55L
 private const val PRELOAD_CONTEXT_MAX_CHARS = 16_000
 
@@ -1155,8 +1155,16 @@ class GeminiCodeAssistant {
     ): TurnStreamOutcome {
         val candidates = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, primaryModelId).toMutableList()
         val attemptedModels = linkedSetOf<String>()
+        var primaryError: Throwable? = null
         var lastError: Throwable? = null
         var discoveredLiveModels = false
+
+        fun recordError(model: String, error: Throwable) {
+            if (primaryError == null && model == candidates.firstOrNull()) {
+                primaryError = error
+            }
+            lastError = error
+        }
 
         var index = 0
         while (index < candidates.size) {
@@ -1190,7 +1198,7 @@ class GeminiCodeAssistant {
                             onFallback = {
                                 onStatusUpdate(
                                     "Switching transport ($candidate)",
-                                    "Stream paused — trying fast direct response...",
+                                    "Stream paused — trying direct response...",
                                 )
                             },
                             onTextDelta = onTextDelta,
@@ -1198,15 +1206,9 @@ class GeminiCodeAssistant {
                     }
                     return outcome.copy(usedModel = candidate)
                 } catch (e: GeminiApiException) {
-                    lastError = e
-                    val isThinkingConfigError = e.httpCode == 400 &&
-                        includeThinkingConfig &&
-                        e.message.orEmpty().let { msg ->
-                            msg.contains("thinking", ignoreCase = true) ||
-                                msg.contains("thinkingLevel", ignoreCase = true) ||
-                                msg.contains("thinkingBudget", ignoreCase = true)
-                        }
-                    if (isThinkingConfigError) {
+                    recordError(candidate, e)
+                    val isConfig400 = e.httpCode == 400 && includeThinkingConfig
+                    if (isConfig400) {
                         includeThinkingConfig = false
                         continue
                     }
@@ -1217,8 +1219,15 @@ class GeminiCodeAssistant {
                         hasNextCandidate = index < candidates.size
                     }
 
-                    // Fail over immediately whenever another candidate is ready instead of waiting on a busy/404 model.
                     if (shouldFailoverHttpStatus(e.httpCode) && hasNextCandidate) {
+                        if (isTransientHttpStatus(e.httpCode) && attemptsOnCandidate == 1) {
+                            onStatusUpdate(
+                                "High demand (${e.httpCode}) on $candidate",
+                                "Quick retry on $candidate before failover...",
+                            )
+                            delay(400L)
+                            continue
+                        }
                         val nextModel = candidates[index]
                         val statusLabel = if (e.httpCode == 404) {
                             "Model unavailable (404)"
@@ -1227,7 +1236,7 @@ class GeminiCodeAssistant {
                         }
                         onStatusUpdate(
                             statusLabel,
-                            "Switching immediately to $nextModel...",
+                            "Switching to $nextModel...",
                         )
                         break
                     }
@@ -1235,15 +1244,15 @@ class GeminiCodeAssistant {
                     if (isTransientHttpStatus(e.httpCode) && attemptsOnCandidate == 1) {
                         onStatusUpdate(
                             "High demand (${e.httpCode}) on $candidate",
-                            "Retrying $candidate in 0.35s...",
+                            "Retrying $candidate in 0.4s...",
                         )
-                        delay(350L)
+                        delay(400L)
                         continue
                     }
 
                     throw e
                 } catch (e: SocketTimeoutException) {
-                    lastError = e
+                    recordError(candidate, e)
                     if (!hasNextCandidate && !discoveredLiveModels) {
                         discoveredLiveModels = true
                         appendLiveGeminiCandidates(apiKey, candidates, attemptedModels, onStatusUpdate)
@@ -1261,7 +1270,8 @@ class GeminiCodeAssistant {
                 } catch (e: TimeoutCancellationException) {
                     // Distinguish inner ATTEMPT_TIMEOUT_MS from outer TURN_TIMEOUT_MS or user cancel
                     coroutineContext.ensureActive()
-                    lastError = SocketTimeoutException("$candidate timed out after ${ATTEMPT_TIMEOUT_MS / 1000}s")
+                    val timeoutErr = SocketTimeoutException("$candidate timed out after ${ATTEMPT_TIMEOUT_MS / 1000}s")
+                    recordError(candidate, timeoutErr)
                     if (!hasNextCandidate && !discoveredLiveModels) {
                         discoveredLiveModels = true
                         appendLiveGeminiCandidates(apiKey, candidates, attemptedModels, onStatusUpdate)
@@ -1270,16 +1280,23 @@ class GeminiCodeAssistant {
                     if (hasNextCandidate) {
                         val nextModel = candidates[index]
                         onStatusUpdate(
-                            "$candidate slow/unresponsive",
+                            "$candidate unresponsive",
                             "Auto-switching to $nextModel...",
                         )
                         break
                     }
-                    throw e
+                    throw timeoutErr
                 }
             }
         }
-        throw lastError ?: GeminiApiException(503, "All Gemini models are experiencing high demand right now.")
+        val firstErr = primaryError
+        val finalErr = lastError
+        if (firstErr != null && finalErr != null && firstErr !== finalErr) {
+            val combinedMsg = "Selected model '$primaryModelId' failed (${firstErr.message}); fallback also failed (${finalErr.message}). Check API key & billing/quota in Key settings."
+            val code = (finalErr as? GeminiApiException)?.httpCode ?: (firstErr as? GeminiApiException)?.httpCode ?: 503
+            throw GeminiApiException(code, combinedMsg)
+        }
+        throw finalErr ?: firstErr ?: GeminiApiException(503, "All Gemini models are unavailable or busy right now.")
     }
 
     private suspend fun appendLiveGeminiCandidates(
@@ -1378,6 +1395,10 @@ class GeminiCodeAssistant {
                     repo = call.args.optString("repo"),
                     branch = call.args.optString("branch", "main"),
                 )
+                "github_list_branches" -> executor.githubListBranches(
+                    owner = call.args.optString("owner"),
+                    repo = call.args.optString("repo"),
+                )
                 "github_list_repo_files" -> executor.githubListRepoFiles(
                     owner = call.args.optString("owner"),
                     repo = call.args.optString("repo"),
@@ -1389,11 +1410,32 @@ class GeminiCodeAssistant {
                     repo = call.args.optString("repo"),
                     branch = call.args.optString("branch"),
                 )
+                "github_upload_file" -> executor.githubUploadFile(
+                    remotePath = call.args.optString("remote_path"),
+                    localPath = call.args.optString("local_path"),
+                    content = call.args.optString("content"),
+                    commitMessage = call.args.optString("commit_message"),
+                )
+                "github_download_file" -> executor.githubDownloadFile(
+                    remotePath = call.args.optString("remote_path"),
+                    localPath = call.args.optString("local_path"),
+                    owner = call.args.optString("owner"),
+                    repo = call.args.optString("repo"),
+                    branch = call.args.optString("branch"),
+                )
                 "github_pull_changes" -> executor.githubPullChanges()
                 "github_push_changes" -> executor.githubPushChanges(
                     commitMessage = call.args.optString("commit_message"),
                 )
                 "github_trigger_cloud_build" -> executor.githubTriggerCloudBuild()
+                "github_list_workflow_runs" -> executor.githubListWorkflowRuns()
+                "github_get_workflow_logs" -> executor.githubGetWorkflowLogs(
+                    runId = call.args.optLong("run_id", 0L),
+                )
+                "github_rerun_workflow" -> executor.githubRerunWorkflow(
+                    runId = call.args.optLong("run_id", 0L),
+                    failedOnly = call.args.optBoolean("failed_only", false),
+                )
                 else -> AgentToolResult(
                     success = false,
                     stepDetail = "Unknown tool '${call.name}'",
@@ -1412,7 +1454,7 @@ class GeminiCodeAssistant {
     }
 
     private fun describeToolCall(name: String, args: JSONObject): String {
-        val path = args.optString("path").ifBlank { "file" }
+        val path = args.optString("path").ifBlank { args.optString("remote_path").ifBlank { "file" } }
         return when (name) {
             "list_files" -> "Listing project files"
             "read_file" -> "Reading $path"
@@ -1426,11 +1468,17 @@ class GeminiCodeAssistant {
             "github_list_repos" -> "Listing GitHub repositories"
             "github_create_repo" -> "Creating GitHub repository ${args.optString("name")}"
             "github_link_repo" -> "Linking GitHub repo ${args.optString("owner")}/${args.optString("repo")}"
+            "github_list_branches" -> "Listing GitHub branches"
             "github_list_repo_files" -> "Browsing GitHub repo files"
             "github_read_file" -> "Reading GitHub file $path"
+            "github_upload_file" -> "Uploading $path to GitHub"
+            "github_download_file" -> "Downloading $path from GitHub"
             "github_pull_changes" -> "Pulling changes from GitHub"
             "github_push_changes" -> "Pushing changes to GitHub"
             "github_trigger_cloud_build" -> "Triggering GitHub Actions Cloud Build"
+            "github_list_workflow_runs" -> "Fetching GitHub Actions runs"
+            "github_get_workflow_logs" -> "Inspecting GitHub Actions logs"
+            "github_rerun_workflow" -> "Rerunning GitHub Actions workflow"
             else -> "Running $name"
         }
     }
@@ -1680,7 +1728,7 @@ class GeminiCodeAssistant {
             - Key project files are pre-loaded in the prompt. Jump straight to edit_file or write_file!
             - Batch independent tool calls together whenever possible.
             - Project & Build tools: list_files, read_file, write_file, edit_file, delete_file, search_files, build_apk, build_aab.
-            - Full GitHub & Cloud CI tools: github_status, github_list_repos, github_create_repo, github_link_repo, github_list_repo_files, github_read_file, github_pull_changes, github_push_changes, github_trigger_cloud_build.
+            - Full GitHub & Cloud CI tools: github_status, github_list_repos, github_create_repo, github_link_repo, github_list_branches, github_list_repo_files, github_read_file, github_upload_file, github_download_file, github_pull_changes, github_push_changes, github_trigger_cloud_build, github_list_workflow_runs, github_get_workflow_logs, github_rerun_workflow.
             - Live Emulator execution: Custom `View` subclasses overriding `onDraw(Canvas)` / `draw(Canvas)`, `SurfaceView` (`SurfaceHolder` `lockCanvas`/`unlockCanvasAndPost`), `onTouchEvent(MotionEvent)` (including `getPointerCount`/`getPointerId`), and `Handler.postDelayed` 60fps loops, plus XML layouts (`res/layout/*.xml` including XML-inflated custom Views & `@+id/*` -> `R.id.*`), `LinearLayout`/`FrameLayout`/`GridLayout`, `Button`, `TextView`, `EditText`, and `AlertDialog` execute live inside the DroidForge VM Emulator!
             - Offline & >5 GB App/Game Architecture: DroidForge supports Multi-DEX (`classes.dex`, `classes2.dex`...), `res/layout/*.xml`, `res/drawable/*`, `libs/*.jar`, native `.so` libraries under `lib/<abi>/` or `jniLibs/<abi>/`, and streaming 2-pass `.aab` signing (`build_aab`) + ZIP64 packaging. Remember Android OS `PackageInstaller` caps a single `.apk` at ~4 GB, whereas `.aab` bundles, Play Asset Delivery, Cloud Gradle CI (`github_trigger_cloud_build`), and runtime asset/JRE downloaders (e.g., PojavLauncher-style Minecraft Java Edition launchers with runtime OpenJDK + LWJGL + asset/version manifest fetchers & virtual controls) handle >5 GB payloads cleanly!
             - Prefer classic Android SDK APIs (`android.app.Activity`, `android.view.*`, `android.widget.*`, `android.graphics.*`, `java.*`) unless building an external Gradle project for GitHub Cloud CI.
@@ -1726,23 +1774,25 @@ class GeminiCodeAssistant {
     private fun buildToolDeclarations(): JSONArray {
         val declarations = JSONArray().apply {
             ProviderApiClient.buildSharedToolSpecs().forEach { (name, desc, schema) ->
-                val upperSchema = JSONObject(schema.toString()).apply {
-                    put("type", "OBJECT")
-                    optJSONObject("properties")?.let { props ->
-                        props.keys().forEach { k ->
-                            props.optJSONObject(k)?.let { propObj ->
-                                val t = propObj.optString("type", "string").uppercase()
-                                propObj.put("type", t)
+                val rawProps = schema.optJSONObject("properties")
+                val decl = JSONObject()
+                    .put("name", name)
+                    .put("description", desc)
+                if (rawProps != null && rawProps.length() > 0) {
+                    val upperSchema = JSONObject(schema.toString()).apply {
+                        put("type", "OBJECT")
+                        optJSONObject("properties")?.let { props ->
+                            props.keys().forEach { k ->
+                                props.optJSONObject(k)?.let { propObj ->
+                                    val t = propObj.optString("type", "string").uppercase()
+                                    propObj.put("type", t)
+                                }
                             }
                         }
                     }
+                    decl.put("parameters", upperSchema)
                 }
-                put(
-                    JSONObject()
-                        .put("name", name)
-                        .put("description", desc)
-                        .put("parameters", upperSchema),
-                )
+                put(decl)
             }
         }
         return JSONArray().put(JSONObject().put("functionDeclarations", declarations))
@@ -1910,14 +1960,17 @@ class GeminiCodeAssistant {
                 }
                 return JSONObject().put("thinkingBudget", budget)
             }
-            // Gemini 3+ series uses thinkingLevel presets
-            val isPro = id.contains("pro") || id.contains("hydrogen")
-            val level = when (mode) {
-                AiThinkingMode.FAST -> if (isPro) "low" else "minimal"
-                AiThinkingMode.BALANCED -> "medium"
-                AiThinkingMode.DEEP -> "high"
+            // Only verified Gemini 3 models use thinkingLevel presets; omit on unknown/custom model IDs so they use native defaults
+            if (id.contains("gemini-3")) {
+                val isPro = id.contains("pro")
+                val level = when (mode) {
+                    AiThinkingMode.FAST -> if (isPro) "low" else "minimal"
+                    AiThinkingMode.BALANCED -> "medium"
+                    AiThinkingMode.DEEP -> "high"
+                }
+                return JSONObject().put("thinkingLevel", level)
             }
-            return JSONObject().put("thinkingLevel", level)
+            return null
         }
 
         internal fun appendRawPart(target: MutableList<JSONObject>, incoming: JSONObject) {

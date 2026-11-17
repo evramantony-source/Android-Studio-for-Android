@@ -638,20 +638,9 @@ object AiModelsCatalog {
         return merged.values.toList()
     }
 
-    private val LEGACY_UNAVAILABLE_GEMINI_MODELS = setOf(
-        "gemini-4-hydrogen",
-        "gemini-3.8-flash",
-        "gemini-3.6-flash",
-        "gemini-3.5-flash-lite",
-        "gemini-3.1-flash-lite",
-    )
-
     fun normalizeModelId(provider: AiProvider, rawModelId: String?): String {
         val cleaned = rawModelId.orEmpty().trim().removePrefix("models/")
         if (cleaned.isEmpty()) return provider.defaultModelId
-        if (provider == AiProvider.GEMINI && cleaned.lowercase() in LEGACY_UNAVAILABLE_GEMINI_MODELS) {
-            return GEMINI_MODEL_ID
-        }
         return cleaned
     }
 
@@ -660,10 +649,10 @@ object AiModelsCatalog {
         val pool = when (provider) {
             AiProvider.GEMINI -> listOf(
                 "gemini-2.5-flash",
-                "gemini-2.0-flash",
                 "gemini-2.5-flash-lite",
-                "gemini-2.0-flash-lite",
+                "gemini-2.0-flash",
                 "gemini-2.5-pro",
+                "gemini-2.0-flash-lite",
                 "gemini-3-flash-preview",
             )
             AiProvider.OPENAI -> listOf(

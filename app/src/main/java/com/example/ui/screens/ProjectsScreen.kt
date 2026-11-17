@@ -137,6 +137,7 @@ fun ProjectsScreen(
     onConnectGitHub: (String) -> Unit = {},
     onDisconnectGitHub: () -> Unit = {},
     onRefreshGitHubRepos: () -> Unit = {},
+    onCloneGitHubRepo: (GitHubRepoSummary) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var createDialogTemplate by remember { mutableStateOf<ProjectTemplate?>(null) }
@@ -202,6 +203,20 @@ fun ProjectsScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { showGitHubDialog = true },
+                        modifier = Modifier.testTag("home_github_hub_button"),
+                    ) {
+                        Icon(
+                            Icons.Default.CloudUpload,
+                            contentDescription = "Open GitHub Hub",
+                            tint = if (githubUser.isNotBlank()) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                    }
                     IconButton(
                         onClick = { showKeysDialog = true },
                         modifier = Modifier.testTag("home_ai_keys_button"),
@@ -694,6 +709,7 @@ fun ProjectsScreen(
             onRefreshRepos = onRefreshGitHubRepos,
             onCreateAndLinkRepo = { _, _, _ -> },
             onLinkExistingRepo = { _, _, _ -> },
+            onCloneRepoAsProject = onCloneGitHubRepo,
             onPushProject = {},
             onPullProject = {},
             onScaffoldGradleCi = {},

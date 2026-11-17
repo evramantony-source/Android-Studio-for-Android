@@ -46,6 +46,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,6 +63,7 @@ import com.example.ai.AiProvider
 import com.example.ai.AiUsageSummary
 import com.example.ai.GeminiCodeAssistant
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import kotlinx.coroutines.launch
 import java.text.NumberFormat
 import java.util.Locale
 
@@ -73,6 +75,8 @@ fun ProviderKeysDialog(
     onSaveConfig: (provider: AiProvider, apiKey: String, modelId: String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var selectedProvider by remember(initialProvider) { mutableStateOf(initialProvider) }
     var keyInputs by remember(providerApiKeys) {
         mutableStateOf(
@@ -80,6 +84,8 @@ fun ProviderKeysDialog(
         )
     }
     var revealKey by remember { mutableStateOf(false) }
+    var isTestingKey by remember { mutableStateOf(false) }
+    var keyTestStatus by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
 
     val activeKey = keyInputs[selectedProvider].orEmpty()
     val hasBuiltInGemini = selectedProvider == AiProvider.GEMINI && GeminiCodeAssistant.hasBuiltInApiKey()
@@ -114,7 +120,10 @@ fun ProviderKeysDialog(
                         }
                         FilterChip(
                             selected = selectedProvider == provider,
-                            onClick = { selectedProvider = provider },
+                            onClick = {
+                                selectedProvider = provider
+                                keyTestStatus = null
+                            },
                             label = {
                                 Text(
                                     text = if (configured) "${provider.shortName} • Ready" else provider.shortName,
@@ -131,7 +140,7 @@ fun ProviderKeysDialog(
                         selectedProvider == AiProvider.GEMINI && activeKey.isBlank() && hasBuiltInGemini ->
                             "Using the built-in GEMINI_API_KEY configured at build time. Paste a custom Google AI Studio key below to override it."
                         selectedProvider == AiProvider.GEMINI ->
-                            "Google AI Studio API key for Gemini 2.5, Gemini 2.0, and Gemini 3 models. Saved locally on this device."
+                            "Google AI Studio API key for Gemini models. Saved locally on this device."
                         selectedProvider == AiProvider.OPENAI ->
                             "OpenAI API key (sk-...) for GPT-6, GPT-5, GPT-4.5, GPT-4.1, GPT-4o, o4-mini, o3, and o1 models."
                         else ->
@@ -145,6 +154,7 @@ fun ProviderKeysDialog(
                     value = activeKey,
                     onValueChange = { next ->
                         keyInputs = keyInputs + (selectedProvider to next)
+                        keyTestStatus = null
                     },
                     label = { Text("${selectedProvider.shortName} API Key (${selectedProvider.keyHint})") },
                     singleLine = true,
@@ -161,6 +171,87 @@ fun ProviderKeysDialog(
                         .fillMaxWidth()
                         .testTag("provider_api_key_input"),
                 )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            val effectiveKey = when (selectedProvider) {
+                                AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(activeKey)
+                                else -> activeKey.trim()
+                            }
+                            if (effectiveKey.isBlank()) {
+                                keyTestStatus = false to "Enter a ${selectedProvider.shortName} key first."
+                                return@OutlinedButton
+                            }
+                            isTestingKey = true
+                            keyTestStatus = null
+                            scope.launch {
+                                val res = AiModelsCatalog.fetchLiveModels(selectedProvider, effectiveKey)
+                                isTestingKey = false
+                                keyTestStatus = res.fold(
+                                    onSuccess = { list ->
+                                        val hasSelected = list.any { it.id == currentModel }
+                                        val note = if (hasSelected) " (includes $currentModel)" else ""
+                                        true to "Verified! Found ${list.size} live ${selectedProvider.shortName} model(s)$note."
+                                    },
+                                    onFailure = { err ->
+                                        false to (err.localizedMessage ?: "Key verification failed.")
+                                    },
+                                )
+                            }
+                        },
+                        enabled = !isTestingKey,
+                        modifier = Modifier.testTag("test_provider_key_button"),
+                    ) {
+                        if (isTestingKey) {
+                            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(6.dp))
+                        } else {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                        }
+                        Text("Verify Key")
+                    }
+
+                    if (selectedProvider == AiProvider.GEMINI) {
+                        AssistChip(
+                            onClick = {
+                                runCatching {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey")),
+                                    )
+                                }
+                            },
+                            label = { Text("Get Key") },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.AutoMirrored.Filled.OpenInNew,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(15.dp),
+                                )
+                            },
+                        )
+                    }
+                }
+
+                keyTestStatus?.let { (ok, msg) ->
+                    Surface(
+                        color = if (ok) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.errorContainer,
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = msg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (ok) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(10.dp),
+                        )
+                    }
+                }
 
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceContainerHigh,

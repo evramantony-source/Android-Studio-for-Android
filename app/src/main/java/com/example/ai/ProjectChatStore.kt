@@ -83,15 +83,27 @@ interface ProjectToolExecutor {
         AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
     suspend fun githubLinkRepo(owner: String, repo: String, branch: String = "main"): AgentToolResult =
         AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubListBranches(owner: String, repo: String): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
     suspend fun githubListRepoFiles(owner: String, repo: String, branch: String): AgentToolResult =
         AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
     suspend fun githubReadFile(path: String, owner: String, repo: String, branch: String): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubUploadFile(remotePath: String, localPath: String, content: String, commitMessage: String): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubDownloadFile(remotePath: String, localPath: String, owner: String, repo: String, branch: String): AgentToolResult =
         AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
     suspend fun githubPullChanges(): AgentToolResult =
         AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
     suspend fun githubPushChanges(commitMessage: String): AgentToolResult =
         AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
     suspend fun githubTriggerCloudBuild(): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubListWorkflowRuns(): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubGetWorkflowLogs(runId: Long): AgentToolResult =
+        AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
+    suspend fun githubRerunWorkflow(runId: Long, failedOnly: Boolean): AgentToolResult =
         AgentToolResult(false, "GitHub unavailable", JSONObject().put("error", "Not implemented"))
 }
 

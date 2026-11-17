@@ -26,8 +26,12 @@ import com.example.compiler.KeystoreManager
 import com.example.compiler.OfflineApkBuilder
 import com.example.data.GitHubPendingChange
 import com.example.data.ProjectRepository
+import com.example.github.GitHubBranch
 import com.example.github.GitHubClient
 import com.example.github.GitHubRepoSummary
+import com.example.github.GitHubTreeEntry
+import com.example.github.GitHubWorkflowArtifact
+import com.example.github.GitHubWorkflowJob
 import com.example.github.GitHubWorkflowRun
 import com.example.model.AiAttachment
 import com.example.model.BuildDiagnostic
@@ -67,6 +71,9 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _projects = MutableStateFlow<List<ProjectMetadata>>(emptyList())
     val projects: StateFlow<List<ProjectMetadata>> = _projects.asStateFlow()
+
+    private val _isBootLoading = MutableStateFlow(true)
+    val isBootLoading: StateFlow<Boolean> = _isBootLoading.asStateFlow()
 
     private val _isLoadingProjects = MutableStateFlow(true)
     val isLoadingProjects: StateFlow<Boolean> = _isLoadingProjects.asStateFlow()
@@ -139,6 +146,27 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _githubWorkflowRuns = MutableStateFlow<List<GitHubWorkflowRun>>(emptyList())
     val githubWorkflowRuns: StateFlow<List<GitHubWorkflowRun>> = _githubWorkflowRuns.asStateFlow()
+
+    private val _githubBranches = MutableStateFlow<List<GitHubBranch>>(emptyList())
+    val githubBranches: StateFlow<List<GitHubBranch>> = _githubBranches.asStateFlow()
+
+    private val _githubRemoteFiles = MutableStateFlow<List<GitHubTreeEntry>>(emptyList())
+    val githubRemoteFiles: StateFlow<List<GitHubTreeEntry>> = _githubRemoteFiles.asStateFlow()
+
+    private val _githubWorkflowJobs = MutableStateFlow<List<GitHubWorkflowJob>>(emptyList())
+    val githubWorkflowJobs: StateFlow<List<GitHubWorkflowJob>> = _githubWorkflowJobs.asStateFlow()
+
+    private val _githubSelectedRunLogs = MutableStateFlow("")
+    val githubSelectedRunLogs: StateFlow<String> = _githubSelectedRunLogs.asStateFlow()
+
+    private val _githubWorkflowArtifacts = MutableStateFlow<List<GitHubWorkflowArtifact>>(emptyList())
+    val githubWorkflowArtifacts: StateFlow<List<GitHubWorkflowArtifact>> = _githubWorkflowArtifacts.asStateFlow()
+
+    private val _githubInspectedRunId = MutableStateFlow<Long?>(null)
+    val githubInspectedRunId: StateFlow<Long?> = _githubInspectedRunId.asStateFlow()
+
+    private val _openAiPanelRequest = MutableStateFlow(0L)
+    val openAiPanelRequest: StateFlow<Long> = _openAiPanelRequest.asStateFlow()
 
     private val _isGitHubBusy = MutableStateFlow(false)
     val isGitHubBusy: StateFlow<Boolean> = _isGitHubBusy.asStateFlow()
@@ -214,7 +242,18 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     private var aiJob: Job? = null
 
     init {
-        refreshProjects()
+        viewModelScope.launch {
+            val startMs = System.currentTimeMillis()
+            try {
+                _projects.value = repository.listProjects()
+            } finally {
+                _isLoadingProjects.value = false
+                val elapsed = System.currentTimeMillis() - startMs
+                val remaining = (850L - elapsed).coerceAtLeast(0L)
+                if (remaining > 0L) delay(remaining)
+                _isBootLoading.value = false
+            }
+        }
     }
 
     fun refreshProjects() {
@@ -306,7 +345,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         _activeFilePath.value = initialTabs.firstOrNull()
         _lastBuildResult.value = null
         _liveLogs.value = emptyList()
-        _githubWorkflowRuns.value = emptyList()
+        clearGitHubWorkspaceCaches()
 
         _chatThreads.value = threads
         _activeThreadId.value = firstThread.id
@@ -320,6 +359,16 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun clearGitHubWorkspaceCaches() {
+        _githubWorkflowRuns.value = emptyList()
+        _githubBranches.value = emptyList()
+        _githubRemoteFiles.value = emptyList()
+        _githubWorkflowJobs.value = emptyList()
+        _githubSelectedRunLogs.value = ""
+        _githubWorkflowArtifacts.value = emptyList()
+        _githubInspectedRunId.value = null
+    }
+
     fun closeProject() {
         saveAllImmediately()
         persistActiveThreadMessages()
@@ -329,7 +378,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         _activeFilePath.value = null
         _lastBuildResult.value = null
         _githubPendingChanges.value = emptyList()
-        _githubWorkflowRuns.value = emptyList()
+        clearGitHubWorkspaceCaches()
         refreshProjects()
     }
 
@@ -638,10 +687,14 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveProviderConfig(provider: AiProvider, apiKey: String, modelId: String) {
         viewModelScope.launch {
-            repository.saveProviderConfig(provider, apiKey, modelId)
+            val cleanedKey = apiKey.trim()
+            repository.saveProviderConfig(provider, cleanedKey, modelId)
             repository.saveActiveProvider(provider)
             val cleanModel = modelId.trim().removePrefix("models/").ifBlank { provider.defaultModelId }
             _statusBanner.value = "Saved ${provider.shortName} settings ($cleanModel)."
+            if (cleanedKey.isNotBlank()) {
+                refreshLiveModels(provider, explicitApiKey = cleanedKey)
+            }
         }
     }
 
@@ -649,9 +702,9 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         saveProviderConfig(AiProvider.GEMINI, apiKey, modelId)
     }
 
-    fun refreshLiveModels(provider: AiProvider) {
+    fun refreshLiveModels(provider: AiProvider, explicitApiKey: String? = null) {
         if (_isFetchingModels.value) return
-        val key = when (provider) {
+        val key = explicitApiKey?.trim()?.takeIf { it.isNotEmpty() } ?: when (provider) {
             AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(providerApiKeys.value[AiProvider.GEMINI].orEmpty())
             else -> providerApiKeys.value[provider].orEmpty()
         }
@@ -852,7 +905,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.saveGitHubAuth("", "")
             _githubRepos.value = emptyList()
-            _githubWorkflowRuns.value = emptyList()
+            clearGitHubWorkspaceCaches()
             _statusBanner.value = "Disconnected GitHub account."
         }
     }
@@ -989,7 +1042,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 link = link,
                 targetDir = repository.getProjectDir(project.id),
             )
-            res.onSuccess { count ->
+            res.onSuccess { pulledHashes ->
                 _projectFiles.value = repository.loadProjectFiles(project.id)
                 val hashes = repository.collectProjectFileHashes(project.id)
                 val newLink = link.copy(
@@ -1002,7 +1055,8 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                     _projects.value = repository.listProjects()
                     refreshGitHubPendingChangesInternal(updated)
                 }
-                _statusBanner.value = "Pulled $count file(s) from ${link.fullName}."
+                _statusBanner.value = "Pulled ${pulledHashes.size} file(s) from ${link.fullName}."
+                refreshGitHubRemoteFiles()
             }.onFailure { err ->
                 _statusBanner.value = "Pull failed: ${err.localizedMessage}"
             }
@@ -1075,6 +1129,332 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
             GitHubClient.listWorkflowRuns(token, link).onSuccess { runs ->
                 _githubWorkflowRuns.value = runs
             }
+        }
+    }
+
+    fun refreshGitHubBranches(owner: String? = null, repo: String? = null) {
+        val link = _activeProject.value?.githubLink
+        val targetOwner = owner?.trim()?.takeIf { it.isNotBlank() } ?: link?.owner.orEmpty()
+        val targetRepo = repo?.trim()?.takeIf { it.isNotBlank() } ?: link?.repo.orEmpty()
+        val token = githubToken.value
+        if (token.isBlank() || targetOwner.isBlank() || targetRepo.isBlank()) return
+        viewModelScope.launch {
+            GitHubClient.listBranches(token, targetOwner, targetRepo).onSuccess { branches ->
+                _githubBranches.value = branches
+            }
+        }
+    }
+
+    fun switchGitHubBranch(branch: String) {
+        val project = _activeProject.value ?: return
+        val link = project.githubLink ?: return
+        val cleanBranch = branch.trim().ifBlank { return }
+        viewModelScope.launch {
+            val updated = repository.saveGitHubRepoLink(project.id, link.copy(branch = cleanBranch))
+            if (updated != null) {
+                _activeProject.value = updated
+                _projects.value = repository.listProjects()
+                refreshGitHubPendingChangesInternal(updated)
+                _statusBanner.value = "Switched GitHub branch to $cleanBranch."
+                refreshGitHubRemoteFiles()
+                refreshGitHubWorkflowRuns()
+            }
+        }
+    }
+
+    fun createGitHubBranch(newBranch: String) {
+        val project = _activeProject.value ?: return
+        val link = project.githubLink ?: return
+        val token = githubToken.value
+        if (token.isBlank()) {
+            _statusBanner.value = "Connect a GitHub token first."
+            return
+        }
+        viewModelScope.launch {
+            _isGitHubBusy.value = true
+            GitHubClient.createBranch(token, link.owner, link.repo, newBranch, link.branch)
+                .onSuccess { created ->
+                    val updated = repository.saveGitHubRepoLink(project.id, link.copy(branch = created.name))
+                    if (updated != null) {
+                        _activeProject.value = updated
+                        _projects.value = repository.listProjects()
+                    }
+                    refreshGitHubBranches()
+                    refreshGitHubRemoteFiles()
+                    _statusBanner.value = "Created & switched to branch ${created.name}."
+                }.onFailure { err ->
+                    _statusBanner.value = "Create branch failed: ${err.localizedMessage}"
+                }
+            _isGitHubBusy.value = false
+        }
+    }
+
+    fun refreshGitHubRemoteFiles() {
+        val link = _activeProject.value?.githubLink ?: return
+        val token = githubToken.value
+        if (token.isBlank()) return
+        viewModelScope.launch {
+            GitHubClient.listRepoFiles(token, link.owner, link.repo, link.branch).onSuccess { entries ->
+                _githubRemoteFiles.value = entries.filter { it.type == "blob" && !it.path.startsWith(".git/") }
+            }
+        }
+    }
+
+    fun downloadRemoteFileToProject(remotePath: String, localPath: String = remotePath) {
+        val project = _activeProject.value ?: return
+        val link = project.githubLink ?: return
+        val token = githubToken.value
+        if (token.isBlank()) {
+            _statusBanner.value = "Connect a GitHub token first."
+            return
+        }
+        viewModelScope.launch {
+            _isGitHubBusy.value = true
+            GitHubClient.downloadSingleFileBytes(token, link.owner, link.repo, remotePath, link.branch)
+                .onSuccess { bytes ->
+                    val cleanLocal = localPath.trim().trimStart('/').ifBlank { remotePath.trimStart('/') }
+                    if (repository.isBinaryPath(cleanLocal)) {
+                        repository.saveBinaryFile(project.id, cleanLocal, bytes)
+                    } else {
+                        repository.saveFile(project.id, cleanLocal, bytes.toString(Charsets.UTF_8))
+                    }
+                    _projectFiles.value = repository.loadProjectFiles(project.id)
+                    if (!repository.isBinaryPath(cleanLocal)) openFile(cleanLocal)
+                    refreshGitHubPendingChangesInternal(project)
+                    _statusBanner.value = "Downloaded $cleanLocal from ${link.fullName}."
+                }.onFailure { err ->
+                    _statusBanner.value = "Download failed: ${err.localizedMessage}"
+                }
+            _isGitHubBusy.value = false
+        }
+    }
+
+    fun uploadProjectFileToGitHub(
+        localPath: String,
+        remotePath: String = localPath,
+        commitMessage: String = "",
+    ) {
+        val project = _activeProject.value ?: return
+        val link = project.githubLink ?: run {
+            _statusBanner.value = "Link a GitHub repository first."
+            return
+        }
+        val token = githubToken.value
+        if (token.isBlank()) {
+            _statusBanner.value = "Connect a GitHub token first."
+            return
+        }
+        viewModelScope.launch {
+            _isGitHubBusy.value = true
+            _projectFiles.value.find { it.relativePath == localPath && !it.isBinary }?.let { inMem ->
+                repository.saveFile(project.id, inMem.relativePath, inMem.content)
+            }
+            val file = repository.resolveProjectFile(project.id, localPath)
+            if (file == null || !file.exists()) {
+                _statusBanner.value = "Local file not found: $localPath"
+                _isGitHubBusy.value = false
+                return@launch
+            }
+            val bytes = withContext(Dispatchers.IO) { file.readBytes() }
+            val msg = commitMessage.trim().ifBlank { "Upload $remotePath from DroidForge Studio" }
+            GitHubClient.uploadSingleFile(token, link, remotePath, bytes, msg)
+                .onSuccess { sha ->
+                    _statusBanner.value = "Uploaded $remotePath ($sha)."
+                    refreshGitHubRemoteFiles()
+                }.onFailure { err ->
+                    _statusBanner.value = "Upload failed: ${err.localizedMessage}"
+                }
+            _isGitHubBusy.value = false
+        }
+    }
+
+    fun uploadDeviceFileUriToGitHub(uri: Uri, remoteDir: String = "") {
+        val project = _activeProject.value
+        val link = project?.githubLink ?: run {
+            _statusBanner.value = "Link a GitHub repository first."
+            return
+        }
+        val token = githubToken.value
+        if (token.isBlank()) {
+            _statusBanner.value = "Connect a GitHub token first."
+            return
+        }
+        viewModelScope.launch {
+            _isGitHubBusy.value = true
+            val payload = withContext(Dispatchers.IO) {
+                runCatching {
+                    val resolver = getApplication<Application>().contentResolver
+                    val name = (resolveDisplayName(uri) ?: "upload_${System.currentTimeMillis()}")
+                        .replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: error("Could not read selected file")
+                    name to bytes
+                }
+            }
+            payload.onSuccess { (name, bytes) ->
+                val prefix = remoteDir.trim().trim('/').takeIf { it.isNotEmpty() }
+                val remotePath = if (prefix != null) "$prefix/$name" else name
+                GitHubClient.uploadSingleFile(token, link, remotePath, bytes, "Upload $remotePath via DroidForge Studio")
+                    .onSuccess { sha ->
+                        _statusBanner.value = "Uploaded $remotePath to ${link.fullName} ($sha)."
+                        refreshGitHubRemoteFiles()
+                    }.onFailure { err ->
+                        _statusBanner.value = "GitHub upload failed: ${err.localizedMessage}"
+                    }
+            }.onFailure { err ->
+                _statusBanner.value = "Could not read file: ${err.localizedMessage}"
+            }
+            _isGitHubBusy.value = false
+        }
+    }
+
+    fun cloneGitHubRepoAsProject(repo: GitHubRepoSummary) {
+        val token = githubToken.value
+        if (token.isBlank()) {
+            _statusBanner.value = "Connect a GitHub token first."
+            return
+        }
+        viewModelScope.launch {
+            _isGitHubBusy.value = true
+            _openingProjectName.value = repo.name
+            try {
+                val link = GitHubRepoLink(
+                    owner = repo.owner,
+                    repo = repo.name,
+                    branch = repo.defaultBranch.ifBlank { "main" },
+                )
+                val (stub, projectDir) = repository.createClonedProjectStub(repo.name, link)
+                val pullRes = GitHubClient.pullRepository(token, link, projectDir)
+                pullRes.fold(
+                    onSuccess = { pulledHashes ->
+                        val finalized = repository.finalizeClonedProject(stub.id, link, pulledHashes) ?: stub
+                        _projects.value = repository.listProjects()
+                        openProjectInternal(finalized)
+                        _statusBanner.value = "Cloned ${repo.fullName} (${pulledHashes.size} files)."
+                    },
+                    onFailure = { err ->
+                        repository.deleteProject(stub.id)
+                        _statusBanner.value = "Clone failed: ${err.localizedMessage}"
+                    },
+                )
+            } finally {
+                _openingProjectName.value = null
+                _isGitHubBusy.value = false
+            }
+        }
+    }
+
+    fun inspectWorkflowRun(runId: Long) {
+        val link = _activeProject.value?.githubLink ?: return
+        val token = githubToken.value
+        if (token.isBlank()) return
+        viewModelScope.launch {
+            _isGitHubBusy.value = true
+            _githubInspectedRunId.value = runId
+            _githubWorkflowJobs.value = emptyList()
+            _githubSelectedRunLogs.value = ""
+            _githubWorkflowArtifacts.value = emptyList()
+
+            val jobs = GitHubClient.listWorkflowJobs(token, link, runId).getOrDefault(emptyList())
+            _githubWorkflowJobs.value = jobs
+            val artifacts = GitHubClient.listWorkflowArtifacts(token, link, runId).getOrDefault(emptyList())
+            _githubWorkflowArtifacts.value = artifacts
+
+            val focusJob = jobs.firstOrNull { it.conclusion == "failure" || it.conclusion == "cancelled" }
+                ?: jobs.firstOrNull()
+            if (focusJob != null) {
+                GitHubClient.fetchJobLogs(token, link, focusJob.id).onSuccess { logText ->
+                    _githubSelectedRunLogs.value = logText
+                }.onFailure { err ->
+                    _githubSelectedRunLogs.value = "Could not load logs: ${err.localizedMessage}"
+                }
+            } else {
+                _githubSelectedRunLogs.value = "No job logs reported yet for run #$runId."
+            }
+            _isGitHubBusy.value = false
+        }
+    }
+
+    fun rerunWorkflowRun(runId: Long, failedOnly: Boolean = false) {
+        val link = _activeProject.value?.githubLink ?: return
+        val token = githubToken.value
+        if (token.isBlank()) return
+        viewModelScope.launch {
+            _isGitHubBusy.value = true
+            GitHubClient.rerunWorkflow(token, link, runId, failedOnly).onSuccess {
+                _statusBanner.value = if (failedOnly) "Re-running failed jobs (#$runId)." else "Re-running workflow (#$runId)."
+                refreshGitHubWorkflowRuns()
+            }.onFailure { err ->
+                _statusBanner.value = "Rerun failed: ${err.localizedMessage}"
+            }
+            _isGitHubBusy.value = false
+        }
+    }
+
+    fun downloadWorkflowArtifact(artifactId: Long) {
+        val project = _activeProject.value ?: return
+        val link = project.githubLink ?: return
+        val token = githubToken.value
+        if (token.isBlank()) return
+        viewModelScope.launch {
+            _isGitHubBusy.value = true
+            val destDir = File(repository.getProjectDir(project.id), "build/cloud-outputs")
+            GitHubClient.downloadArtifactZipAndExtract(token, link, artifactId, destDir).onSuccess { files ->
+                val summary = files.take(3).joinToString(", ") { it.name }
+                _statusBanner.value = "Downloaded ${files.size} artifact file(s) to build/cloud-outputs/: $summary"
+            }.onFailure { err ->
+                _statusBanner.value = "Artifact download failed: ${err.localizedMessage}"
+            }
+            _isGitHubBusy.value = false
+        }
+    }
+
+    fun askAiToFixWorkflowRun(run: GitHubWorkflowRun) {
+        val project = _activeProject.value ?: return
+        val link = project.githubLink ?: return
+        val token = githubToken.value
+        if (token.isBlank()) {
+            _statusBanner.value = "Connect GitHub first so AI can inspect workflow logs."
+            return
+        }
+        viewModelScope.launch {
+            _isGitHubBusy.value = true
+            val jobs = if (_githubInspectedRunId.value == run.id && _githubWorkflowJobs.value.isNotEmpty()) {
+                _githubWorkflowJobs.value
+            } else {
+                GitHubClient.listWorkflowJobs(token, link, run.id).getOrDefault(emptyList())
+            }
+            val failedJob = jobs.firstOrNull { it.conclusion == "failure" || it.conclusion == "cancelled" }
+                ?: jobs.firstOrNull()
+            val logsText = if (_githubInspectedRunId.value == run.id && _githubSelectedRunLogs.value.isNotBlank()) {
+                _githubSelectedRunLogs.value
+            } else if (failedJob != null) {
+                GitHubClient.fetchJobLogs(token, link, failedJob.id).getOrDefault("")
+            } else {
+                ""
+            }
+            _githubInspectedRunId.value = run.id
+            _githubWorkflowJobs.value = jobs
+            if (logsText.isNotBlank()) _githubSelectedRunLogs.value = logsText
+            _isGitHubBusy.value = false
+
+            val failedSteps = failedJob?.steps
+                ?.filter { it.conclusion == "failure" }
+                ?.joinToString(", ") { "#${it.number} ${it.name}" }
+                .orEmpty()
+            val logTail = logsText.takeLast(8_000).ifBlank { "(Logs unavailable; inspect files and run github_get_workflow_logs tool for run ${run.id}.)" }
+            val prompt = buildString {
+                appendLine("Fix the failed GitHub Actions workflow run #${run.runNumber.takeIf { it > 0 } ?: run.id} (${run.name}) on repo ${link.fullName} (branch ${link.branch}).")
+                appendLine("Status: ${run.status}, Conclusion: ${run.conclusion}")
+                if (failedSteps.isNotBlank()) appendLine("Failed steps: $failedSteps")
+                appendLine("")
+                appendLine("=== CI Log Tail ===")
+                appendLine(logTail)
+                appendLine("")
+                appendLine("Inspect the project files, fix the root cause in our workspace, run github_push_changes to push the fix, and trigger or rerun the workflow if appropriate.")
+            }
+            _openAiPanelRequest.value = System.currentTimeMillis()
+            askGemini(prompt)
         }
     }
 
@@ -1878,7 +2258,8 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 targetDir = repository.getProjectDir(projectId),
             )
             return res.fold(
-                onSuccess = { count ->
+                onSuccess = { pulledHashes ->
+                    val count = pulledHashes.size
                     val loaded = repository.loadProjectFiles(projectId)
                     _projectFiles.value = loaded
                     val currentActive = _activeFilePath.value
@@ -1910,6 +2291,249 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                         success = false,
                         stepDetail = "Pull failed",
                         payload = JSONObject().put("error", err.localizedMessage ?: "Pull failed"),
+                    )
+                },
+            )
+        }
+
+        override suspend fun githubListBranches(owner: String, repo: String): AgentToolResult {
+            val token = githubToken.value
+            val meta = _activeProject.value
+            val resolvedOwner = owner.trim().ifBlank { meta?.githubLink?.owner.orEmpty() }
+            val resolvedRepo = repo.trim().ifBlank { meta?.githubLink?.repo.orEmpty() }
+            if (resolvedOwner.isBlank() || resolvedRepo.isBlank()) {
+                return AgentToolResult(
+                    success = false,
+                    stepDetail = "No repository specified",
+                    payload = JSONObject().put("error", "Specify owner & repo or link a repository first."),
+                )
+            }
+            return GitHubClient.listBranches(token, resolvedOwner, resolvedRepo).fold(
+                onSuccess = { branches ->
+                    _githubBranches.value = branches
+                    val arr = JSONArray().apply { branches.forEach { put(it.name) } }
+                    AgentToolResult(
+                        success = true,
+                        stepDetail = "${branches.size} branch(es)",
+                        payload = JSONObject().put("branches", arr),
+                        detailedOutput = branches.joinToString("\n") { "${it.name} (${it.sha.take(7)})" },
+                    )
+                },
+                onFailure = { err ->
+                    AgentToolResult(
+                        success = false,
+                        stepDetail = "List branches failed",
+                        payload = JSONObject().put("error", err.localizedMessage ?: "Unknown error"),
+                    )
+                },
+            )
+        }
+
+        override suspend fun githubUploadFile(
+            remotePath: String,
+            localPath: String,
+            content: String,
+            commitMessage: String,
+        ): AgentToolResult {
+            flushInMemoryFiles()
+            val token = githubToken.value
+            val link = _activeProject.value?.githubLink
+            if (token.isBlank() || link == null) {
+                return AgentToolResult(
+                    success = false,
+                    stepDetail = "GitHub upload not configured",
+                    payload = JSONObject().put("error", "Connect GitHub PAT and link a repository first."),
+                )
+            }
+            val cleanRemote = remotePath.trim().trimStart('/').ifBlank { localPath.trim().trimStart('/') }
+            val bytes = when {
+                localPath.isNotBlank() -> {
+                    val f = repository.resolveProjectFile(projectId, localPath)
+                    if (f == null || !f.exists()) {
+                        return AgentToolResult(
+                            success = false,
+                            stepDetail = "Local file missing",
+                            payload = JSONObject().put("error", "Local file not found: $localPath"),
+                        )
+                    }
+                    withContext(Dispatchers.IO) { f.readBytes() }
+                }
+                else -> content.toByteArray(Charsets.UTF_8)
+            }
+            return GitHubClient.uploadSingleFile(token, link, cleanRemote, bytes, commitMessage).fold(
+                onSuccess = { sha ->
+                    AgentToolResult(
+                        success = true,
+                        stepDetail = "Uploaded $cleanRemote ($sha)",
+                        payload = JSONObject().put("remotePath", cleanRemote).put("commitSha", sha),
+                        detailedOutput = "Uploaded $cleanRemote to ${link.fullName}@${link.branch}",
+                    )
+                },
+                onFailure = { err ->
+                    AgentToolResult(
+                        success = false,
+                        stepDetail = "Upload failed",
+                        payload = JSONObject().put("error", err.localizedMessage ?: "Unknown error"),
+                    )
+                },
+            )
+        }
+
+        override suspend fun githubDownloadFile(
+            remotePath: String,
+            localPath: String,
+            owner: String,
+            repo: String,
+            branch: String,
+        ): AgentToolResult {
+            val token = githubToken.value
+            val link = _activeProject.value?.githubLink
+            val resolvedOwner = owner.trim().ifBlank { link?.owner.orEmpty() }
+            val resolvedRepo = repo.trim().ifBlank { link?.repo.orEmpty() }
+            val resolvedBranch = branch.trim().ifBlank { link?.branch ?: "main" }
+            if (resolvedOwner.isBlank() || resolvedRepo.isBlank()) {
+                return AgentToolResult(
+                    success = false,
+                    stepDetail = "No repository specified",
+                    payload = JSONObject().put("error", "Specify owner & repo or link a repository first."),
+                )
+            }
+            val cleanLocal = localPath.trim().trimStart('/').ifBlank { remotePath.trim().trimStart('/') }
+            return GitHubClient.downloadSingleFileBytes(token, resolvedOwner, resolvedRepo, remotePath, resolvedBranch).fold(
+                onSuccess = { bytes ->
+                    if (repository.isBinaryPath(cleanLocal)) {
+                        repository.saveBinaryFile(projectId, cleanLocal, bytes)
+                    } else {
+                        repository.saveFile(projectId, cleanLocal, bytes.toString(Charsets.UTF_8))
+                    }
+                    _projectFiles.value = repository.loadProjectFiles(projectId)
+                    refreshGitHubPendingChangesInternal(_activeProject.value)
+                    AgentToolResult(
+                        success = true,
+                        stepDetail = "Downloaded $cleanLocal (${bytes.size} B)",
+                        payload = JSONObject().put("localPath", cleanLocal).put("bytes", bytes.size),
+                        detailedOutput = "Saved $remotePath -> $cleanLocal",
+                    )
+                },
+                onFailure = { err ->
+                    AgentToolResult(
+                        success = false,
+                        stepDetail = "Download failed",
+                        payload = JSONObject().put("error", err.localizedMessage ?: "Unknown error"),
+                    )
+                },
+            )
+        }
+
+        override suspend fun githubListWorkflowRuns(): AgentToolResult {
+            val token = githubToken.value
+            val link = _activeProject.value?.githubLink
+            if (token.isBlank() || link == null) {
+                return AgentToolResult(
+                    success = false,
+                    stepDetail = "GitHub CI not configured",
+                    payload = JSONObject().put("error", "Connect GitHub PAT and link a repository first."),
+                )
+            }
+            return GitHubClient.listWorkflowRuns(token, link).fold(
+                onSuccess = { runs ->
+                    _githubWorkflowRuns.value = runs
+                    val arr = JSONArray().apply {
+                        runs.take(10).forEach { r ->
+                            put(
+                                JSONObject()
+                                    .put("id", r.id)
+                                    .put("runNumber", r.runNumber)
+                                    .put("name", r.name)
+                                    .put("status", r.status)
+                                    .put("conclusion", r.conclusion)
+                                    .put("branch", r.headBranch),
+                            )
+                        }
+                    }
+                    AgentToolResult(
+                        success = true,
+                        stepDetail = "${runs.size} workflow run(s)",
+                        payload = JSONObject().put("runs", arr),
+                        detailedOutput = runs.take(8).joinToString("\n") { "#${it.runNumber} ${it.name}: ${it.status}/${it.conclusion}" },
+                    )
+                },
+                onFailure = { err ->
+                    AgentToolResult(
+                        success = false,
+                        stepDetail = "List workflow runs failed",
+                        payload = JSONObject().put("error", err.localizedMessage ?: "Unknown error"),
+                    )
+                },
+            )
+        }
+
+        override suspend fun githubGetWorkflowLogs(runId: Long): AgentToolResult {
+            val token = githubToken.value
+            val link = _activeProject.value?.githubLink
+            if (token.isBlank() || link == null) {
+                return AgentToolResult(
+                    success = false,
+                    stepDetail = "GitHub CI not configured",
+                    payload = JSONObject().put("error", "Connect GitHub PAT and link a repository first."),
+                )
+            }
+            val jobsRes = GitHubClient.listWorkflowJobs(token, link, runId)
+            return jobsRes.fold(
+                onSuccess = { jobs ->
+                    val focusJob = jobs.firstOrNull { it.conclusion == "failure" || it.conclusion == "cancelled" }
+                        ?: jobs.firstOrNull()
+                    val logText = if (focusJob != null) {
+                        GitHubClient.fetchJobLogs(token, link, focusJob.id).getOrDefault("(No raw logs available yet)")
+                    } else {
+                        "(No jobs found for workflow run $runId)"
+                    }
+                    val trimmed = logText.takeLast(14_000)
+                    AgentToolResult(
+                        success = true,
+                        stepDetail = "Loaded logs for run #$runId",
+                        payload = JSONObject()
+                            .put("runId", runId)
+                            .put("jobName", focusJob?.name.orEmpty())
+                            .put("conclusion", focusJob?.conclusion.orEmpty())
+                            .put("logs", trimmed),
+                        detailedOutput = trimmed.lines().takeLast(25).joinToString("\n"),
+                    )
+                },
+                onFailure = { err ->
+                    AgentToolResult(
+                        success = false,
+                        stepDetail = "Get workflow logs failed",
+                        payload = JSONObject().put("error", err.localizedMessage ?: "Unknown error"),
+                    )
+                },
+            )
+        }
+
+        override suspend fun githubRerunWorkflow(runId: Long, failedOnly: Boolean): AgentToolResult {
+            val token = githubToken.value
+            val link = _activeProject.value?.githubLink
+            if (token.isBlank() || link == null) {
+                return AgentToolResult(
+                    success = false,
+                    stepDetail = "GitHub CI not configured",
+                    payload = JSONObject().put("error", "Connect GitHub PAT and link a repository first."),
+                )
+            }
+            return GitHubClient.rerunWorkflow(token, link, runId, failedOnly).fold(
+                onSuccess = {
+                    AgentToolResult(
+                        success = true,
+                        stepDetail = "Reran workflow #$runId",
+                        payload = JSONObject().put("runId", runId).put("failedOnly", failedOnly),
+                        detailedOutput = "Triggered rerun for workflow run $runId",
+                    )
+                },
+                onFailure = { err ->
+                    AgentToolResult(
+                        success = false,
+                        stepDetail = "Rerun failed",
+                        payload = JSONObject().put("error", err.localizedMessage ?: "Unknown error"),
                     )
                 },
             )

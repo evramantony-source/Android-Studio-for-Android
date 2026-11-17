@@ -31,11 +31,13 @@ class GeminiCodeAssistantTest {
     }
 
     @Test
-    fun normalizeModelId_migratesLegacyUnavailableGeminiIdsToDefault() {
-        assertEquals("gemini-2.5-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-4-hydrogen"))
-        assertEquals("gemini-2.5-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-3.8-flash"))
-        assertEquals("gemini-2.5-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "models/gemini-3.6-flash"))
+    fun normalizeModelId_preservesUserSelectedModelsAndDefaultsBlank() {
+        assertEquals("gemini-4-hydrogen", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-4-hydrogen"))
+        assertEquals("gemini-3.8-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-3.8-flash"))
+        assertEquals("gemini-3.6-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "models/gemini-3.6-flash"))
         assertEquals("gemini-2.5-pro", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-2.5-pro"))
+        assertEquals("gemini-2.5-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, ""))
+        assertEquals("gemini-2.5-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "   "))
     }
 
     @Test
@@ -132,6 +134,17 @@ class GeminiCodeAssistantTest {
         assertTrue(payload.contains("\"edit_file\""))
         assertTrue(payload.contains("\"build_apk\""))
         assertTrue(payload.contains("\"build_aab\""))
+
+        // Verify parameterless tools omit empty "parameters" object
+        val rootJson = JSONObject(payload)
+        val decls = rootJson.getJSONArray("tools").getJSONObject(0).getJSONArray("functionDeclarations")
+        var listFilesDecl: JSONObject? = null
+        for (i in 0 until decls.length()) {
+            val d = decls.getJSONObject(i)
+            if (d.getString("name") == "list_files") listFilesDecl = d
+        }
+        assertTrue("Expected list_files declaration", listFilesDecl != null)
+        assertFalse("Parameterless tool list_files should omit parameters", listFilesDecl!!.has("parameters"))
     }
 
     @Test
@@ -165,6 +178,9 @@ class GeminiCodeAssistantTest {
 
         val g20 = GeminiCodeAssistant.buildThinkingConfigJson("gemini-2.0-flash", AiThinkingMode.FAST)
         assertNull(g20)
+
+        val g4Custom = GeminiCodeAssistant.buildThinkingConfigJson("gemini-4-hydrogen", AiThinkingMode.FAST)
+        assertNull(g4Custom)
     }
 
     @Test
@@ -175,9 +191,10 @@ class GeminiCodeAssistantTest {
         assertTrue(geminiChain.contains("gemini-2.0-flash"))
         assertEquals(geminiChain.distinct().size, geminiChain.size)
 
-        val migratedChain = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, "gemini-4-hydrogen")
-        assertEquals("gemini-2.5-flash", migratedChain.first())
-        assertFalse(migratedChain.contains("gemini-4-hydrogen"))
+        val hydrogenChain = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, "gemini-4-hydrogen")
+        assertEquals("gemini-4-hydrogen", hydrogenChain.first())
+        assertTrue(hydrogenChain.contains("gemini-2.5-flash"))
+        assertTrue(hydrogenChain.contains("gemini-2.0-flash"))
 
         val openAiChain = AiModelsCatalog.fallbackChain(AiProvider.OPENAI, "gpt-6-astra")
         assertEquals("gpt-6-astra", openAiChain.first())
@@ -357,18 +374,24 @@ class GeminiCodeAssistantTest {
     }
 
     @Test
-    fun aiProviderToolSpecsIncludeAllNineGitHubTools() {
+    fun aiProviderToolSpecsIncludeAllFifteenGitHubTools() {
         val toolNames = com.example.ai.ProviderApiClient.buildSharedToolSpecs().map { it.first }.toSet()
         val expectedGitHubTools = listOf(
             "github_status",
             "github_list_repos",
             "github_create_repo",
             "github_link_repo",
+            "github_list_branches",
             "github_list_repo_files",
             "github_read_file",
+            "github_upload_file",
+            "github_download_file",
             "github_pull_changes",
             "github_push_changes",
             "github_trigger_cloud_build",
+            "github_list_workflow_runs",
+            "github_get_workflow_logs",
+            "github_rerun_workflow",
         )
         expectedGitHubTools.forEach { name ->
             assertTrue("Expected AI tool schema '$name'", toolNames.contains(name))

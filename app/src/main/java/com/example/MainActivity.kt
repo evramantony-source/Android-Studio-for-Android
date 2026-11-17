@@ -4,6 +4,9 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,8 +15,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -21,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -31,6 +40,7 @@ import com.example.ui.IdeViewModel
 import com.example.ui.screens.IdeWorkspaceScreen
 import com.example.ui.screens.ProjectsScreen
 import com.example.ui.theme.DroidForgeTheme
+import com.example.ui.theme.JetBrainsMonoFontFamily
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,6 +50,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             val viewModel: IdeViewModel = viewModel()
             val editorSettings by viewModel.editorSettings.collectAsStateWithLifecycle()
+            val isBootLoading by viewModel.isBootLoading.collectAsStateWithLifecycle()
             val projects by viewModel.projects.collectAsStateWithLifecycle()
             val isLoadingProjects by viewModel.isLoadingProjects.collectAsStateWithLifecycle()
             val openingProjectName by viewModel.openingProjectName.collectAsStateWithLifecycle()
@@ -74,128 +85,163 @@ class MainActivity : ComponentActivity() {
             val githubRepos by viewModel.githubRepos.collectAsStateWithLifecycle()
             val githubPendingChanges by viewModel.githubPendingChanges.collectAsStateWithLifecycle()
             val githubWorkflowRuns by viewModel.githubWorkflowRuns.collectAsStateWithLifecycle()
+            val githubBranches by viewModel.githubBranches.collectAsStateWithLifecycle()
+            val githubRemoteFiles by viewModel.githubRemoteFiles.collectAsStateWithLifecycle()
+            val githubInspectedRunId by viewModel.githubInspectedRunId.collectAsStateWithLifecycle()
+            val githubWorkflowJobs by viewModel.githubWorkflowJobs.collectAsStateWithLifecycle()
+            val githubSelectedRunLogs by viewModel.githubSelectedRunLogs.collectAsStateWithLifecycle()
+            val githubWorkflowArtifacts by viewModel.githubWorkflowArtifacts.collectAsStateWithLifecycle()
+            val openAiPanelRequest by viewModel.openAiPanelRequest.collectAsStateWithLifecycle()
             val isGitHubBusy by viewModel.isGitHubBusy.collectAsStateWithLifecycle()
 
             DroidForgeTheme(darkTheme = editorSettings.darkTheme) {
                 val currentProject = activeProject
                 val loadingName = openingProjectName
                 Box(modifier = Modifier.fillMaxSize()) {
-                    if (currentProject == null) {
-                        ProjectsScreen(
-                            projects = projects,
-                            isLoadingProjects = isLoadingProjects,
-                            editorSettings = editorSettings,
-                            activeProvider = activeProvider,
-                            providerApiKeys = providerApiKeys,
-                            providerModels = providerModels,
-                            liveModels = liveModels,
-                            isFetchingModels = isFetchingModels,
-                            aiUsageSummary = aiUsageSummary,
-                            releaseSigningConfig = releaseSigningConfig,
-                            githubToken = githubToken,
-                            githubUser = githubUser,
-                            githubRepos = githubRepos,
-                            isGitHubBusy = isGitHubBusy,
-                            statusBanner = statusBanner,
-                            onClearStatusBanner = viewModel::clearStatusBanner,
-                            onOpenProject = viewModel::openProject,
-                            onCreateProject = viewModel::createProject,
-                            onDeleteProject = viewModel::deleteProject,
-                            onUpdateSettings = viewModel::updateEditorSettings,
-                            onSelectModel = viewModel::selectModel,
-                            onSaveProviderConfig = viewModel::saveProviderConfig,
-                            onRefreshLiveModels = viewModel::refreshLiveModels,
-                            onResetAiUsage = viewModel::resetAiUsage,
-                            onGenerateKeystore = viewModel::generateReleaseKeystore,
-                            onImportKeystore = viewModel::importKeystoreFromUri,
-                            onClearKeystore = viewModel::clearReleaseKeystore,
-                            onConnectGitHub = viewModel::connectGitHubToken,
-                            onDisconnectGitHub = viewModel::disconnectGitHub,
-                            onRefreshGitHubRepos = viewModel::refreshGitHubRepos,
-                        )
-                    } else {
-                        IdeWorkspaceScreen(
-                            project = currentProject,
-                            files = projectFiles,
-                            openTabs = openTabs,
-                            activeFilePath = activeFilePath,
-                            editorSettings = editorSettings,
-                            isBuilding = isBuilding,
-                            selectedBuildVariant = selectedBuildVariant,
-                            releaseSigningConfig = releaseSigningConfig,
-                            buildLogs = buildLogs,
-                            lastBuildResult = lastBuildResult,
-                            jumpToLine = jumpToLine,
-                            statusBanner = statusBanner,
-                            activeProvider = activeProvider,
-                            aiThinkingMode = aiThinkingMode,
-                            providerApiKeys = providerApiKeys,
-                            providerModels = providerModels,
-                            liveModels = liveModels,
-                            isFetchingModels = isFetchingModels,
-                            aiUsageSummary = aiUsageSummary,
-                            chatThreads = chatThreads,
-                            activeThreadId = activeThreadId,
-                            splitSideThreadId = splitSideThreadId,
-                            aiMessages = aiMessages,
-                            pendingAiAttachments = pendingAiAttachments,
-                            aiState = aiState,
-                            githubToken = githubToken,
-                            githubUser = githubUser,
-                            githubRepos = githubRepos,
-                            githubPendingChanges = githubPendingChanges,
-                            githubWorkflowRuns = githubWorkflowRuns,
-                            isGitHubBusy = isGitHubBusy,
-                            onSelectFile = viewModel::openFile,
-                            onCloseTab = viewModel::closeTab,
-                            onCreateFile = viewModel::createNewFile,
-                            onDeleteFile = viewModel::deleteFile,
-                            onImportProjectFileUri = viewModel::importProjectFileFromUri,
-                            onUpdateProjectConfig = viewModel::updateProjectConfig,
-                            onUpdateContent = viewModel::updateActiveFileContent,
-                            onSelectBuildVariant = viewModel::selectBuildVariant,
-                            onBuildApk = viewModel::buildApk,
-                            onGenerateKeystore = viewModel::generateReleaseKeystore,
-                            onImportKeystore = viewModel::importKeystoreFromUri,
-                            onClearKeystore = viewModel::clearReleaseKeystore,
-                            onSearchWorkspace = viewModel::searchWorkspace,
-                            onJumpToFileAndLine = viewModel::jumpToFileAndLine,
-                            onJumpToDiagnostic = viewModel::jumpToDiagnostic,
-                            onClearJump = viewModel::clearJumpRequest,
-                            onExportApkUri = viewModel::exportApkToUri,
-                            onExportProjectZipUri = viewModel::exportProjectZipToUri,
-                            onClearStatusBanner = viewModel::clearStatusBanner,
-                            onSelectProvider = viewModel::selectProvider,
-                            onSelectThinkingMode = viewModel::selectThinkingMode,
-                            onSelectModel = viewModel::selectModel,
-                            onSaveProviderConfig = viewModel::saveProviderConfig,
-                            onRefreshLiveModels = viewModel::refreshLiveModels,
-                            onResetAiUsage = viewModel::resetAiUsage,
-                            onSelectChatThread = viewModel::selectChatThread,
-                            onCreateSideChat = viewModel::createSideChat,
-                            onRenameChatThread = viewModel::renameChatThread,
-                            onDeleteChatThread = viewModel::deleteChatThread,
-                            onSetSplitSideThread = viewModel::setSplitSideThread,
-                            onAddAiAttachmentUri = viewModel::addAiAttachmentFromUri,
-                            onRemoveAiAttachment = viewModel::removePendingAttachment,
-                            onAskGemini = viewModel::askGemini,
-                            onRetryGemini = viewModel::retryLastGeminiPrompt,
-                            onStopGemini = viewModel::cancelGemini,
-                            onApplyGeminiCode = viewModel::applySuggestedCode,
-                            onClearAiChat = viewModel::clearAiChat,
-                            onConnectGitHub = viewModel::connectGitHubToken,
-                            onDisconnectGitHub = viewModel::disconnectGitHub,
-                            onRefreshGitHubRepos = viewModel::refreshGitHubRepos,
-                            onCreateAndLinkGitHubRepo = viewModel::createAndLinkGitHubRepo,
-                            onLinkExistingGitHubRepo = viewModel::linkExistingGitHubRepo,
-                            onPushGitHub = viewModel::pushProjectToGitHub,
-                            onPullGitHub = viewModel::pullProjectFromGitHub,
-                            onScaffoldGradleCi = viewModel::scaffoldGradleCi,
-                            onTriggerCloudBuild = viewModel::triggerGitHubCloudBuild,
-                            onRefreshWorkflowRuns = viewModel::refreshGitHubWorkflowRuns,
-                            onUpdateSettings = viewModel::updateEditorSettings,
-                            onBackToProjects = viewModel::closeProject,
-                        )
+                    Crossfade(
+                        targetState = isBootLoading,
+                        animationSpec = tween(durationMillis = 280),
+                        label = "studio_boot_crossfade",
+                    ) { booting ->
+                        if (booting) {
+                            StudioLaunchLoadingScreen()
+                        } else if (currentProject == null) {
+                            ProjectsScreen(
+                                projects = projects,
+                                isLoadingProjects = isLoadingProjects,
+                                editorSettings = editorSettings,
+                                activeProvider = activeProvider,
+                                providerApiKeys = providerApiKeys,
+                                providerModels = providerModels,
+                                liveModels = liveModels,
+                                isFetchingModels = isFetchingModels,
+                                aiUsageSummary = aiUsageSummary,
+                                releaseSigningConfig = releaseSigningConfig,
+                                githubToken = githubToken,
+                                githubUser = githubUser,
+                                githubRepos = githubRepos,
+                                isGitHubBusy = isGitHubBusy,
+                                statusBanner = statusBanner,
+                                onClearStatusBanner = viewModel::clearStatusBanner,
+                                onOpenProject = viewModel::openProject,
+                                onCreateProject = viewModel::createProject,
+                                onDeleteProject = viewModel::deleteProject,
+                                onUpdateSettings = viewModel::updateEditorSettings,
+                                onSelectModel = viewModel::selectModel,
+                                onSaveProviderConfig = viewModel::saveProviderConfig,
+                                onRefreshLiveModels = { viewModel.refreshLiveModels(it) },
+                                onResetAiUsage = viewModel::resetAiUsage,
+                                onGenerateKeystore = viewModel::generateReleaseKeystore,
+                                onImportKeystore = viewModel::importKeystoreFromUri,
+                                onClearKeystore = viewModel::clearReleaseKeystore,
+                                onConnectGitHub = viewModel::connectGitHubToken,
+                                onDisconnectGitHub = viewModel::disconnectGitHub,
+                                onRefreshGitHubRepos = viewModel::refreshGitHubRepos,
+                                onCloneGitHubRepo = viewModel::cloneGitHubRepoAsProject,
+                            )
+                        } else {
+                            IdeWorkspaceScreen(
+                                project = currentProject,
+                                files = projectFiles,
+                                openTabs = openTabs,
+                                activeFilePath = activeFilePath,
+                                editorSettings = editorSettings,
+                                isBuilding = isBuilding,
+                                selectedBuildVariant = selectedBuildVariant,
+                                releaseSigningConfig = releaseSigningConfig,
+                                buildLogs = buildLogs,
+                                lastBuildResult = lastBuildResult,
+                                jumpToLine = jumpToLine,
+                                statusBanner = statusBanner,
+                                activeProvider = activeProvider,
+                                aiThinkingMode = aiThinkingMode,
+                                providerApiKeys = providerApiKeys,
+                                providerModels = providerModels,
+                                liveModels = liveModels,
+                                isFetchingModels = isFetchingModels,
+                                aiUsageSummary = aiUsageSummary,
+                                chatThreads = chatThreads,
+                                activeThreadId = activeThreadId,
+                                splitSideThreadId = splitSideThreadId,
+                                aiMessages = aiMessages,
+                                pendingAiAttachments = pendingAiAttachments,
+                                aiState = aiState,
+                                githubToken = githubToken,
+                                githubUser = githubUser,
+                                githubRepos = githubRepos,
+                                githubPendingChanges = githubPendingChanges,
+                                githubWorkflowRuns = githubWorkflowRuns,
+                                githubBranches = githubBranches,
+                                githubRemoteFiles = githubRemoteFiles,
+                                githubInspectedRunId = githubInspectedRunId,
+                                githubWorkflowJobs = githubWorkflowJobs,
+                                githubSelectedRunLogs = githubSelectedRunLogs,
+                                githubWorkflowArtifacts = githubWorkflowArtifacts,
+                                openAiPanelRequest = openAiPanelRequest,
+                                isGitHubBusy = isGitHubBusy,
+                                onSelectFile = viewModel::openFile,
+                                onCloseTab = viewModel::closeTab,
+                                onCreateFile = viewModel::createNewFile,
+                                onDeleteFile = viewModel::deleteFile,
+                                onImportProjectFileUri = viewModel::importProjectFileFromUri,
+                                onUpdateProjectConfig = viewModel::updateProjectConfig,
+                                onUpdateContent = viewModel::updateActiveFileContent,
+                                onSelectBuildVariant = viewModel::selectBuildVariant,
+                                onBuildApk = viewModel::buildApk,
+                                onGenerateKeystore = viewModel::generateReleaseKeystore,
+                                onImportKeystore = viewModel::importKeystoreFromUri,
+                                onClearKeystore = viewModel::clearReleaseKeystore,
+                                onSearchWorkspace = viewModel::searchWorkspace,
+                                onJumpToFileAndLine = viewModel::jumpToFileAndLine,
+                                onJumpToDiagnostic = viewModel::jumpToDiagnostic,
+                                onClearJump = viewModel::clearJumpRequest,
+                                onExportApkUri = viewModel::exportApkToUri,
+                                onExportProjectZipUri = viewModel::exportProjectZipToUri,
+                                onClearStatusBanner = viewModel::clearStatusBanner,
+                                onSelectProvider = viewModel::selectProvider,
+                                onSelectThinkingMode = viewModel::selectThinkingMode,
+                                onSelectModel = viewModel::selectModel,
+                                onSaveProviderConfig = viewModel::saveProviderConfig,
+                                onRefreshLiveModels = { viewModel.refreshLiveModels(it) },
+                                onResetAiUsage = viewModel::resetAiUsage,
+                                onSelectChatThread = viewModel::selectChatThread,
+                                onCreateSideChat = viewModel::createSideChat,
+                                onRenameChatThread = viewModel::renameChatThread,
+                                onDeleteChatThread = viewModel::deleteChatThread,
+                                onSetSplitSideThread = viewModel::setSplitSideThread,
+                                onAddAiAttachmentUri = viewModel::addAiAttachmentFromUri,
+                                onRemoveAiAttachment = viewModel::removePendingAttachment,
+                                onAskGemini = viewModel::askGemini,
+                                onRetryGemini = viewModel::retryLastGeminiPrompt,
+                                onStopGemini = viewModel::cancelGemini,
+                                onApplyGeminiCode = viewModel::applySuggestedCode,
+                                onClearAiChat = viewModel::clearAiChat,
+                                onConnectGitHub = viewModel::connectGitHubToken,
+                                onDisconnectGitHub = viewModel::disconnectGitHub,
+                                onRefreshGitHubRepos = viewModel::refreshGitHubRepos,
+                                onCreateAndLinkGitHubRepo = viewModel::createAndLinkGitHubRepo,
+                                onLinkExistingGitHubRepo = viewModel::linkExistingGitHubRepo,
+                                onCloneGitHubRepo = viewModel::cloneGitHubRepoAsProject,
+                                onRefreshGitHubBranches = { viewModel.refreshGitHubBranches() },
+                                onSwitchGitHubBranch = viewModel::switchGitHubBranch,
+                                onCreateGitHubBranch = viewModel::createGitHubBranch,
+                                onRefreshGitHubRemoteFiles = viewModel::refreshGitHubRemoteFiles,
+                                onDownloadGitHubFile = { viewModel.downloadRemoteFileToProject(it) },
+                                onUploadActiveFileToGitHub = { path, msg -> viewModel.uploadProjectFileToGitHub(path, path, msg) },
+                                onUploadDeviceFileUriToGitHub = { viewModel.uploadDeviceFileUriToGitHub(it) },
+                                onPushGitHub = viewModel::pushProjectToGitHub,
+                                onPullGitHub = viewModel::pullProjectFromGitHub,
+                                onScaffoldGradleCi = viewModel::scaffoldGradleCi,
+                                onTriggerCloudBuild = viewModel::triggerGitHubCloudBuild,
+                                onRefreshWorkflowRuns = viewModel::refreshGitHubWorkflowRuns,
+                                onInspectWorkflowRun = viewModel::inspectWorkflowRun,
+                                onRerunWorkflowRun = viewModel::rerunWorkflowRun,
+                                onDownloadWorkflowArtifact = viewModel::downloadWorkflowArtifact,
+                                onAskAiToFixWorkflowRun = viewModel::askAiToFixWorkflowRun,
+                                onUpdateSettings = viewModel::updateEditorSettings,
+                                onBackToProjects = viewModel::closeProject,
+                            )
+                        }
                     }
 
                     if (loadingName != null) {
@@ -203,6 +249,75 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun StudioLaunchLoadingScreen() {
+    val bgBrush = Brush.verticalGradient(
+        colors = listOf(
+            MaterialTheme.colorScheme.background,
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.32f),
+            MaterialTheme.colorScheme.background,
+        ),
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(bgBrush)
+            .testTag("studio_launch_loading_screen"),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = 340.dp)
+                .padding(28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer,
+                shape = RoundedCornerShape(24.dp),
+                tonalElevation = 6.dp,
+                modifier = Modifier.size(82.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.Android,
+                        contentDescription = "DroidForge Studio icon",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(44.dp),
+                    )
+                }
+            }
+            Text(
+                text = "DroidForge Studio",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onBackground,
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                text = "Offline Kotlin & Java 8–25 APK/AAB IDE",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(4.dp))
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .widthIn(max = 220.dp)
+                    .height(6.dp),
+                trackColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            )
+            Text(
+                text = "Initializing Multi-DEX toolchain, GitHub Hub & AI agents...",
+                fontFamily = JetBrainsMonoFontFamily,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }

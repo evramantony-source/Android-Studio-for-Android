@@ -394,6 +394,87 @@ class ProjectRepository(
         updatedMeta
     }
 
+    suspend fun createClonedProjectStub(
+        name: String,
+        link: GitHubRepoLink,
+    ): Pair<ProjectMetadata, File> = withContext(Dispatchers.IO) {
+        val id = UUID.randomUUID().toString().take(8)
+        val projectDir = File(projectsRoot, id).apply { mkdirs() }
+        val cleanName = name.trim().ifBlank { link.repo }
+        val fallbackPkg = "com.example." + cleanName.lowercase().replace(Regex("[^a-z0-9]"), "").ifBlank { "clonedapp" }
+        val now = System.currentTimeMillis()
+        val stub = ProjectMetadata(
+            id = id,
+            name = cleanName,
+            packageName = fallbackPkg,
+            template = ProjectTemplate.BLANK_ACTIVITY,
+            createdAtMillis = now,
+            updatedAtMillis = now,
+            language = ProjectLanguage.JAVA,
+            javaVersion = JavaVersionOption.JAVA_17,
+            minSdkVersion = 24,
+            githubLink = link,
+        )
+        writeMetadata(projectDir, stub)
+        stub to projectDir
+    }
+
+    suspend fun finalizeClonedProject(
+        projectId: String,
+        link: GitHubRepoLink,
+        pulledHashes: Map<String, String>,
+    ): ProjectMetadata? = withContext(Dispatchers.IO) {
+        val dir = getProjectDir(projectId)
+        val current = readMetadata(dir) ?: return@withContext null
+
+        val manifestFile = listOf(
+            File(dir, "AndroidManifest.xml"),
+            File(dir, "app/src/main/AndroidManifest.xml"),
+        ).firstOrNull { it.exists() }
+        val manifestText = manifestFile?.let { runCatching { it.readText() }.getOrNull() }.orEmpty()
+
+        val detectedPkg = Regex("""package\s*=\s*"([^"]+)"""")
+            .find(manifestText)?.groupValues?.getOrNull(1)?.trim()
+            ?.takeIf { it.contains('.') }
+            ?: run {
+                dir.walkTopDown()
+                    .firstOrNull { it.isFile && (it.extension == "kt" || it.extension == "java") }
+                    ?.let { src ->
+                        Regex("""^\s*package\s+([a-zA-Z0-9_.]+)""", RegexOption.MULTILINE)
+                            .find(runCatching { src.readText() }.getOrDefault(""))
+                            ?.groupValues?.getOrNull(1)?.trim()
+                    }
+            }
+            ?: current.packageName
+
+        val detectedMinSdk = Regex("""android:minSdkVersion\s*=\s*"(\d+)"""")
+            .find(manifestText)?.groupValues?.getOrNull(1)?.toIntOrNull()?.coerceIn(21, 35)
+            ?: current.minSdkVersion
+
+        var ktCount = 0
+        var javaCount = 0
+        dir.walkTopDown().filter { it.isFile }.forEach { f ->
+            when (f.extension.lowercase()) {
+                "kt" -> ktCount++
+                "java" -> javaCount++
+            }
+        }
+        val detectedLang = if (ktCount >= javaCount && ktCount > 0) ProjectLanguage.KOTLIN else ProjectLanguage.JAVA
+
+        val updated = current.copy(
+            packageName = detectedPkg,
+            language = detectedLang,
+            minSdkVersion = detectedMinSdk,
+            updatedAtMillis = System.currentTimeMillis(),
+            githubLink = link.copy(
+                lastPushedAtMillis = System.currentTimeMillis(),
+                lastPushedHashes = pulledHashes,
+            ),
+        )
+        writeMetadata(dir, updated)
+        updated
+    }
+
     suspend fun saveGitHubRepoLink(
         projectId: String,
         link: GitHubRepoLink?,

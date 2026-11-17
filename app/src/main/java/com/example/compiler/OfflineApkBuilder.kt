@@ -236,12 +236,20 @@ class OfflineApkBuilder(
             val sourceOriginMap = mutableMapOf<String, Pair<String, Map<Int, Int>>>()
             if (ktFiles.isNotEmpty()) {
                 log("[3/5] Transpiling ${ktFiles.size} Kotlin (.kt) source(s) -> Java 8...")
+                val rtDir = File(kotlinGenDir, packageName.replace('.', '/')).apply { mkdirs() }
+                File(rtDir, "_KtRt.java").writeText(KotlinRuntimeHelper.buildSource(packageName))
+                val getterRegex = Regex("""\bval\s+([A-Za-z_]\w*)\s*:\s*[^=\n]+?\s+get\(\)\s*=""")
+                val knownGetters = ktFiles.flatMap { f ->
+                    getterRegex.findAll(f.readText()).map { it.groupValues[1] }.toList()
+                }.toSet()
                 ktFiles.forEach { ktFile ->
                     val origRel = ktFile.relativeTo(projectDir).invariantSeparatorsPath
                     val res = KotlinToJavaTranspiler.transpile(
                         kotlinSource = ktFile.readText(),
                         fallbackPackage = packageName,
                         fileName = ktFile.name,
+                        runtimePackage = packageName,
+                        knownPropertyGetters = knownGetters,
                     )
                     val outJavaFile = File(
                         File(kotlinGenDir, res.packageName.replace('.', '/')).apply { mkdirs() },
@@ -335,6 +343,9 @@ class OfflineApkBuilder(
 
             if (!ecjOk) {
                 log("✖ Source compilation failed with ${diagnostics.count { it.severity == DiagnosticSeverity.ERROR }} error(s).")
+                if (ktFiles.isNotEmpty()) {
+                    log("💡 Tip: For full Gradle kotlinc compilation of advanced Kotlin features, use GitHub Hub -> Cloud Build.")
+                }
                 return BuildResult(
                     success = false,
                     variant = variant,

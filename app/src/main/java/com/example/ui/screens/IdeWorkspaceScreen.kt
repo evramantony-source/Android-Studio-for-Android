@@ -114,7 +114,11 @@ import com.example.ai.ProjectChatThread
 import com.example.ai.SuggestedCodeBlock
 import com.example.data.GitHubPendingChange
 import com.example.emulator.EmulatorPanel
+import com.example.github.GitHubBranch
 import com.example.github.GitHubRepoSummary
+import com.example.github.GitHubTreeEntry
+import com.example.github.GitHubWorkflowArtifact
+import com.example.github.GitHubWorkflowJob
 import com.example.github.GitHubWorkflowRun
 import com.example.model.AiAttachment
 import com.example.model.AndroidMinSdk
@@ -176,6 +180,13 @@ fun IdeWorkspaceScreen(
     githubRepos: List<GitHubRepoSummary> = emptyList(),
     githubPendingChanges: List<GitHubPendingChange> = emptyList(),
     githubWorkflowRuns: List<GitHubWorkflowRun> = emptyList(),
+    githubBranches: List<GitHubBranch> = emptyList(),
+    githubRemoteFiles: List<GitHubTreeEntry> = emptyList(),
+    githubInspectedRunId: Long? = null,
+    githubWorkflowJobs: List<GitHubWorkflowJob> = emptyList(),
+    githubSelectedRunLogs: String = "",
+    githubWorkflowArtifacts: List<GitHubWorkflowArtifact> = emptyList(),
+    openAiPanelRequest: Long = 0L,
     isGitHubBusy: Boolean = false,
     onSelectFile: (String) -> Unit,
     onCloseTab: (String) -> Unit,
@@ -219,11 +230,23 @@ fun IdeWorkspaceScreen(
     onRefreshGitHubRepos: () -> Unit = {},
     onCreateAndLinkGitHubRepo: (String, String, Boolean) -> Unit = { _, _, _ -> },
     onLinkExistingGitHubRepo: (String, String, String) -> Unit = { _, _, _ -> },
+    onCloneGitHubRepo: (GitHubRepoSummary) -> Unit = {},
+    onRefreshGitHubBranches: () -> Unit = {},
+    onSwitchGitHubBranch: (String) -> Unit = {},
+    onCreateGitHubBranch: (String) -> Unit = {},
+    onRefreshGitHubRemoteFiles: () -> Unit = {},
+    onDownloadGitHubFile: (String) -> Unit = {},
+    onUploadActiveFileToGitHub: (String, String) -> Unit = { _, _ -> },
+    onUploadDeviceFileUriToGitHub: (Uri) -> Unit = {},
     onPushGitHub: (String) -> Unit = {},
     onPullGitHub: () -> Unit = {},
     onScaffoldGradleCi: () -> Unit = {},
     onTriggerCloudBuild: () -> Unit = {},
     onRefreshWorkflowRuns: () -> Unit = {},
+    onInspectWorkflowRun: (Long) -> Unit = {},
+    onRerunWorkflowRun: (Long, Boolean) -> Unit = { _, _ -> },
+    onDownloadWorkflowArtifact: (Long) -> Unit = {},
+    onAskAiToFixWorkflowRun: (GitHubWorkflowRun) -> Unit = {},
     onUpdateSettings: ((EditorSettings) -> EditorSettings) -> Unit,
     onBackToProjects: () -> Unit,
     modifier: Modifier = Modifier,
@@ -315,6 +338,14 @@ fun IdeWorkspaceScreen(
         if (!statusBanner.isNullOrBlank()) {
             snackbarHostState.showSnackbar(statusBanner)
             onClearStatusBanner()
+        }
+    }
+
+    LaunchedEffect(openAiPanelRequest) {
+        if (openAiPanelRequest > 0L) {
+            showGitHubDialog = false
+            showGeminiPanel = true
+            showEmulatorPanel = false
         }
     }
 
@@ -1150,22 +1181,41 @@ fun IdeWorkspaceScreen(
     if (showGitHubDialog) {
         GitHubSheetDialog(
             project = project,
+            activeFilePath = activeFilePath,
             githubToken = githubToken,
             githubUser = githubUser,
             githubRepos = githubRepos,
             pendingChanges = githubPendingChanges,
             workflowRuns = githubWorkflowRuns,
+            branches = githubBranches,
+            remoteFiles = githubRemoteFiles,
+            inspectedRunId = githubInspectedRunId,
+            workflowJobs = githubWorkflowJobs,
+            selectedRunLogs = githubSelectedRunLogs,
+            workflowArtifacts = githubWorkflowArtifacts,
             isGitHubBusy = isGitHubBusy,
             onConnectToken = onConnectGitHub,
             onDisconnectGitHub = onDisconnectGitHub,
             onRefreshRepos = onRefreshGitHubRepos,
             onCreateAndLinkRepo = onCreateAndLinkGitHubRepo,
             onLinkExistingRepo = onLinkExistingGitHubRepo,
+            onCloneRepoAsProject = onCloneGitHubRepo,
+            onRefreshBranches = onRefreshGitHubBranches,
+            onSwitchBranch = onSwitchGitHubBranch,
+            onCreateBranch = onCreateGitHubBranch,
+            onRefreshRemoteFiles = onRefreshGitHubRemoteFiles,
+            onDownloadRemoteFile = onDownloadGitHubFile,
+            onUploadActiveFile = onUploadActiveFileToGitHub,
+            onUploadDeviceFileUri = onUploadDeviceFileUriToGitHub,
             onPushProject = onPushGitHub,
             onPullProject = onPullGitHub,
             onScaffoldGradleCi = onScaffoldGradleCi,
             onTriggerCloudBuild = onTriggerCloudBuild,
             onRefreshWorkflowRuns = onRefreshWorkflowRuns,
+            onInspectWorkflowRun = onInspectWorkflowRun,
+            onRerunWorkflowRun = onRerunWorkflowRun,
+            onDownloadArtifact = onDownloadWorkflowArtifact,
+            onAskAiToFixRun = onAskAiToFixWorkflowRun,
             onDismiss = { showGitHubDialog = false },
         )
     }

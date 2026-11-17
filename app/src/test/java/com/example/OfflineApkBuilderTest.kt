@@ -1061,4 +1061,107 @@ class OfflineApkBuilderTest {
         val surfaceNode = canvasNodes.last()
         assertTrue("Expected drawRect op from SurfaceHolder", surfaceNode.ops.isNotEmpty())
     }
+
+    @Test
+    fun buildsAndSignsComplexRealWorldKotlinApk() {
+        val projectDir = tempFolder.newFolder("kotlin_rich_project")
+        val files = TemplateProvider.generateFiles(
+            template = ProjectTemplate.BLANK_ACTIVITY,
+            appName = "KotlinArena",
+            packageName = "com.example.ktarena",
+            language = ProjectLanguage.KOTLIN,
+            minSdkVersion = 24,
+        ).toMutableMap()
+
+        files["src/com/example/ktarena/ArenaModels.kt"] = """
+            package com.example.ktarena
+
+            enum class ArenaPhase {
+                READY, RUNNING, PAUSED
+            }
+
+            object ScoreBoard {
+                var highScore: Int = 0
+
+                fun submit(value: Int) {
+                    val clamped = value.coerceIn(0, 9999)
+                    if (clamped > highScore) {
+                        highScore = clamped
+                    }
+                }
+            }
+
+            data class PlayerStats(
+                val name: String,
+                val score: Int = 10,
+                val lives: Int = 3
+            ) {
+                val isAlive: Boolean get() = lives > 0
+            }
+        """.trimIndent()
+
+        files["src/com/example/ktarena/MainActivity.kt"] = """
+            package com.example.ktarena
+
+            import android.app.Activity
+            import android.os.Bundle
+            import android.widget.LinearLayout
+            import android.widget.TextView
+            import kotlin.math.abs
+
+            class MainActivity : Activity() {
+                private var phase: ArenaPhase = ArenaPhase.READY
+
+                override fun onCreate(savedInstanceState: Bundle?) {
+                    super.onCreate(savedInstanceState)
+                    val player = PlayerStats("Hero")
+                    var bonus = 0
+                    repeat(3) { step ->
+                        bonus += (step + 1) * 5
+                    }
+                    ScoreBoard.submit(player.score + abs(-bonus))
+
+                    val items = listOf("Sword", "Shield")
+                    val bag = mutableMapOf("gold" to 50)
+                    phase = ArenaPhase.RUNNING
+
+                    val badge = when (phase) {
+                        ArenaPhase.READY -> "Standby"
+                        ArenaPhase.RUNNING -> "Active:${'$'}{ScoreBoard.highScore}"
+                        ArenaPhase.PAUSED -> "Paused"
+                    }
+
+                    val root = LinearLayout(this).apply {
+                        orientation = LinearLayout.VERTICAL
+                        val label = TextView(context)
+                        label.text = "${'$'}{player.name} ${'$'}badge ${'$'}{items.size} ${'$'}{bag.size} alive=${'$'}{player.isAlive}"
+                        addView(label)
+                    }
+                    setContentView(root)
+                }
+            }
+        """.trimIndent()
+
+        files.forEach { (relPath, content) ->
+            val target = File(projectDir, relPath)
+            target.parentFile?.mkdirs()
+            target.writeText(content)
+        }
+
+        val result = OfflineApkBuilder().buildWithToolchain(
+            projectDir = projectDir,
+            packageName = "com.example.ktarena",
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = resolveAsset("debug_signing.p12"),
+        )
+        assertTrue("Expected rich Kotlin APK build to succeed, logs=${result.logs}", result.success)
+        val apkFile = File(result.apkPath!!)
+        assertTrue(apkFile.exists())
+
+        val verification = ApkVerifier.Builder(apkFile)
+            .setMinCheckedPlatformVersion(24)
+            .build()
+            .verify()
+        assertTrue("Rich Kotlin APK signature invalid: ${verification.errors}", verification.isVerified)
+    }
 }

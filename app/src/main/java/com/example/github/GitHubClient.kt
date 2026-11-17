@@ -37,6 +37,33 @@ data class GitHubTreeEntry(
     val sha: String,
 )
 
+data class GitHubBranch(
+    val name: String,
+    val sha: String,
+)
+
+data class GitHubWorkflowStep(
+    val name: String,
+    val status: String,
+    val conclusion: String,
+    val number: Int,
+)
+
+data class GitHubWorkflowJob(
+    val id: Long,
+    val name: String,
+    val status: String,
+    val conclusion: String,
+    val steps: List<GitHubWorkflowStep>,
+)
+
+data class GitHubWorkflowArtifact(
+    val id: Long,
+    val name: String,
+    val sizeInBytes: Long,
+    val expired: Boolean,
+)
+
 data class GitHubWorkflowRun(
     val id: Long,
     val name: String,
@@ -44,6 +71,9 @@ data class GitHubWorkflowRun(
     val conclusion: String,
     val htmlUrl: String,
     val createdAt: String,
+    val headBranch: String = "",
+    val runNumber: Int = 0,
+    val event: String = "",
 )
 
 data class GitHubPushResult(
@@ -131,6 +161,52 @@ object GitHubClient {
         }
     }
 
+    suspend fun listBranches(
+        token: String,
+        owner: String,
+        repo: String,
+    ): Result<List<GitHubBranch>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanToken = token.trim()
+            require(cleanToken.isNotBlank()) { "Connect a GitHub token first." }
+            val arr = requestJsonArray("GET", "/repos/$owner/$repo/branches?per_page=100", cleanToken)
+            val list = mutableListOf<GitHubBranch>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val name = obj.optString("name")
+                if (name.isBlank()) continue
+                val sha = obj.optJSONObject("commit")?.optString("sha").orEmpty()
+                list.add(GitHubBranch(name = name, sha = sha))
+            }
+            list
+        }
+    }
+
+    suspend fun createBranch(
+        token: String,
+        owner: String,
+        repo: String,
+        newBranch: String,
+        fromBranch: String,
+    ): Result<GitHubBranch> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanToken = token.trim()
+            val cleanNew = newBranch.trim().replace(Regex("\\s+"), "-")
+            require(cleanNew.isNotBlank()) { "New branch name is required." }
+            val baseRef = requestJson(
+                "GET",
+                "/repos/$owner/$repo/git/ref/heads/${URLEncoder.encode(fromBranch.ifBlank { "main" }, "UTF-8")}",
+                cleanToken,
+            )
+            val baseSha = baseRef.getJSONObject("object").getString("sha")
+            val payload = JSONObject()
+                .put("ref", "refs/heads/$cleanNew")
+                .put("sha", baseSha)
+            requestJson("POST", "/repos/$owner/$repo/git/refs", cleanToken, payload)
+            GitHubBranch(name = cleanNew, sha = baseSha)
+        }
+    }
+
     suspend fun listRepoFiles(
         token: String,
         owner: String,
@@ -139,7 +215,15 @@ object GitHubClient {
     ): Result<List<GitHubTreeEntry>> = withContext(Dispatchers.IO) {
         runCatching {
             val encodedBranch = URLEncoder.encode(branch.ifBlank { "main" }, "UTF-8")
-            val resp = requestJson("GET", "/repos/$owner/$repo/git/trees/$encodedBranch?recursive=1", token)
+            val resp = try {
+                requestJson("GET", "/repos/$owner/$repo/git/trees/$encodedBranch?recursive=1", token)
+            } catch (e: IllegalStateException) {
+                val msg = e.message.orEmpty()
+                if (msg.contains("empty", ignoreCase = true) || msg.contains("Not Found", ignoreCase = true)) {
+                    return@runCatching emptyList()
+                }
+                throw e
+            }
             val arr = resp.optJSONArray("tree") ?: JSONArray()
             val entries = mutableListOf<GitHubTreeEntry>()
             for (i in 0 until arr.length()) {
@@ -159,6 +243,28 @@ object GitHubClient {
         }
     }
 
+    suspend fun downloadSingleFileBytes(
+        token: String,
+        owner: String,
+        repo: String,
+        path: String,
+        branch: String,
+    ): Result<ByteArray> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanPath = path.trim().trimStart('/')
+            val encodedPath = cleanPath.split('/').joinToString("/") { URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
+            val encodedBranch = URLEncoder.encode(branch.ifBlank { "main" }, "UTF-8")
+            val resp = requestJson("GET", "/repos/$owner/$repo/contents/$encodedPath?ref=$encodedBranch", token)
+            val contentB64 = resp.optString("content").replace("\n", "").replace("\r", "")
+            if (contentB64.isNotEmpty()) {
+                decodeBase64(contentB64)
+            } else {
+                val downloadUrl = resp.optString("download_url")
+                if (downloadUrl.isNotBlank()) downloadSignedUrlBytes(downloadUrl) else ByteArray(0)
+            }
+        }
+    }
+
     suspend fun readRepoFile(
         token: String,
         owner: String,
@@ -166,13 +272,61 @@ object GitHubClient {
         path: String,
         branch: String,
     ): Result<String> = withContext(Dispatchers.IO) {
+        downloadSingleFileBytes(token, owner, repo, path, branch).map { it.toString(Charsets.UTF_8) }
+    }
+
+    suspend fun uploadSingleFile(
+        token: String,
+        link: GitHubRepoLink,
+        remotePath: String,
+        bytes: ByteArray,
+        commitMessage: String,
+    ): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
-            val cleanPath = path.trim().trimStart('/')
-            val encodedBranch = URLEncoder.encode(branch.ifBlank { "main" }, "UTF-8")
-            val resp = requestJson("GET", "/repos/$owner/$repo/contents/$cleanPath?ref=$encodedBranch", token)
-            val contentB64 = resp.optString("content").replace("\n", "").replace("\r", "")
-            val bytes = decodeBase64(contentB64)
-            bytes.toString(Charsets.UTF_8)
+            val cleanToken = token.trim()
+            require(cleanToken.isNotBlank()) { "GitHub token is missing." }
+            val cleanPath = remotePath.trim().trimStart('/')
+            require(cleanPath.isNotBlank()) { "Target file path is required." }
+            val encodedPath = cleanPath.split('/').joinToString("/") { URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
+            val branch = link.branch.ifBlank { "main" }
+            val encodedBranch = URLEncoder.encode(branch, "UTF-8")
+            val existingSha = runCatching {
+                requestJson("GET", "/repos/${link.owner}/${link.repo}/contents/$encodedPath?ref=$encodedBranch", cleanToken)
+                    .optString("sha")
+                    .takeIf { it.isNotBlank() }
+            }.getOrNull()
+            val payload = JSONObject()
+                .put("message", commitMessage.trim().ifBlank { "Upload $cleanPath from DroidForge Studio" })
+                .put("content", encodeBase64(bytes))
+                .put("branch", branch)
+            if (existingSha != null) {
+                payload.put("sha", existingSha)
+            }
+            val resp = requestJson("PUT", "/repos/${link.owner}/${link.repo}/contents/$encodedPath", cleanToken, payload)
+            resp.optJSONObject("commit")?.optString("sha").orEmpty().take(7).ifBlank { "uploaded" }
+        }
+    }
+
+    suspend fun deleteRemoteFile(
+        token: String,
+        link: GitHubRepoLink,
+        remotePath: String,
+        commitMessage: String,
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanToken = token.trim()
+            val cleanPath = remotePath.trim().trimStart('/')
+            val encodedPath = cleanPath.split('/').joinToString("/") { URLEncoder.encode(it, "UTF-8").replace("+", "%20") }
+            val branch = link.branch.ifBlank { "main" }
+            val encodedBranch = URLEncoder.encode(branch, "UTF-8")
+            val sha = requestJson("GET", "/repos/${link.owner}/${link.repo}/contents/$encodedPath?ref=$encodedBranch", cleanToken)
+                .getString("sha")
+            val payload = JSONObject()
+                .put("message", commitMessage.trim().ifBlank { "Delete $cleanPath from DroidForge Studio" })
+                .put("sha", sha)
+                .put("branch", branch)
+            val resp = requestJson("DELETE", "/repos/${link.owner}/${link.repo}/contents/$encodedPath", cleanToken, payload)
+            resp.optJSONObject("commit")?.optString("sha").orEmpty().take(7).ifBlank { "deleted" }
         }
     }
 
@@ -440,7 +594,7 @@ object GitHubClient {
 
     suspend fun listWorkflowRuns(token: String, link: GitHubRepoLink): Result<List<GitHubWorkflowRun>> = withContext(Dispatchers.IO) {
         runCatching {
-            val resp = requestJson("GET", "/repos/${link.owner}/${link.repo}/actions/runs?per_page=10", token)
+            val resp = requestJson("GET", "/repos/${link.owner}/${link.repo}/actions/runs?per_page=15", token)
             val arr = resp.optJSONArray("workflow_runs") ?: JSONArray()
             val runs = mutableListOf<GitHubWorkflowRun>()
             for (i in 0 until arr.length()) {
@@ -453,10 +607,136 @@ object GitHubClient {
                         conclusion = obj.optString("conclusion"),
                         htmlUrl = obj.optString("html_url"),
                         createdAt = obj.optString("created_at"),
+                        headBranch = obj.optString("head_branch"),
+                        runNumber = obj.optInt("run_number", 0),
+                        event = obj.optString("event"),
                     ),
                 )
             }
             runs
+        }
+    }
+
+    suspend fun listWorkflowJobs(
+        token: String,
+        link: GitHubRepoLink,
+        runId: Long,
+    ): Result<List<GitHubWorkflowJob>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val resp = requestJson("GET", "/repos/${link.owner}/${link.repo}/actions/runs/$runId/jobs?per_page=30", token)
+            val jobsArr = resp.optJSONArray("jobs") ?: JSONArray()
+            val jobs = mutableListOf<GitHubWorkflowJob>()
+            for (i in 0 until jobsArr.length()) {
+                val jobObj = jobsArr.optJSONObject(i) ?: continue
+                val stepsArr = jobObj.optJSONArray("steps") ?: JSONArray()
+                val steps = mutableListOf<GitHubWorkflowStep>()
+                for (j in 0 until stepsArr.length()) {
+                    val stepObj = stepsArr.optJSONObject(j) ?: continue
+                    steps.add(
+                        GitHubWorkflowStep(
+                            name = stepObj.optString("name", "Step ${j + 1}"),
+                            status = stepObj.optString("status"),
+                            conclusion = stepObj.optString("conclusion"),
+                            number = stepObj.optInt("number", j + 1),
+                        ),
+                    )
+                }
+                jobs.add(
+                    GitHubWorkflowJob(
+                        id = jobObj.optLong("id"),
+                        name = jobObj.optString("name", "Job"),
+                        status = jobObj.optString("status"),
+                        conclusion = jobObj.optString("conclusion"),
+                        steps = steps,
+                    ),
+                )
+            }
+            jobs
+        }
+    }
+
+    suspend fun fetchJobLogs(
+        token: String,
+        link: GitHubRepoLink,
+        jobId: Long,
+    ): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val rawBytes = downloadGitHubRedirectedBytes(
+                apiPath = "/repos/${link.owner}/${link.repo}/actions/jobs/$jobId/logs",
+                token = token.trim(),
+            )
+            val text = rawBytes.toString(Charsets.UTF_8)
+            if (text.length > 28_000) "...[earlier log lines omitted]...\n" + text.takeLast(28_000) else text
+        }
+    }
+
+    suspend fun rerunWorkflow(
+        token: String,
+        link: GitHubRepoLink,
+        runId: Long,
+        failedOnly: Boolean = false,
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val cleanToken = token.trim()
+            require(cleanToken.isNotBlank()) { "GitHub token is missing." }
+            val action = if (failedOnly) "rerun-failed-jobs" else "rerun"
+            requestNoContent("POST", "/repos/${link.owner}/${link.repo}/actions/runs/$runId/$action", cleanToken)
+        }
+    }
+
+    suspend fun listWorkflowArtifacts(
+        token: String,
+        link: GitHubRepoLink,
+        runId: Long,
+    ): Result<List<GitHubWorkflowArtifact>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val resp = requestJson("GET", "/repos/${link.owner}/${link.repo}/actions/runs/$runId/artifacts", token)
+            val arr = resp.optJSONArray("artifacts") ?: JSONArray()
+            val artifacts = mutableListOf<GitHubWorkflowArtifact>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                artifacts.add(
+                    GitHubWorkflowArtifact(
+                        id = obj.optLong("id"),
+                        name = obj.optString("name", "artifact"),
+                        sizeInBytes = obj.optLong("size_in_bytes", 0L),
+                        expired = obj.optBoolean("expired", false),
+                    ),
+                )
+            }
+            artifacts
+        }
+    }
+
+    suspend fun downloadArtifactZipAndExtract(
+        token: String,
+        link: GitHubRepoLink,
+        artifactId: Long,
+        destDir: File,
+    ): Result<List<File>> = withContext(Dispatchers.IO) {
+        runCatching {
+            destDir.mkdirs()
+            val zipBytes = downloadGitHubRedirectedBytes(
+                apiPath = "/repos/${link.owner}/${link.repo}/actions/artifacts/$artifactId/zip",
+                token = token.trim(),
+            )
+            val canonicalDest = destDir.canonicalFile
+            val extracted = mutableListOf<File>()
+            java.util.zip.ZipInputStream(zipBytes.inputStream()).use { zis ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    if (!entry.isDirectory) {
+                        val outFile = File(canonicalDest, entry.name.substringAfterLast('/')).canonicalFile
+                        require(outFile.path.startsWith(canonicalDest.path)) { "Invalid zip entry path: ${entry.name}" }
+                        outFile.parentFile?.mkdirs()
+                        outFile.outputStream().use { zis.copyTo(it) }
+                        extracted.add(outFile)
+                    }
+                    zis.closeEntry()
+                    entry = zis.nextEntry
+                }
+            }
+            extracted
         }
     }
 
@@ -476,6 +756,57 @@ object GitHubClient {
                 }
             }
         return result.sortedBy { it.first }
+    }
+
+    private fun downloadGitHubRedirectedBytes(apiPath: String, token: String): ByteArray {
+        val conn = (URL("$API_ROOT$apiPath").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = TIMEOUT_MS
+            readTimeout = 45_000
+            instanceFollowRedirects = false
+            setRequestProperty("Accept", "application/vnd.github+json")
+            setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
+            setRequestProperty("User-Agent", "DroidForgeStudio/1.0")
+            if (token.isNotBlank()) {
+                setRequestProperty("Authorization", "Bearer $token")
+            }
+        }
+        return try {
+            val code = conn.responseCode
+            if (code in 300..399) {
+                val location = conn.getHeaderField("Location").orEmpty()
+                require(location.isNotBlank()) { "Missing redirect Location from GitHub ($code)." }
+                downloadSignedUrlBytes(location)
+            } else if (code in 200..299) {
+                conn.inputStream.readBytes()
+            } else {
+                val errText = (conn.errorStream ?: conn.inputStream)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                val msg = runCatching { JSONObject(errText).optString("message") }.getOrNull()
+                    ?.takeIf { it.isNotBlank() } ?: "GitHub HTTP $code"
+                throw IllegalStateException(msg)
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun downloadSignedUrlBytes(targetUrl: String): ByteArray {
+        val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = TIMEOUT_MS
+            readTimeout = 60_000
+            instanceFollowRedirects = true
+            setRequestProperty("User-Agent", "DroidForgeStudio/1.0")
+        }
+        return try {
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                throw IllegalStateException("Download failed (HTTP $code)")
+            }
+            conn.inputStream.readBytes()
+        } finally {
+            conn.disconnect()
+        }
     }
 
     private fun requestJson(method: String, path: String, token: String, body: JSONObject? = null): JSONObject {
