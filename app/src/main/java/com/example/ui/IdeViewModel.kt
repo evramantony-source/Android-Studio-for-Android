@@ -56,6 +56,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -252,6 +253,38 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 val remaining = (850L - elapsed).coerceAtLeast(0L)
                 if (remaining > 0L) delay(remaining)
                 _isBootLoading.value = false
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val savedKeys = repository.providerApiKeys.first()
+                val savedGeminiKey = savedKeys[AiProvider.GEMINI].orEmpty()
+                val resolvedKey = GeminiCodeAssistant.resolveApiKey(savedGeminiKey)
+                if (resolvedKey.isNotBlank()) {
+                    val fetched = AiModelsCatalog.fetchLiveModels(AiProvider.GEMINI, resolvedKey).getOrNull().orEmpty()
+                    if (fetched.isNotEmpty()) {
+                        val otherProviders = _liveModels.value.filter { it.provider != AiProvider.GEMINI }
+                        _liveModels.value = otherProviders + fetched
+                        autoHealUnavailableGeminiModel(fetched, explicitApiKey = savedGeminiKey)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun autoHealUnavailableGeminiModel(
+        fetched: List<AiModelOption>,
+        explicitApiKey: String? = null,
+    ) {
+        if (fetched.isEmpty()) return
+        val savedModel = repository.providerModels.first()[AiProvider.GEMINI].orEmpty()
+        val fetchedIds = fetched.map { it.id.lowercase() }.toSet()
+        if (savedModel.lowercase() !in fetchedIds) {
+            val replacement = fetched.firstOrNull { it.id == GEMINI_MODEL_ID }?.id
+                ?: fetched.firstOrNull { AiModelsCatalog.isCodingCapableGeminiModel(it.id) }?.id
+            if (!replacement.isNullOrBlank()) {
+                val keyToSave = explicitApiKey ?: repository.providerApiKeys.first()[AiProvider.GEMINI].orEmpty()
+                repository.saveProviderConfig(AiProvider.GEMINI, keyToSave, replacement)
             }
         }
     }
@@ -715,6 +748,9 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
             res.onSuccess { fetched ->
                 val otherProviders = _liveModels.value.filter { it.provider != provider }
                 _liveModels.value = otherProviders + fetched
+                if (provider == AiProvider.GEMINI && fetched.isNotEmpty()) {
+                    autoHealUnavailableGeminiModel(fetched, explicitApiKey = explicitApiKey)
+                }
                 _statusBanner.value = "Loaded ${fetched.size} ${provider.shortName} model(s)."
             }.onFailure { err ->
                 _statusBanner.value = err.localizedMessage ?: "Failed to fetch models."
@@ -1510,16 +1546,28 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         val modelId = AiModelsCatalog.normalizeModelId(provider, providerModels.value[provider])
         val attachmentsSnapshot = _pendingAiAttachments.value
         _pendingAiAttachments.value = emptyList()
+        val githubConnected = githubToken.value.isNotBlank() || project.githubLink != null
+        val verifiedIds = _liveModels.value
+            .filter { it.provider == provider }
+            .map { it.id }
+            .toSet()
         val threadIdAtStart = _activeThreadId.value
         val previousJob = aiJob
 
         aiJob = viewModelScope.launch {
             previousJob?.cancelAndJoin()
+            val freshKey = runCatching { repository.providerApiKeys.first()[provider].orEmpty() }
+                .getOrDefault("")
+                .ifBlank { apiKey }
+            val freshModel = AiModelsCatalog.normalizeModelId(
+                provider,
+                runCatching { repository.providerModels.first()[provider] }.getOrNull() ?: modelId,
+            )
             val executor = createToolExecutor(project.id, project.packageName)
             geminiAssistant.askGemini(
                 userPrompt = prompt,
-                apiKey = apiKey,
-                modelId = modelId,
+                apiKey = freshKey,
+                modelId = freshModel,
                 provider = provider,
                 thinkingMode = thinkingMode,
                 projectName = project.name,
@@ -1532,7 +1580,15 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 allFiles = _projectFiles.value,
                 diagnostics = diagnostics,
                 toolExecutor = executor,
+                githubConnected = githubConnected,
+                verifiedLiveModelIds = verifiedIds,
                 shouldPublishToUi = { _activeThreadId.value == threadIdAtStart },
+                onModelAutoCorrected = { failedModel, workingModel ->
+                    viewModelScope.launch {
+                        repository.saveProviderConfig(provider, freshKey, workingModel)
+                        _statusBanner.value = "Switched from unavailable '$failedModel' to working '$workingModel'."
+                    }
+                },
                 onUsageRecorded = { usedProvider, usedModel, delta, tools, failed ->
                     viewModelScope.launch {
                         repository.recordAiUsage(usedProvider, usedModel, delta, tools, failed)

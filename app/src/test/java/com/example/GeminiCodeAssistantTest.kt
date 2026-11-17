@@ -397,4 +397,88 @@ class GeminiCodeAssistantTest {
             assertTrue("Expected AI tool schema '$name'", toolNames.contains(name))
         }
     }
+
+    @Test
+    fun geminiModelFilterExcludesImageAudioTtsAndRoboticsModels() {
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-3.1-flash-image-preview"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-2.5-flash-image"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-2.5-flash-preview-tts"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-robotics-er-1.5-preview"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemma-3-27b-it"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("text-embedding-004"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-1.5-pro"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-1.0-pro-vision"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("lyria-realtime-exp"))
+
+        assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-2.5-flash"))
+        assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-2.5-flash-lite"))
+        assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-2.0-flash"))
+        assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-flash-latest"))
+        assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-3-flash-preview"))
+    }
+
+    @Test
+    fun stripThoughtPartsFromContentsRemovesThoughtAndThoughtSignaturePreservingFunctionCalls() {
+        val original = org.json.JSONArray().apply {
+            put(
+                JSONObject()
+                    .put("role", "user")
+                    .put("parts", org.json.JSONArray().put(JSONObject().put("text", "Build a game"))),
+            )
+            put(
+                JSONObject()
+                    .put("role", "model")
+                    .put(
+                        "parts",
+                        org.json.JSONArray()
+                            .put(JSONObject().put("text", "internal reasoning").put("thought", true))
+                            .put(
+                                JSONObject()
+                                    .put("functionCall", JSONObject().put("name", "write_file").put("args", JSONObject()))
+                                    .put("thoughtSignature", "sig-g3-123"),
+                            ),
+                    ),
+            )
+        }
+
+        val cleaned = GeminiCodeAssistant.stripThoughtPartsFromContents(original)
+        assertEquals(2, cleaned.length())
+        val modelParts = cleaned.getJSONObject(1).getJSONArray("parts")
+        assertEquals(1, modelParts.length())
+        assertFalse(modelParts.getJSONObject(0).has("thoughtSignature"))
+        assertEquals("write_file", modelParts.getJSONObject(0).getJSONObject("functionCall").getString("name"))
+    }
+
+    @Test
+    fun buildRequestPayloadOmitsGitHubToolsWhenNotRelevant() {
+        val assistant = GeminiCodeAssistant()
+        val contents = org.json.JSONArray().put(
+            JSONObject()
+                .put("role", "user")
+                .put("parts", org.json.JSONArray().put(JSONObject().put("text", "Build a 3D game"))),
+        )
+        val compactJson = JSONObject(
+            assistant.buildRequestPayload(
+                contents = contents,
+                modelId = "gemini-2.5-flash",
+                includeGitHubTools = false,
+            ),
+        )
+        val compactDecls = compactJson.getJSONArray("tools").getJSONObject(0).getJSONArray("functionDeclarations")
+        val compactNames = (0 until compactDecls.length()).map { compactDecls.getJSONObject(it).getString("name") }
+        assertEquals(8, compactNames.size)
+        assertTrue(compactNames.contains("write_file"))
+        assertTrue(compactNames.contains("build_apk"))
+        assertFalse(compactNames.any { it.startsWith("github_") })
+
+        val fullJson = JSONObject(
+            assistant.buildRequestPayload(
+                contents = contents,
+                modelId = "gemini-2.5-flash",
+                includeGitHubTools = true,
+            ),
+        )
+        val fullDecls = fullJson.getJSONArray("tools").getJSONObject(0).getJSONArray("functionDeclarations")
+        assertEquals(23, fullDecls.length())
+    }
 }

@@ -194,8 +194,13 @@ fun ProviderKeysDialog(
                                 isTestingKey = false
                                 keyTestStatus = res.fold(
                                     onSuccess = { list ->
-                                        val hasSelected = list.any { it.id == currentModel }
-                                        val note = if (hasSelected) " (includes $currentModel)" else ""
+                                        val hasSelected = list.any { it.id.equals(currentModel, ignoreCase = true) }
+                                        val fallbackRec = list.firstOrNull { it.id == selectedProvider.defaultModelId }?.id ?: list.firstOrNull()?.id
+                                        val note = when {
+                                            hasSelected -> " (includes $currentModel)"
+                                            !fallbackRec.isNullOrBlank() -> " ($currentModel unavailable; Save auto-switches to $fallbackRec)"
+                                            else -> ""
+                                        }
                                         true to "Verified! Found ${list.size} live ${selectedProvider.shortName} model(s)$note."
                                     },
                                     onFailure = { err ->
@@ -333,6 +338,10 @@ fun ModelMenuDialog(
         }
     }
 
+    val liveIds = remember(browsedProvider, liveModels) {
+        liveModels.filter { it.provider == browsedProvider }.map { it.id.lowercase() }.toSet()
+    }
+
     val allModels = remember(browsedProvider, liveModels, searchQuery, generationFilter) {
         val base = AiModelsCatalog.modelsFor(browsedProvider, liveModels)
         base.filter { option ->
@@ -344,9 +353,9 @@ fun ModelMenuDialog(
             val id = option.id.lowercase()
             val matchesGen = when (generationFilter) {
                 "All" -> true
-                "Live" -> option.isLiveFetched
+                "Live" -> option.isLiveFetched || id in liveIds
                 "2.5 GA" -> id.contains("2.5")
-                "2.0" -> id.contains("2.0") || id.contains("1.5")
+                "2.0" -> id.contains("2.0") || id.contains("flash-latest")
                 "Gemini 3" -> id.contains("gemini-3")
                 "GPT-6 / 5" -> id.startsWith("gpt-6") || id.startsWith("gpt-5")
                 "4.1 / 4o" -> id.contains("4.1") || id.contains("4.5") || id.contains("4o") || id.startsWith("gpt-4") || id.startsWith("gpt-3.5")
@@ -481,8 +490,9 @@ fun ModelMenuDialog(
                                         overflow = TextOverflow.Ellipsis,
                                         modifier = Modifier.weight(1f),
                                     )
+                                    val isVerifiedLive = option.isLiveFetched || option.id.lowercase() in liveIds
                                     Surface(
-                                        color = if (option.isLiveFetched) {
+                                        color = if (isVerifiedLive) {
                                             MaterialTheme.colorScheme.secondaryContainer
                                         } else {
                                             MaterialTheme.colorScheme.tertiaryContainer
@@ -490,7 +500,7 @@ fun ModelMenuDialog(
                                         shape = RoundedCornerShape(6.dp),
                                     ) {
                                         Text(
-                                            text = option.badge,
+                                            text = if (isVerifiedLive && !option.isLiveFetched) "${option.badge} ✓" else option.badge,
                                             style = MaterialTheme.typography.labelSmall,
                                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                                         )
@@ -557,6 +567,11 @@ fun ModelMenuDialog(
                         Text("Use")
                     }
                 }
+                Text(
+                    text = "Tip: Models with ✓ are verified live on your API key. Tap Live API above to refresh.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         },
         confirmButton = {

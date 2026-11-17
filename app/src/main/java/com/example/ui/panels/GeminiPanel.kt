@@ -559,8 +559,13 @@ fun GeminiPanel(
                                         color = MaterialTheme.colorScheme.onErrorContainer,
                                     )
                                 }
-                                if (aiState.isRetryable || aiState.isModelOverloaded) {
+                                val needsKeyAction = !hasEffectiveKey ||
+                                    aiState.message.contains("key", ignoreCase = true) ||
+                                    aiState.message.contains("401") ||
+                                    aiState.message.contains("403")
+                                if (aiState.isRetryable || aiState.isModelOverloaded || needsKeyAction) {
                                     Row(
+                                        modifier = Modifier.horizontalScroll(rememberScrollState()),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
@@ -579,6 +584,16 @@ fun GeminiPanel(
                                                 onClick = { showModelMenuDialog = true },
                                                 label = { Text("Switch Model") },
                                                 modifier = Modifier.testTag("switch_model_button"),
+                                            )
+                                        }
+                                        if (needsKeyAction) {
+                                            AssistChip(
+                                                onClick = { showKeysDialog = true },
+                                                label = { Text("Configure Key") },
+                                                leadingIcon = {
+                                                    Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                },
+                                                modifier = Modifier.testTag("error_configure_key_button"),
                                             )
                                         }
                                     }

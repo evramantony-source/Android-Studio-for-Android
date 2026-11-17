@@ -21,6 +21,7 @@ import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.IOException
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
@@ -34,15 +35,16 @@ private const val GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v
 private const val MAX_AGENT_TURNS = 12
 private const val CONNECT_TIMEOUT_MS = 15_000
 private const val READ_TIMEOUT_MS = 65_000
-private const val UNARY_FALLBACK_READ_TIMEOUT_MS = 65_000
-private const val ATTEMPT_TIMEOUT_MS = 90_000L
-private const val TURN_TIMEOUT_MS = 240_000L
+private const val UNARY_FALLBACK_READ_TIMEOUT_MS = 115_000
+private const val ATTEMPT_TIMEOUT_MS = 190_000L
+private const val TURN_TIMEOUT_MS = 420_000L
 private const val STREAM_UI_THROTTLE_MS = 55L
-private const val PRELOAD_CONTEXT_MAX_CHARS = 16_000
+private const val PRELOAD_CONTEXT_MAX_CHARS = 10_000
 
 internal class GeminiApiException(
     val httpCode: Int,
     message: String,
+    val retryAfterMs: Long? = null,
 ) : Exception(message)
 
 class GeminiCodeAssistant {
@@ -143,7 +145,10 @@ class GeminiCodeAssistant {
         allFiles: List<ProjectFile>,
         diagnostics: List<BuildDiagnostic>,
         toolExecutor: ProjectToolExecutor,
+        githubConnected: Boolean = false,
+        verifiedLiveModelIds: Set<String> = emptySet(),
         shouldPublishToUi: () -> Boolean = { true },
+        onModelAutoCorrected: (failedModel: String, workingModel: String) -> Unit = { _, _ -> },
         onUsageRecorded: (provider: AiProvider, modelId: String, delta: TokenUsageDelta, toolCount: Int, failed: Boolean) -> Unit = { _, _, _, _, _ -> },
         onMessagesChanged: (List<ChatMessage>) -> Unit = {},
     ) {
@@ -169,7 +174,8 @@ class GeminiCodeAssistant {
 
         val priorHistory = _messages.value
             .filter { !it.isStreaming && it.text.isNotBlank() }
-            .takeLast(8)
+            .takeLast(6)
+        val includeGitHubTools = shouldIncludeGitHubTools(trimmed, priorHistory, githubConnected)
 
         val now = System.currentTimeMillis()
         val userMsg = ChatMessage(
@@ -299,12 +305,15 @@ class GeminiCodeAssistant {
                     projectLanguage = projectLanguage,
                     javaVersion = javaVersion,
                     minSdkVersion = minSdkVersion,
+                    includeGitHubTools = includeGitHubTools,
+                    verifiedLiveModelIds = verifiedLiveModelIds,
                     imageAttachments = imageAttachments,
                     priorHistory = priorHistory,
                     promptWithContext = promptWithContext,
                     steps = steps,
                     accumulatedVisibleText = accumulatedVisibleText,
                     addOrUpdateStep = ::addOrUpdateStep,
+                    onModelAutoCorrected = onModelAutoCorrected,
                     onStreamText = { text, usedModel ->
                         effectiveModelInUse = usedModel
                         updateRunAssistantMessage(
@@ -538,12 +547,15 @@ class GeminiCodeAssistant {
         projectLanguage: ProjectLanguage,
         javaVersion: JavaVersionOption,
         minSdkVersion: Int,
+        includeGitHubTools: Boolean,
+        verifiedLiveModelIds: Set<String>,
         imageAttachments: List<AiAttachment>,
         priorHistory: List<ChatMessage>,
         promptWithContext: String,
         steps: MutableList<AgentStep>,
         accumulatedVisibleText: StringBuilder,
         addOrUpdateStep: (AgentStep) -> Unit,
+        onModelAutoCorrected: (failedModel: String, workingModel: String) -> Unit,
         onStreamText: (String, String) -> Unit,
         onFinalizeSuccess: (String, List<AgentStep>, Long, String) -> Unit,
         onFinalizeFailure: (String, AiUiState.Error) -> Unit,
@@ -554,9 +566,13 @@ class GeminiCodeAssistant {
         var completed = false
         var cumulativeTokens = 0L
         var activeModel = initialModel
+        var notifiedAutoCorrection = false
 
         for (turn in 0 until MAX_AGENT_TURNS) {
             coroutineContext.ensureActive()
+            if (turn > 0) {
+                delay(350L)
+            }
             val turnStart = System.currentTimeMillis()
             val thinkStepId = "think_$turn"
             addOrUpdateStep(
@@ -575,26 +591,75 @@ class GeminiCodeAssistant {
             val textBeforeTurn = accumulatedVisibleText.toString()
             val turnVisibleText = StringBuilder()
 
-            val turnOutcome = withTimeout(TURN_TIMEOUT_MS) {
-                callGeminiWithRetryAndFailover(
-                    primaryModelId = activeModel,
+            val turnOutcome = try {
+                withTimeout(TURN_TIMEOUT_MS) {
+                    callGeminiWithRetryAndFailover(
+                        primaryModelId = activeModel,
+                        apiKey = apiKey,
+                        thinkingMode = thinkingMode,
+                        projectLanguage = projectLanguage,
+                        javaVersion = javaVersion,
+                        minSdkVersion = minSdkVersion,
+                        includeGitHubTools = includeGitHubTools,
+                        verifiedLiveModelIds = verifiedLiveModelIds,
+                        contents = conversationContents,
+                        onModelAutoCorrected = { failedModel, resolvedModel ->
+                            if (!notifiedAutoCorrection && turn == 0) {
+                                notifiedAutoCorrection = true
+                                onModelAutoCorrected(failedModel, resolvedModel)
+                            }
+                        },
+                        onConnected = { connectedModel ->
+                            activeModel = connectedModel
+                            addOrUpdateStep(
+                                AgentStep(
+                                    id = thinkStepId,
+                                    title = if (turn == 0) "Streaming from $connectedModel" else "Analyzing results ($connectedModel)",
+                                    detail = "${thinkingMode.badge} • Streaming response...",
+                                    status = AgentStepStatus.RUNNING,
+                                ),
+                            )
+                        },
+                        onStatusUpdate = { title, detail ->
+                            addOrUpdateStep(
+                                AgentStep(
+                                    id = thinkStepId,
+                                    title = title,
+                                    detail = detail,
+                                    status = AgentStepStatus.RUNNING,
+                                ),
+                            )
+                        },
+                        onTextDelta = { delta ->
+                            turnVisibleText.append(delta)
+                            accumulatedVisibleText.clear()
+                            accumulatedVisibleText.append(textBeforeTurn)
+                            accumulatedVisibleText.append(turnVisibleText)
+                            onStreamText(accumulatedVisibleText.toString(), activeModel)
+                        },
+                    )
+                }
+            } catch (agentError: Exception) {
+                if (agentError is CancellationException && agentError !is TimeoutCancellationException) {
+                    throw agentError
+                }
+                val isAuthFailure = agentError is GeminiApiException && agentError.httpCode in listOf(401, 403)
+                if (isAuthFailure) {
+                    throw agentError
+                }
+                val completedToolStepsBeforeError = steps.any {
+                    it.status == AgentStepStatus.COMPLETED && !it.id.startsWith("think_")
+                }
+                // "Try another way": direct compact non-tool unary generateContent rescue
+                val rescue = tryCompactNonToolRescue(
                     apiKey = apiKey,
-                    thinkingMode = thinkingMode,
+                    verifiedLiveModelIds = verifiedLiveModelIds,
                     projectLanguage = projectLanguage,
                     javaVersion = javaVersion,
                     minSdkVersion = minSdkVersion,
-                    contents = conversationContents,
-                    onConnected = { connectedModel ->
-                        activeModel = connectedModel
-                        addOrUpdateStep(
-                            AgentStep(
-                                id = thinkStepId,
-                                title = if (turn == 0) "Streaming from $connectedModel" else "Analyzing results ($connectedModel)",
-                                detail = "${thinkingMode.badge} • Streaming response...",
-                                status = AgentStepStatus.RUNNING,
-                            ),
-                        )
-                    },
+                    promptWithContext = promptWithContext,
+                    imageAttachments = imageAttachments,
+                    afterRateLimit = agentError is GeminiApiException && (agentError.httpCode == 429 || agentError.httpCode == 503),
                     onStatusUpdate = { title, detail ->
                         addOrUpdateStep(
                             AgentStep(
@@ -605,20 +670,99 @@ class GeminiCodeAssistant {
                             ),
                         )
                     },
-                    onTextDelta = { delta ->
-                        turnVisibleText.append(delta)
-                        accumulatedVisibleText.clear()
-                        accumulatedVisibleText.append(textBeforeTurn)
-                        accumulatedVisibleText.append(turnVisibleText)
-                        onStreamText(accumulatedVisibleText.toString(), activeModel)
-                    },
                 )
+                if (rescue == null) {
+                    if (completedToolStepsBeforeError) {
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = thinkStepId,
+                                title = "Completed edits before quota limit",
+                                detail = agentError.message ?: "Follow-up summary hit API limit",
+                                status = AgentStepStatus.COMPLETED,
+                                durationMs = System.currentTimeMillis() - turnStart,
+                            ),
+                        )
+                        val partialSummary = accumulatedVisibleText.toString().trim().ifBlank {
+                            "Completed your requested file updates. Tap **Build / Run** to test, or tap **Retry** if you want me to continue further."
+                        }
+                        onFinalizeSuccess(partialSummary, steps.toList(), cumulativeTokens, activeModel)
+                        completed = true
+                        break
+                    }
+                    throw agentError
+                }
+
+                // Auto-apply any `// file: path` blocks returned by direct rescue so non-coders get working files automatically
+                val autoApplyBlocks = extractCodeBlocks(rescue.text).filter { !it.suggestedPath.isNullOrBlank() }
+                if (autoApplyBlocks.isNotEmpty()) {
+                    var anyWritten = false
+                    for ((bIdx, block) in autoApplyBlocks.withIndex()) {
+                        coroutineContext.ensureActive()
+                        val targetPath = block.suggestedPath!!.trim()
+                        val writeStepId = "rescue_write_${turn}_$bIdx"
+                        val writeStart = System.currentTimeMillis()
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = writeStepId,
+                                title = "Saving $targetPath",
+                                detail = "Applying generated file...",
+                                status = AgentStepStatus.RUNNING,
+                                toolName = "write_file",
+                            ),
+                        )
+                        val writeResult = toolExecutor.writeFile(targetPath, block.code)
+                        if (writeResult.success) anyWritten = true
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = writeStepId,
+                                title = "Saved $targetPath",
+                                detail = writeResult.stepDetail,
+                                status = if (writeResult.success) AgentStepStatus.COMPLETED else AgentStepStatus.FAILED,
+                                expandedOutput = writeResult.detailedOutput,
+                                durationMs = System.currentTimeMillis() - writeStart,
+                                toolName = "write_file",
+                            ),
+                        )
+                    }
+                    if (anyWritten) {
+                        val buildStepId = "rescue_build_$turn"
+                        val buildStart = System.currentTimeMillis()
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = buildStepId,
+                                title = "Verifying APK build",
+                                detail = "Compiling updated project...",
+                                status = AgentStepStatus.RUNNING,
+                                toolName = "build_apk",
+                            ),
+                        )
+                        val buildResult = toolExecutor.buildApk(isRelease = false)
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = buildStepId,
+                                title = "Build verification",
+                                detail = buildResult.stepDetail,
+                                status = if (buildResult.success) AgentStepStatus.COMPLETED else AgentStepStatus.FAILED,
+                                expandedOutput = buildResult.detailedOutput,
+                                durationMs = System.currentTimeMillis() - buildStart,
+                                toolName = "build_apk",
+                            ),
+                        )
+                    }
+                }
+
+                if (rescue.text.isNotBlank()) {
+                    accumulatedVisibleText.clear()
+                    accumulatedVisibleText.append(textBeforeTurn)
+                    accumulatedVisibleText.append(rescue.text)
+                }
+                rescue.outcome
             }
 
             if (turnOutcome.usedModel != activeModel) {
                 activeModel = turnOutcome.usedModel
             }
-            if (turnVisibleText.isEmpty()) {
+            if (turnVisibleText.isEmpty() && accumulatedVisibleText.length == textBeforeTurn.length) {
                 accumulatedVisibleText.setLength(turnPrefixLength)
             }
 
@@ -1148,20 +1292,27 @@ class GeminiCodeAssistant {
         projectLanguage: ProjectLanguage,
         javaVersion: JavaVersionOption,
         minSdkVersion: Int,
+        includeGitHubTools: Boolean,
+        verifiedLiveModelIds: Set<String>,
         contents: JSONArray,
+        onModelAutoCorrected: (failedModel: String, workingModel: String) -> Unit,
         onConnected: (String) -> Unit,
         onStatusUpdate: (String, String) -> Unit,
         onTextDelta: (String) -> Unit,
     ): TurnStreamOutcome {
-        val candidates = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, primaryModelId).toMutableList()
+        val candidates = buildOrderedGeminiCandidates(primaryModelId, verifiedLiveModelIds).toMutableList()
         val attemptedModels = linkedSetOf<String>()
         var primaryError: Throwable? = null
+        var primaryGot404 = false
         var lastError: Throwable? = null
-        var discoveredLiveModels = false
+        var discoveredLiveModels = verifiedLiveModelIds.isNotEmpty()
 
         fun recordError(model: String, error: Throwable) {
             if (primaryError == null && model == candidates.firstOrNull()) {
                 primaryError = error
+                if (error is GeminiApiException && error.httpCode == 404) {
+                    primaryGot404 = true
+                }
             }
             lastError = error
         }
@@ -1174,16 +1325,19 @@ class GeminiCodeAssistant {
 
             var hasNextCandidate = index < candidates.size
             var includeThinkingConfig = true
+            var stripThoughts = false
             var attemptsOnCandidate = 0
 
-            while (attemptsOnCandidate < 2) {
+            while (attemptsOnCandidate < 3) {
                 coroutineContext.ensureActive()
                 attemptsOnCandidate++
+                val payloadContents = if (stripThoughts) stripThoughtPartsFromContents(contents) else contents
                 val requestBody = buildRequestPayload(
-                    contents = contents,
+                    contents = payloadContents,
                     modelId = candidate,
                     thinkingMode = thinkingMode,
                     includeThinkingConfig = includeThinkingConfig,
+                    includeGitHubTools = includeGitHubTools,
                     projectLanguage = projectLanguage,
                     javaVersion = javaVersion,
                     minSdkVersion = minSdkVersion,
@@ -1198,64 +1352,96 @@ class GeminiCodeAssistant {
                             onFallback = {
                                 onStatusUpdate(
                                     "Switching transport ($candidate)",
-                                    "Stream paused — trying direct response...",
+                                    "Trying direct generateContent response...",
                                 )
                             },
                             onTextDelta = onTextDelta,
                         )
                     }
+                    if (primaryGot404 && candidate != primaryModelId) {
+                        onModelAutoCorrected(primaryModelId, candidate)
+                    }
                     return outcome.copy(usedModel = candidate)
                 } catch (e: GeminiApiException) {
                     recordError(candidate, e)
-                    val isConfig400 = e.httpCode == 400 && includeThinkingConfig
-                    if (isConfig400) {
-                        includeThinkingConfig = false
-                        continue
+                    if (e.httpCode == 401 || e.httpCode == 403) {
+                        throw e
+                    }
+                    if (e.httpCode == 400) {
+                        if (includeThinkingConfig && buildThinkingConfigJson(candidate, thinkingMode) != null) {
+                            includeThinkingConfig = false
+                            continue
+                        }
+                        if (!stripThoughts) {
+                            stripThoughts = true
+                            continue
+                        }
+                        if (hasNextCandidate) {
+                            val nextModel = candidates[index]
+                            onStatusUpdate(
+                                "Adjusting model ($candidate)",
+                                "Switching to $nextModel...",
+                            )
+                            break
+                        }
+                        throw e
                     }
 
-                    if (!hasNextCandidate && !discoveredLiveModels && shouldFailoverHttpStatus(e.httpCode)) {
+                    // On 404 (or exhausted candidates), immediately query /v1beta/models so we only try verified live models
+                    if ((!discoveredLiveModels && e.httpCode == 404) ||
+                        (!hasNextCandidate && !discoveredLiveModels && shouldFailoverHttpStatus(e.httpCode))
+                    ) {
                         discoveredLiveModels = true
-                        appendLiveGeminiCandidates(apiKey, candidates, attemptedModels, onStatusUpdate)
+                        appendLiveGeminiCandidates(
+                            apiKey = apiKey,
+                            candidates = candidates,
+                            insertAtIndex = index,
+                            attemptedModels = attemptedModels,
+                            onStatusUpdate = onStatusUpdate,
+                        )
                         hasNextCandidate = index < candidates.size
                     }
 
                     if (shouldFailoverHttpStatus(e.httpCode) && hasNextCandidate) {
-                        if (isTransientHttpStatus(e.httpCode) && attemptsOnCandidate == 1) {
-                            onStatusUpdate(
-                                "High demand (${e.httpCode}) on $candidate",
-                                "Quick retry on $candidate before failover...",
-                            )
-                            delay(400L)
-                            continue
-                        }
                         val nextModel = candidates[index]
-                        val statusLabel = if (e.httpCode == 404) {
-                            "Model unavailable (404)"
-                        } else {
-                            "Overload (${e.httpCode}) on $candidate"
+                        val statusLabel = when (e.httpCode) {
+                            404 -> "Model unavailable (404)"
+                            429 -> "Rate limit (429) on $candidate"
+                            else -> "High demand (${e.httpCode}) on $candidate"
                         }
                         onStatusUpdate(
                             statusLabel,
                             "Switching to $nextModel...",
                         )
+                        if (isTransientHttpStatus(e.httpCode)) {
+                            delay((e.retryAfterMs ?: 250L).coerceIn(200L, 1200L))
+                        }
                         break
                     }
 
-                    if (isTransientHttpStatus(e.httpCode) && attemptsOnCandidate == 1) {
+                    if (isTransientHttpStatus(e.httpCode) && attemptsOnCandidate <= 2) {
+                        val waitMs = (e.retryAfterMs ?: 1800L).coerceIn(1000L, 4500L)
                         onStatusUpdate(
                             "High demand (${e.httpCode}) on $candidate",
-                            "Retrying $candidate in 0.4s...",
+                            "Retrying $candidate in ${waitMs / 1000.0}s...",
                         )
-                        delay(400L)
+                        delay(waitMs)
                         continue
                     }
 
                     throw e
-                } catch (e: SocketTimeoutException) {
-                    recordError(candidate, e)
+                } catch (e: IOException) {
+                    val timeoutErr = if (e is SocketTimeoutException) e else SocketTimeoutException(e.message ?: "Network timeout")
+                    recordError(candidate, timeoutErr)
                     if (!hasNextCandidate && !discoveredLiveModels) {
                         discoveredLiveModels = true
-                        appendLiveGeminiCandidates(apiKey, candidates, attemptedModels, onStatusUpdate)
+                        appendLiveGeminiCandidates(
+                            apiKey = apiKey,
+                            candidates = candidates,
+                            insertAtIndex = index,
+                            attemptedModels = attemptedModels,
+                            onStatusUpdate = onStatusUpdate,
+                        )
                         hasNextCandidate = index < candidates.size
                     }
                     if (hasNextCandidate) {
@@ -1266,15 +1452,20 @@ class GeminiCodeAssistant {
                         )
                         break
                     }
-                    throw e
+                    throw timeoutErr
                 } catch (e: TimeoutCancellationException) {
-                    // Distinguish inner ATTEMPT_TIMEOUT_MS from outer TURN_TIMEOUT_MS or user cancel
                     coroutineContext.ensureActive()
                     val timeoutErr = SocketTimeoutException("$candidate timed out after ${ATTEMPT_TIMEOUT_MS / 1000}s")
                     recordError(candidate, timeoutErr)
                     if (!hasNextCandidate && !discoveredLiveModels) {
                         discoveredLiveModels = true
-                        appendLiveGeminiCandidates(apiKey, candidates, attemptedModels, onStatusUpdate)
+                        appendLiveGeminiCandidates(
+                            apiKey = apiKey,
+                            candidates = candidates,
+                            insertAtIndex = index,
+                            attemptedModels = attemptedModels,
+                            onStatusUpdate = onStatusUpdate,
+                        )
                         hasNextCandidate = index < candidates.size
                     }
                     if (hasNextCandidate) {
@@ -1292,43 +1483,171 @@ class GeminiCodeAssistant {
         val firstErr = primaryError
         val finalErr = lastError
         if (firstErr != null && finalErr != null && firstErr !== finalErr) {
-            val combinedMsg = "Selected model '$primaryModelId' failed (${firstErr.message}); fallback also failed (${finalErr.message}). Check API key & billing/quota in Key settings."
+            val combinedMsg = "Selected model '$primaryModelId' failed (${firstErr.message}); fallback also failed (${finalErr.message}). Check API key & quota in Key settings."
             val code = (finalErr as? GeminiApiException)?.httpCode ?: (firstErr as? GeminiApiException)?.httpCode ?: 503
             throw GeminiApiException(code, combinedMsg)
         }
         throw finalErr ?: firstErr ?: GeminiApiException(503, "All Gemini models are unavailable or busy right now.")
     }
 
+    private fun buildOrderedGeminiCandidates(
+        primaryModelId: String,
+        verifiedLiveModelIds: Set<String>,
+    ): List<String> {
+        val baseChain = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, primaryModelId)
+        val liveCoding = verifiedLiveModelIds.filter { AiModelsCatalog.isCodingCapableGeminiModel(it) }
+        if (liveCoding.isEmpty()) return baseChain
+
+        val ordered = linkedSetOf<String>()
+        ordered.add(baseChain.first())
+        val verifiedSet = liveCoding.toSet()
+        // Prioritize proven models verified present on this API key
+        baseChain.drop(1).filter { it in verifiedSet }.forEach { ordered.add(it) }
+        liveCoding
+            .sortedWith(
+                compareBy<String>(
+                    { !it.contains("2.5-flash", ignoreCase = true) },
+                    { !it.contains("2.0-flash", ignoreCase = true) },
+                    { !it.contains("flash", ignoreCase = true) },
+                    { it.contains("preview", ignoreCase = true) || it.contains("exp", ignoreCase = true) },
+                ).thenBy { it },
+            )
+            .take(4)
+            .forEach { ordered.add(it) }
+        return ordered.toList()
+    }
+
     private suspend fun appendLiveGeminiCandidates(
         apiKey: String,
         candidates: MutableList<String>,
+        insertAtIndex: Int,
         attemptedModels: Set<String>,
         onStatusUpdate: (String, String) -> Unit,
     ) {
-        onStatusUpdate("Discovering live Gemini models", "Checking available models for your API key...")
+        onStatusUpdate("Checking live Gemini models", "Finding verified models for your API key...")
         val live = AiModelsCatalog.fetchLiveModels(AiProvider.GEMINI, apiKey).getOrNull().orEmpty()
+        val liveIds = live.map { it.id }.toSet()
         val ranked = live
             .map { it.id }
             .filter { id ->
                 id !in attemptedModels &&
-                    id !in candidates &&
-                    !id.contains("embedding", ignoreCase = true) &&
-                    !id.contains("aqa", ignoreCase = true) &&
-                    !id.contains("imagen", ignoreCase = true) &&
-                    !id.contains("veo", ignoreCase = true) &&
-                    !id.contains("tts", ignoreCase = true) &&
-                    !id.contains("robotics", ignoreCase = true)
+                    AiModelsCatalog.isCodingCapableGeminiModel(id)
             }
             .sortedWith(
                 compareBy<String>(
                     { !it.contains("2.5-flash", ignoreCase = true) },
                     { !it.contains("2.0-flash", ignoreCase = true) },
                     { !it.contains("flash", ignoreCase = true) },
-                    { it.contains("exp", ignoreCase = true) },
+                    { it.contains("preview", ignoreCase = true) || it.contains("exp", ignoreCase = true) },
                 ).thenBy { it },
             )
-            .take(3)
-        candidates.addAll(ranked)
+
+        if (liveIds.isNotEmpty() && insertAtIndex < candidates.size) {
+            val remaining = candidates.subList(insertAtIndex, candidates.size)
+            // Keep verified models ahead of unverified speculative names
+            val verifiedRemaining = remaining.filter { it in liveIds }
+            val extraVerified = ranked.filter { it !in candidates && it !in verifiedRemaining }.take(4)
+            val reordered = (verifiedRemaining + extraVerified).distinct()
+            remaining.clear()
+            remaining.addAll(reordered)
+        } else {
+            val extra = ranked.filter { it !in candidates }.take(4)
+            candidates.addAll(insertAtIndex.coerceAtMost(candidates.size), extra)
+        }
+    }
+
+    private data class RescueResult(
+        val text: String,
+        val outcome: TurnStreamOutcome,
+    )
+
+    private suspend fun tryCompactNonToolRescue(
+        apiKey: String,
+        verifiedLiveModelIds: Set<String>,
+        projectLanguage: ProjectLanguage,
+        javaVersion: JavaVersionOption,
+        minSdkVersion: Int,
+        promptWithContext: String,
+        imageAttachments: List<AiAttachment>,
+        afterRateLimit: Boolean = false,
+        onStatusUpdate: (String, String) -> Unit,
+    ): RescueResult? {
+        if (afterRateLimit) {
+            onStatusUpdate(
+                "Cooling down briefly",
+                "Preparing direct lightweight Gemini request...",
+            )
+            delay(1200L)
+        }
+        val compactPrompt = buildString {
+            appendLine("Direct code rescue mode (${projectLanguage.displayName}, Java ${javaVersion.badge}, API $minSdkVersion).")
+            appendLine("Provide complete runnable code blocks labeled `// file: relative/path.ext` cleanly.")
+            appendLine()
+            append(promptWithContext.take(6_500))
+        }
+        val compactContents = buildInitialContents(
+            history = emptyList(),
+            latestPromptWithContext = compactPrompt,
+            imageAttachments = imageAttachments,
+        )
+        val rescueBody = JSONObject().apply {
+            put(
+                "systemInstruction",
+                JSONObject().put(
+                    "parts",
+                    JSONArray().put(
+                        JSONObject().put(
+                            "text",
+                            "You are an Android coding assistant inside DroidForge Studio. Answer directly with concise Markdown and complete runnable code blocks marked `// file: <path>`.",
+                        ),
+                    ),
+                ),
+            )
+            put("contents", compactContents)
+            put("generationConfig", JSONObject().put("temperature", 0.3))
+        }.toString()
+
+        val liveFlash = verifiedLiveModelIds.filter {
+            AiModelsCatalog.isCodingCapableGeminiModel(it) && it.contains("flash", ignoreCase = true)
+        }
+        val rescueModels = (liveFlash + listOf(
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash",
+            "gemini-flash-latest",
+            "gemini-2.0-flash-lite",
+            "gemini-2.5-pro",
+        )).distinct()
+
+        for ((idx, candidate) in rescueModels.withIndex()) {
+            coroutineContext.ensureActive()
+            if (idx > 0) delay(750L)
+            onStatusUpdate(
+                "Direct chat fallback ($candidate)",
+                "Switching to lightweight direct Gemini request...",
+            )
+            val captured = StringBuilder()
+            val outcome = try {
+                withTimeout(UNARY_FALLBACK_READ_TIMEOUT_MS + 10_000L) {
+                    generateContentUnary(candidate, apiKey, rescueBody) { chunk ->
+                        captured.append(chunk)
+                    }
+                }
+            } catch (e: CancellationException) {
+                if (e !is TimeoutCancellationException) throw e
+                null
+            } catch (e: Exception) {
+                if (e is GeminiApiException && e.httpCode in listOf(401, 403)) throw e
+                null
+            } ?: continue
+            if (captured.isNotBlank()) {
+                return RescueResult(
+                    text = captured.toString(),
+                    outcome = outcome.copy(functionCalls = emptyList(), usedModel = candidate),
+                )
+            }
+        }
+        return null
     }
 
     private suspend fun callModelWithSseFallback(
@@ -1339,27 +1658,31 @@ class GeminiCodeAssistant {
         onFallback: () -> Unit,
         onTextDelta: (String) -> Unit,
     ): TurnStreamOutcome {
-        var receivedAnyBytes = false
-        return try {
+        var receivedAnyPayload = false
+        val sseOutcome = try {
             streamGenerateContent(
                 modelId = modelId,
                 apiKey = apiKey,
                 requestBody = requestBody,
-                onConnected = {
-                    receivedAnyBytes = true
-                    onConnected()
-                },
+                onConnected = onConnected,
+                onPayloadChunk = { receivedAnyPayload = true },
                 onTextDelta = { delta ->
-                    receivedAnyBytes = true
+                    receivedAnyPayload = true
                     onTextDelta(delta)
                 },
             )
-        } catch (e: SocketTimeoutException) {
-            if (receivedAnyBytes) throw e
-            Log.w(TAG, "SSE timed out before receiving response for $modelId; retrying non-streaming generateContent", e)
+        } catch (e: IOException) {
+            if (receivedAnyPayload) throw e
+            Log.w(TAG, "SSE failed before receiving payload for $modelId (${e.message}); trying unary generateContent", e)
             onFallback()
-            generateContentUnary(modelId, apiKey, requestBody, onTextDelta)
+            return generateContentUnary(modelId, apiKey, requestBody, onTextDelta)
         }
+        if (sseOutcome.modelParts.length() == 0 && sseOutcome.functionCalls.isEmpty()) {
+            Log.w(TAG, "SSE returned 0 parts for $modelId; retrying unary generateContent")
+            onFallback()
+            return generateContentUnary(modelId, apiKey, requestBody, onTextDelta)
+        }
+        return sseOutcome
     }
 
     private suspend fun executeToolCall(
@@ -1488,6 +1811,7 @@ class GeminiCodeAssistant {
         apiKey: String,
         requestBody: String,
         onConnected: () -> Unit,
+        onPayloadChunk: () -> Unit = {},
         onTextDelta: (String) -> Unit,
     ): TurnStreamOutcome = withContext(Dispatchers.IO) {
         val startedAt = System.currentTimeMillis()
@@ -1521,6 +1845,9 @@ class GeminiCodeAssistant {
             if (parsed.errorMessage != null) {
                 throw GeminiApiException(parsed.errorCode ?: status, parsed.errorMessage)
             }
+            if (parsed.rawParts.isNotEmpty() || parsed.text.isNotEmpty() || !parsed.finishReason.isNullOrBlank()) {
+                onPayloadChunk()
+            }
             if (!parsed.blockReason.isNullOrBlank()) blockReason = parsed.blockReason
             if (!parsed.finishReason.isNullOrBlank()) finishReason = parsed.finishReason
             if (parsed.usage.totalTokens > 0L || parsed.usage.inputTokens > 0L) {
@@ -1553,7 +1880,7 @@ class GeminiCodeAssistant {
                 val parsedMsg = extractApiErrorMessage(rawError).ifBlank {
                     connection.responseMessage.orEmpty().ifBlank { "HTTP $status" }
                 }
-                throw GeminiApiException(status, parsedMsg)
+                throw GeminiApiException(status, parsedMsg, parseRetryAfterMs(connection.getHeaderField("Retry-After")))
             }
             onConnected()
 
@@ -1634,7 +1961,7 @@ class GeminiCodeAssistant {
                 val parsedMsg = extractApiErrorMessage(rawResponse).ifBlank {
                     connection.responseMessage.orEmpty().ifBlank { "HTTP $status" }
                 }
-                throw GeminiApiException(status, parsedMsg)
+                throw GeminiApiException(status, parsedMsg, parseRetryAfterMs(connection.getHeaderField("Retry-After")))
             }
             val parsed = parseSsePayload(rawResponse)
             if (parsed.errorMessage != null) {
@@ -1675,11 +2002,16 @@ class GeminiCodeAssistant {
         imageAttachments: List<AiAttachment> = emptyList(),
     ): JSONArray {
         val contentsArray = JSONArray()
-        history.forEach { msg ->
+        history.takeLast(6).forEach { msg ->
+            val clipped = if (msg.text.length > 1_800) {
+                msg.text.take(1_800) + "\n... [earlier message truncated]"
+            } else {
+                msg.text
+            }
             contentsArray.put(
                 JSONObject().apply {
                     put("role", if (msg.isUser) "user" else "model")
-                    put("parts", JSONArray().put(JSONObject().put("text", msg.text)))
+                    put("parts", JSONArray().put(JSONObject().put("text", clipped)))
                 },
             )
         }
@@ -1740,11 +2072,32 @@ class GeminiCodeAssistant {
         """.trimIndent()
     }
 
+    private fun shouldIncludeGitHubTools(
+        prompt: String,
+        history: List<ChatMessage>,
+        githubConnected: Boolean,
+    ): Boolean {
+        if (githubConnected) return true
+        val combined = buildString {
+            append(prompt.lowercase())
+            history.takeLast(3).forEach { append(' ').append(it.text.take(300).lowercase()) }
+        }
+        return listOf("github", "repo", "repository", "workflow", "actions", "cloud build", "commit", "push", "pull", "branch", "clone")
+            .any { combined.contains(it) }
+    }
+
+    private fun parseRetryAfterMs(header: String?): Long? {
+        val raw = header?.trim() ?: return null
+        val seconds = raw.toLongOrNull() ?: return null
+        return (seconds * 1000L).coerceIn(250L, 4500L)
+    }
+
     internal fun buildRequestPayload(
         contents: JSONArray,
         modelId: String = GEMINI_MODEL_ID,
         thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
         includeThinkingConfig: Boolean = true,
+        includeGitHubTools: Boolean = true,
         projectLanguage: ProjectLanguage = ProjectLanguage.JAVA,
         javaVersion: JavaVersionOption = JavaVersionOption.JAVA_17,
         minSdkVersion: Int = 24,
@@ -1766,34 +2119,36 @@ class GeminiCodeAssistant {
                 ),
             )
             put("contents", contents)
-            put("tools", buildToolDeclarations())
+            put("tools", buildToolDeclarations(includeGitHubTools))
             put("generationConfig", genConfig)
         }.toString()
     }
 
-    private fun buildToolDeclarations(): JSONArray {
+    private fun buildToolDeclarations(includeGitHubTools: Boolean = true): JSONArray {
         val declarations = JSONArray().apply {
-            ProviderApiClient.buildSharedToolSpecs().forEach { (name, desc, schema) ->
-                val rawProps = schema.optJSONObject("properties")
-                val decl = JSONObject()
-                    .put("name", name)
-                    .put("description", desc)
-                if (rawProps != null && rawProps.length() > 0) {
-                    val upperSchema = JSONObject(schema.toString()).apply {
-                        put("type", "OBJECT")
-                        optJSONObject("properties")?.let { props ->
-                            props.keys().forEach { k ->
-                                props.optJSONObject(k)?.let { propObj ->
-                                    val t = propObj.optString("type", "string").uppercase()
-                                    propObj.put("type", t)
+            ProviderApiClient.buildSharedToolSpecs()
+                .filter { (name, _, _) -> includeGitHubTools || !name.startsWith("github_") }
+                .forEach { (name, desc, schema) ->
+                    val rawProps = schema.optJSONObject("properties")
+                    val decl = JSONObject()
+                        .put("name", name)
+                        .put("description", desc)
+                    if (rawProps != null && rawProps.length() > 0) {
+                        val upperSchema = JSONObject(schema.toString()).apply {
+                            put("type", "OBJECT")
+                            optJSONObject("properties")?.let { props ->
+                                props.keys().forEach { k ->
+                                    props.optJSONObject(k)?.let { propObj ->
+                                        val t = propObj.optString("type", "string").uppercase()
+                                        propObj.put("type", t)
+                                    }
                                 }
                             }
                         }
+                        decl.put("parameters", upperSchema)
                     }
-                    decl.put("parameters", upperSchema)
+                    put(decl)
                 }
-                put(decl)
-            }
         }
         return JSONArray().put(JSONObject().put("functionDeclarations", declarations))
     }
@@ -1971,6 +2326,30 @@ class GeminiCodeAssistant {
                 return JSONObject().put("thinkingLevel", level)
             }
             return null
+        }
+
+        internal fun stripThoughtPartsFromContents(contents: JSONArray): JSONArray {
+            val cleaned = JSONArray()
+            for (i in 0 until contents.length()) {
+                val msg = contents.optJSONObject(i) ?: continue
+                val copyMsg = JSONObject(msg.toString())
+                val parts = copyMsg.optJSONArray("parts")
+                if (parts != null) {
+                    val newParts = JSONArray()
+                    for (j in 0 until parts.length()) {
+                        val part = parts.optJSONObject(j) ?: continue
+                        if (part.optBoolean("thought", false)) continue
+                        val partCopy = JSONObject(part.toString())
+                        partCopy.remove("thoughtSignature")
+                        newParts.put(partCopy)
+                    }
+                    if (newParts.length() > 0) {
+                        copyMsg.put("parts", newParts)
+                    }
+                }
+                cleaned.put(copyMsg)
+            }
+            return cleaned
         }
 
         internal fun appendRawPart(target: MutableList<JSONObject>, incoming: JSONObject) {

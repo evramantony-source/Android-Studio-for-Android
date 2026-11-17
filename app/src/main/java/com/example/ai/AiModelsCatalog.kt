@@ -201,24 +201,15 @@ object AiModelsCatalog {
             provider = AiProvider.GEMINI,
             label = "Gemini 2.5 Flash-Lite",
             badge = "2.5 Lite",
-            description = "Ultra-fast responses and minimal token cost for quick edits.",
+            description = "High-quota ultra-fast responses for quick edits and fewer rate limits.",
             contextWindow = "1M ctx",
         ),
-        AiModelOption(
-            id = "gemini-2.5-pro",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 2.5 Pro",
-            badge = "2.5 Pro",
-            description = "High-accuracy multi-file engineering, deep thinking, and debugging.",
-            contextWindow = "1M ctx",
-        ),
-        // Gemini 2.0 Series (Stable Fallback)
         AiModelOption(
             id = "gemini-2.0-flash",
             provider = AiProvider.GEMINI,
             label = "Gemini 2.0 Flash",
-            badge = "2.0",
-            description = "Reliable general-purpose model when newer endpoints are busy.",
+            badge = "2.0 GA",
+            description = "Rock-solid general-purpose model with high API availability.",
             contextWindow = "1M ctx",
         ),
         AiModelOption(
@@ -226,7 +217,23 @@ object AiModelsCatalog {
             provider = AiProvider.GEMINI,
             label = "Gemini 2.0 Flash-Lite",
             badge = "2.0 Lite",
-            description = "Lightweight 2.0 variant for quick syntax fixes and Q&A.",
+            description = "Lightweight GA 2.0 variant for quick syntax fixes and Q&A.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "gemini-flash-latest",
+            provider = AiProvider.GEMINI,
+            label = "Gemini Flash Latest",
+            badge = "GA Alias",
+            description = "Google's rolling stable Flash alias for your API key.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "gemini-2.5-pro",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 2.5 Pro",
+            badge = "2.5 Pro",
+            description = "High-accuracy multi-file engineering and deep thinking (tighter free quota).",
             contextWindow = "1M ctx",
         ),
         // Gemini 3 Preview Series
@@ -234,15 +241,15 @@ object AiModelsCatalog {
             id = "gemini-3-flash-preview",
             provider = AiProvider.GEMINI,
             label = "Gemini 3 Flash Preview",
-            badge = "Gemini 3",
-            description = "Preview Gemini 3 Flash model (auto-falls back to 2.5 Flash if busy).",
+            badge = "Preview",
+            description = "Preview Gemini 3 Flash model (auto-falls back to 2.5 Flash if busy/unavailable).",
             contextWindow = "1M ctx",
         ),
         AiModelOption(
             id = "gemini-3-pro-preview",
             provider = AiProvider.GEMINI,
             label = "Gemini 3 Pro Preview",
-            badge = "Gemini 3",
+            badge = "Preview",
             description = "Preview Gemini 3 Pro model with dynamic thinking levels.",
             contextWindow = "1M ctx",
         ),
@@ -250,7 +257,7 @@ object AiModelsCatalog {
             id = "gemini-3.1-pro-preview",
             provider = AiProvider.GEMINI,
             label = "Gemini 3.1 Pro Preview",
-            badge = "Gemini 3",
+            badge = "Preview",
             description = "Preview Gemini 3.1 Pro for complex multi-file Android engineering.",
             contextWindow = "1M ctx",
         ),
@@ -258,25 +265,8 @@ object AiModelsCatalog {
             id = "gemini-3.1-pro-preview-customtools",
             provider = AiProvider.GEMINI,
             label = "Gemini 3.1 Pro CustomTools",
-            badge = "Gemini 3",
+            badge = "Preview",
             description = "Agent-tuned Gemini 3.1 Pro optimized for custom file & build tool loops.",
-            contextWindow = "1M ctx",
-        ),
-        // Gemini 1.5 Legacy Series
-        AiModelOption(
-            id = "gemini-1.5-pro",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 1.5 Pro",
-            badge = "1.5 Legacy",
-            description = "Classic 2M context model for broad compatibility.",
-            contextWindow = "2M ctx",
-        ),
-        AiModelOption(
-            id = "gemini-1.5-flash",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 1.5 Flash",
-            badge = "1.5 Legacy",
-            description = "Lightweight legacy model for simple code snippets.",
             contextWindow = "1M ctx",
         ),
     )
@@ -644,6 +634,37 @@ object AiModelsCatalog {
         return cleaned
     }
 
+    fun isCodingCapableGeminiModel(rawModelId: String): Boolean {
+        val id = rawModelId.lowercase().trim().removePrefix("models/")
+        if (id.isBlank()) return false
+        val excludedTokens = listOf(
+            "embedding",
+            "aqa",
+            "imagen",
+            "veo",
+            "tts",
+            "robotics",
+            "-image",
+            "image-",
+            "image_generation",
+            "audio",
+            "native-audio",
+            "live",
+            "dialog",
+            "computer-use",
+            "deep-research",
+            "gemma",
+            "banana",
+            "learnlm",
+            "-thinking",
+            "1.0-",
+            "1.5-",
+            "-vision",
+            "lyria",
+        )
+        return excludedTokens.none { id.contains(it) }
+    }
+
     fun fallbackChain(provider: AiProvider, primaryModelId: String): List<String> {
         val cleanPrimary = normalizeModelId(provider, primaryModelId)
         val pool = when (provider) {
@@ -651,9 +672,9 @@ object AiModelsCatalog {
                 "gemini-2.5-flash",
                 "gemini-2.5-flash-lite",
                 "gemini-2.0-flash",
-                "gemini-2.5-pro",
+                "gemini-flash-latest",
                 "gemini-2.0-flash-lite",
-                "gemini-3-flash-preview",
+                "gemini-2.5-pro",
             )
             AiProvider.OPENAI -> listOf(
                 "gpt-5-mini",
@@ -717,7 +738,7 @@ object AiModelsCatalog {
                         for (j in 0 until methods.length()) add(methods.optString(j))
                     }
                 }.any { it == "generateContent" }
-                if (!supportsGenerate || rawName.isBlank()) continue
+                if (!supportsGenerate || rawName.isBlank() || !isCodingCapableGeminiModel(rawName)) continue
                 val inputLimit = item.optInt("inputTokenLimit", 0)
                 val ctxLabel = if (inputLimit >= 1_000_000) "${inputLimit / 1_000_000}M ctx"
                 else if (inputLimit >= 1000) "${inputLimit / 1000}K ctx" else ""
@@ -726,14 +747,26 @@ object AiModelsCatalog {
                         id = rawName,
                         provider = AiProvider.GEMINI,
                         label = item.optString("displayName").ifBlank { rawName },
-                        badge = if (rawName.contains("gemini-3")) "Gemini 3" else "Live",
-                        description = item.optString("description").ifBlank { "Fetched live from Google AI Studio." }.take(120),
+                        badge = when {
+                            rawName.contains("2.5-flash") -> "2.5 GA"
+                            rawName.contains("2.0-flash") -> "2.0 GA"
+                            rawName.contains("gemini-3") -> "Gemini 3"
+                            else -> "Live"
+                        },
+                        description = item.optString("description").ifBlank { "Verified live on your Google AI Studio key." }.take(120),
                         contextWindow = ctxLabel,
                         isLiveFetched = true,
                     ),
                 )
             }
-            return results.sortedBy { it.id }
+            return results.sortedWith(
+                compareBy<AiModelOption>(
+                    { !it.id.contains("2.5-flash", ignoreCase = true) },
+                    { !it.id.contains("2.0-flash", ignoreCase = true) },
+                    { !it.id.contains("flash", ignoreCase = true) },
+                    { it.id.contains("preview", ignoreCase = true) || it.id.contains("exp", ignoreCase = true) },
+                ).thenBy { it.id },
+            )
         } finally {
             conn.disconnect()
         }
