@@ -141,7 +141,7 @@ fun GeminiPanel(
     val currentModelId = com.example.ai.AiModelsCatalog.normalizeModelId(activeProvider, providerModels[activeProvider])
     val hasEffectiveKey = remember(activeProvider, providerApiKeys) {
         when (activeProvider) {
-            AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
+            AiProvider.GEMINI -> true
             else -> providerApiKeys[activeProvider].orEmpty().isNotBlank()
         }
     }

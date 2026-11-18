@@ -187,12 +187,37 @@ data class AiUsageSummary(
 object AiModelsCatalog {
 
     val builtInGeminiModels: List<AiModelOption> = listOf(
-        // Gemini 2.5 Series (GA Fastest & Most Reliable)
+        // Built-in Firebase AI Logic Models (No API Key Required)
+        AiModelOption(
+            id = "gemini-3.8-flash",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 3.8 Flash",
+            badge = "Built-in",
+            description = "Default Firebase AI Logic model — fast autonomous coding with no API key required.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "gemini-3.5-flash-lite",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 3.5 Flash-Lite",
+            badge = "Built-in Lite",
+            description = "Ultra-fast Firebase AI Logic model for rapid edits & Q&A (no API key required).",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "gemini-4-argon",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 4 Argon",
+            badge = "Firebase Pro",
+            description = "Deep reasoning & complex architecture via Firebase AI Logic (Blaze plan).",
+            contextWindow = "1M ctx",
+        ),
+        // Gemini 2.5 Series (Custom Google AI Studio Key GA Models)
         AiModelOption(
             id = "gemini-2.5-flash",
             provider = AiProvider.GEMINI,
             label = "Gemini 2.5 Flash",
-            badge = "Default",
+            badge = "2.5 GA",
             description = "Fast, reliable GA Gemini model for autonomous coding, builds & tool use.",
             contextWindow = "1M ctx",
         ),

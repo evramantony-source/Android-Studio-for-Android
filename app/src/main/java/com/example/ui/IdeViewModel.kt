@@ -278,14 +278,18 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         if (fetched.isEmpty()) return
         val savedModel = repository.providerModels.first()[AiProvider.GEMINI].orEmpty()
+        if (com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel(savedModel)) return
         val fetchedIds = fetched.map { it.id.lowercase() }.toSet()
         if (savedModel.lowercase() !in fetchedIds) {
-            val replacement = fetched.firstOrNull { it.id == GEMINI_MODEL_ID }?.id
-                ?: fetched.firstOrNull { AiModelsCatalog.isCodingCapableGeminiModel(it.id) }?.id
-            if (!replacement.isNullOrBlank()) {
-                val keyToSave = explicitApiKey ?: repository.providerApiKeys.first()[AiProvider.GEMINI].orEmpty()
-                repository.saveProviderConfig(AiProvider.GEMINI, keyToSave, replacement)
+            val replacement = if (savedModel.equals("gemini-4-hydrogen", ignoreCase = true)) {
+                GEMINI_MODEL_ID
+            } else {
+                fetched.firstOrNull { it.id == "gemini-2.5-flash" }?.id
+                    ?: fetched.firstOrNull { AiModelsCatalog.isCodingCapableGeminiModel(it.id) }?.id
+                    ?: GEMINI_MODEL_ID
             }
+            val keyToSave = explicitApiKey ?: repository.providerApiKeys.first()[AiProvider.GEMINI].orEmpty()
+            repository.saveProviderConfig(AiProvider.GEMINI, keyToSave, replacement)
         }
     }
 

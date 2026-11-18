@@ -115,9 +115,11 @@ fun ProviderKeysDialog(
                 ) {
                     AiProvider.entries.forEach { provider ->
                         val configured = when (provider) {
-                            AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(keyInputs[provider].orEmpty()).isNotEmpty()
+                            AiProvider.GEMINI -> true
                             else -> keyInputs[provider].orEmpty().isNotBlank()
                         }
+                        val hasCustomGemini = provider == AiProvider.GEMINI &&
+                            GeminiCodeAssistant.resolveApiKey(keyInputs[provider].orEmpty()).isNotEmpty()
                         FilterChip(
                             selected = selectedProvider == provider,
                             onClick = {
@@ -125,8 +127,14 @@ fun ProviderKeysDialog(
                                 keyTestStatus = null
                             },
                             label = {
+                                val labelText = when {
+                                    provider == AiProvider.GEMINI && hasCustomGemini -> "${provider.shortName} • Custom + Built-in"
+                                    provider == AiProvider.GEMINI -> "${provider.shortName} • Built-in"
+                                    configured -> "${provider.shortName} • Ready"
+                                    else -> provider.shortName
+                                }
                                 Text(
-                                    text = if (configured) "${provider.shortName} • Ready" else provider.shortName,
+                                    text = labelText,
                                     style = MaterialTheme.typography.labelSmall,
                                 )
                             },
@@ -138,9 +146,9 @@ fun ProviderKeysDialog(
                 Text(
                     text = when {
                         selectedProvider == AiProvider.GEMINI && activeKey.isBlank() && hasBuiltInGemini ->
-                            "Using the built-in GEMINI_API_KEY configured at build time. Paste a custom Google AI Studio key below to override it."
+                            "Built-in Gemini (Firebase AI Logic + build key) is active with zero setup. Optionally paste a custom key below."
                         selectedProvider == AiProvider.GEMINI ->
-                            "Google AI Studio API key for Gemini models. Saved locally on this device."
+                            "Built-in Gemini works automatically via Firebase AI Logic (no API key needed). Optionally paste a Google AI Studio key below as a backup/override."
                         selectedProvider == AiProvider.OPENAI ->
                             "OpenAI API key (sk-...) for GPT-6, GPT-5, GPT-4.5, GPT-4.1, GPT-4o, o4-mini, o3, and o1 models."
                         else ->

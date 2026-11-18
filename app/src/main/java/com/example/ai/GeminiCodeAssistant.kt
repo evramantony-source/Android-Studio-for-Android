@@ -30,7 +30,7 @@ import java.net.UnknownHostException
 import kotlin.coroutines.coroutineContext
 
 private const val TAG = "GeminiCodeAssistant"
-const val GEMINI_MODEL_ID = "gemini-2.5-flash"
+const val GEMINI_MODEL_ID = "gemini-3.8-flash"
 private const val GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 private const val MAX_AGENT_TURNS = 12
 private const val CONNECT_TIMEOUT_MS = 15_000
@@ -48,6 +48,8 @@ internal class GeminiApiException(
 ) : Exception(message)
 
 class GeminiCodeAssistant {
+
+    private val firebaseAiClient by lazy { FirebaseAiAgentClient() }
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
@@ -164,7 +166,7 @@ class GeminiCodeAssistant {
             AiProvider.OPENAI, AiProvider.CLAUDE -> apiKey.trim()
         }
 
-        if (resolvedKey.isEmpty()) {
+        if (provider != AiProvider.GEMINI && resolvedKey.isEmpty()) {
             _uiState.value = AiUiState.Error(
                 "${provider.shortName} API key is not configured. Tap the Key icon above to add your ${provider.displayName} key.",
                 isRetryable = false,
@@ -298,9 +300,9 @@ class GeminiCodeAssistant {
 
         try {
             when (provider) {
-                AiProvider.GEMINI -> runGeminiLoop(
-                    initialModel = requestedModel,
-                    apiKey = resolvedKey,
+                AiProvider.GEMINI -> runGeminiWithFirebaseAndRestFallback(
+                    requestedModel = requestedModel,
+                    resolvedKey = resolvedKey,
                     thinkingMode = thinkingMode,
                     projectLanguage = projectLanguage,
                     javaVersion = javaVersion,
@@ -536,6 +538,133 @@ class GeminiCodeAssistant {
             }
             if (userCancelledRunId == assistantMsgId) {
                 userCancelledRunId = null
+            }
+        }
+    }
+
+    private suspend fun runGeminiWithFirebaseAndRestFallback(
+        requestedModel: String,
+        resolvedKey: String,
+        thinkingMode: AiThinkingMode,
+        projectLanguage: ProjectLanguage,
+        javaVersion: JavaVersionOption,
+        minSdkVersion: Int,
+        includeGitHubTools: Boolean,
+        verifiedLiveModelIds: Set<String>,
+        imageAttachments: List<AiAttachment>,
+        priorHistory: List<ChatMessage>,
+        promptWithContext: String,
+        steps: MutableList<AgentStep>,
+        accumulatedVisibleText: StringBuilder,
+        addOrUpdateStep: (AgentStep) -> Unit,
+        onModelAutoCorrected: (failedModel: String, workingModel: String) -> Unit,
+        onStreamText: (String, String) -> Unit,
+        onFinalizeSuccess: (String, List<AgentStep>, Long, String) -> Unit,
+        onFinalizeFailure: (String, AiUiState.Error) -> Unit,
+        toolExecutor: ProjectToolExecutor,
+        onUsage: (String, TokenUsageDelta, Int) -> Unit,
+    ) {
+        val systemText = buildSystemInstruction(requestedModel, projectLanguage, javaVersion, minSdkVersion)
+        val preferFirebaseFirst = resolvedKey.isEmpty() ||
+            FirebaseAiAgentClient.isFirebaseAiLogicModel(requestedModel) ||
+            requestedModel.equals("gemini-4-hydrogen", ignoreCase = true)
+
+        suspend fun runFirebasePath() {
+            firebaseAiClient.runAgentLoop(
+                requestedModel = requestedModel,
+                thinkingMode = thinkingMode,
+                projectLanguage = projectLanguage,
+                javaVersion = javaVersion,
+                minSdkVersion = minSdkVersion,
+                includeGitHubTools = includeGitHubTools,
+                imageAttachments = imageAttachments,
+                priorHistory = priorHistory,
+                promptWithContext = promptWithContext,
+                systemInstructionText = systemText,
+                steps = steps,
+                accumulatedVisibleText = accumulatedVisibleText,
+                addOrUpdateStep = addOrUpdateStep,
+                onStreamText = onStreamText,
+                onFinalizeSuccess = onFinalizeSuccess,
+                onFinalizeFailure = onFinalizeFailure,
+                toolExecutor = toolExecutor,
+                executeTool = ::executeToolCall,
+                describeTool = ::describeToolCall,
+                onUsage = onUsage,
+            )
+        }
+
+        suspend fun runRestPath(startModel: String) {
+            runGeminiLoop(
+                initialModel = startModel,
+                apiKey = resolvedKey,
+                thinkingMode = thinkingMode,
+                projectLanguage = projectLanguage,
+                javaVersion = javaVersion,
+                minSdkVersion = minSdkVersion,
+                includeGitHubTools = includeGitHubTools,
+                verifiedLiveModelIds = verifiedLiveModelIds,
+                imageAttachments = imageAttachments,
+                priorHistory = priorHistory,
+                promptWithContext = promptWithContext,
+                steps = steps,
+                accumulatedVisibleText = accumulatedVisibleText,
+                addOrUpdateStep = addOrUpdateStep,
+                onModelAutoCorrected = onModelAutoCorrected,
+                onStreamText = onStreamText,
+                onFinalizeSuccess = onFinalizeSuccess,
+                onFinalizeFailure = onFinalizeFailure,
+                toolExecutor = toolExecutor,
+                onUsage = onUsage,
+            )
+        }
+
+        if (preferFirebaseFirst) {
+            try {
+                runFirebasePath()
+                if (requestedModel.equals("gemini-4-hydrogen", ignoreCase = true)) {
+                    onModelAutoCorrected(requestedModel, GEMINI_MODEL_ID)
+                }
+                return
+            } catch (fbErr: Exception) {
+                if (fbErr is CancellationException && fbErr !is TimeoutCancellationException) throw fbErr
+                if (resolvedKey.isEmpty()) throw fbErr
+                Log.w(TAG, "Firebase AI path failed (${fbErr.message}); falling back to REST API key path", fbErr)
+                steps.clear()
+                accumulatedVisibleText.clear()
+                addOrUpdateStep(
+                    AgentStep(
+                        id = "engine_fallback",
+                        title = "Switching to REST API backup",
+                        detail = "Firebase AI unavailable; using your Gemini API key...",
+                        status = AgentStepStatus.COMPLETED,
+                    ),
+                )
+                val restModel = if (FirebaseAiAgentClient.isFirebaseAiLogicModel(requestedModel)) {
+                    "gemini-2.5-flash"
+                } else {
+                    requestedModel
+                }
+                runRestPath(restModel)
+            }
+        } else {
+            try {
+                runRestPath(requestedModel)
+                return
+            } catch (restErr: Exception) {
+                if (restErr is CancellationException && restErr !is TimeoutCancellationException) throw restErr
+                Log.w(TAG, "REST API key path failed (${restErr.message}); falling back to Firebase AI Logic", restErr)
+                steps.clear()
+                accumulatedVisibleText.clear()
+                addOrUpdateStep(
+                    AgentStep(
+                        id = "engine_fallback",
+                        title = "Switching to Firebase AI Logic",
+                        detail = "API key busy/unavailable; using built-in Firebase AI...",
+                        status = AgentStepStatus.COMPLETED,
+                    ),
+                )
+                runFirebasePath()
             }
         }
     }

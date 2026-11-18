@@ -26,8 +26,8 @@ import org.robolectric.annotation.Config
 class GeminiCodeAssistantTest {
 
     @Test
-    fun usesFastReliableGemini25DefaultModel() {
-        assertEquals("gemini-2.5-flash", GEMINI_MODEL_ID)
+    fun usesFastReliableGeminiDefaultModel() {
+        assertEquals("gemini-3.8-flash", GEMINI_MODEL_ID)
     }
 
     @Test
@@ -36,8 +36,8 @@ class GeminiCodeAssistantTest {
         assertEquals("gemini-3.8-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-3.8-flash"))
         assertEquals("gemini-3.6-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "models/gemini-3.6-flash"))
         assertEquals("gemini-2.5-pro", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-2.5-pro"))
-        assertEquals("gemini-2.5-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, ""))
-        assertEquals("gemini-2.5-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "   "))
+        assertEquals("gemini-3.8-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, ""))
+        assertEquals("gemini-3.8-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "   "))
     }
 
     @Test
@@ -480,5 +480,18 @@ class GeminiCodeAssistantTest {
         )
         val fullDecls = fullJson.getJSONArray("tools").getJSONObject(0).getJSONArray("functionDeclarations")
         assertEquals(23, fullDecls.length())
+    }
+
+    @Test
+    fun firebaseAiCandidateChainPrioritizesBuiltInGemini38AndFlashLite() {
+        assertTrue(com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel("gemini-3.8-flash"))
+        assertTrue(com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel("gemini-3.5-flash-lite"))
+        assertFalse(com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel("gemini-2.5-flash"))
+
+        val defaultChain = com.example.ai.FirebaseAiAgentClient.buildFirebaseModelCandidates("gemini-3.8-flash")
+        assertEquals(listOf("gemini-3.8-flash", "gemini-3.5-flash-lite"), defaultChain)
+
+        val argonChain = com.example.ai.FirebaseAiAgentClient.buildFirebaseModelCandidates("gemini-4-argon")
+        assertEquals(listOf("gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite"), argonChain)
     }
 }
