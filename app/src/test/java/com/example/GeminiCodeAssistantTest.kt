@@ -507,8 +507,10 @@ class GeminiCodeAssistantTest {
             hasSiteKeyResource = false,
             isDebugBuild = false,
             projectId = "gen-lang-client-0552974152",
-            certSha1 = "4D:95:5B:76:B0:68:1E",
+            certSha1 = "4D:95:5B:76:B0:68:1E:11:8D:E4:58:D7:86:2A:01:E5:D0:81:6D:F2",
         )
+        assertFalse(snap.hasProvisionedCertMismatch())
+        assertTrue(snap.copy(certSha1 = "D2:03:CB:F9:11:22").hasProvisionedCertMismatch())
         val label = snap.summaryLabel()
         assertTrue(label.contains("reCAPTCHA Enterprise"))
         assertTrue(label.contains("release"))

@@ -14,7 +14,6 @@ import com.google.firebase.appcheck.debug.DebugAppCheckProviderFactory
 import com.google.firebase.appcheck.recaptcha.RecaptchaAppCheckProviderFactory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
 import java.security.MessageDigest
@@ -29,6 +28,7 @@ private const val DEBUG_SECRET_KEY = "com.google.firebase.appcheck.debug.DEBUG_S
 private const val RECAPTCHA_SITE_KEY_RES = "recaptcha_site_key"
 private const val PROVISIONED_FIREBASE_PROJECT_ID = "gen-lang-client-0552974152"
 private const val PROVISIONED_RECAPTCHA_SITE_KEY = "6LepvR8uAAAAANbf8BVV-o5L6Abjj0gQjsINpfMf"
+private const val PROVISIONED_CERT_SHA1 = "4D:95:5B:76:B0:68:1E:11:8D:E4:58:D7:86:2A:01:E5:D0:81:6D:F2"
 private const val DUMMY_ERROR_TOKEN = "eyJlcnJvciI6IlVOS05PV05fRVJST1IifQ=="
 
 enum class AppCheckProviderMode(val label: String) {
@@ -47,6 +47,14 @@ data class AppCheckDiagnosticSnapshot(
     val certSha1: String = "",
     val lastTokenError: String? = null,
 ) {
+    fun hasProvisionedCertMismatch(): Boolean {
+        return projectId == PROVISIONED_FIREBASE_PROJECT_ID &&
+            certSha1.isNotBlank() &&
+            !certSha1.equals(PROVISIONED_CERT_SHA1, ignoreCase = true)
+    }
+
+    fun expectedCertSha1Prefix(): String = PROVISIONED_CERT_SHA1.take(11)
+
     fun summaryLabel(): String {
         val buildKind = if (isDebugBuild) "debug" else "release"
         val certPart = if (certSha1.isNotBlank()) " • cert ${certSha1.take(11)}…" else ""
@@ -80,7 +88,8 @@ object AppCheckDiagnostics {
         return lower.contains("app check") ||
             lower.contains("appcheck") ||
             lower.contains("attestation") ||
-            lower.contains("recaptcha")
+            lower.contains("recaptcha") ||
+            lower.contains("too many attempts")
     }
 }
 
@@ -194,12 +203,10 @@ fun configureAppCheck(context: Context, intent: Intent?) {
 }
 
 suspend fun ensureValidAppCheckToken(timeoutMs: Long = 15_000L): AppCheckPreflightResult {
-    val first = fetchAppCheckTokenOnce(forceRefresh = false, timeoutMs = timeoutMs)
-    if (first is AppCheckPreflightResult.Valid) return first
-
-    // Retry once with forceRefresh=true to evict any stale cached/dummy token from an earlier install
-    delay(300L)
-    return fetchAppCheckTokenOnce(forceRefresh = true, timeoutMs = timeoutMs)
+    // Do NOT immediately follow a failed getAppCheckToken(false) with getAppCheckToken(true):
+    // Firebase App Check's RetryManager triggers backoff and overwrites the real underlying HTTP/Recaptcha
+    // error with "Too many attempts."
+    return fetchAppCheckTokenOnce(forceRefresh = false, timeoutMs = timeoutMs)
 }
 
 suspend fun forceRefreshAppCheckToken(timeoutMs: Long = 15_000L): AppCheckPreflightResult {

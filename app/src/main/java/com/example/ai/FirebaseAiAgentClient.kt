@@ -108,11 +108,15 @@ internal class FirebaseAiAgentClient {
                         val errMsg = buildString {
                             append("Firebase App Check failed: ${check.reason}")
                             append(" [${diag.summaryLabel()}].")
-                            append(" Tap Configure Key below to use a Gemini API key as backup")
-                            if (diag.isDebugBuild) {
-                                append(", or install the Release APK build.")
+                            if (diag.hasProvisionedCertMismatch()) {
+                                append(" This APK is signed with cert ${diag.certSha1.take(11)}…, but Firebase expects ${diag.expectedCertSha1Prefix()}… — add DEBUG_KEYSTORE_BASE64 to GitHub Secrets (from debug.keystore.base64) and install the Release APK, or tap Configure Key below for a Gemini API key.")
                             } else {
-                                append(".")
+                                append(" Tap Configure Key below to use a Gemini API key as backup")
+                                if (diag.isDebugBuild) {
+                                    append(", or install the Release APK build.")
+                                } else {
+                                    append(".")
+                                }
                             }
                         }
                         addOrUpdateStep(
