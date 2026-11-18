@@ -565,9 +565,6 @@ class GeminiCodeAssistant {
         onUsage: (String, TokenUsageDelta, Int) -> Unit,
     ) {
         val systemText = buildSystemInstruction(requestedModel, projectLanguage, javaVersion, minSdkVersion)
-        val preferFirebaseFirst = resolvedKey.isEmpty() ||
-            FirebaseAiAgentClient.isFirebaseAiLogicModel(requestedModel) ||
-            requestedModel.equals("gemini-4-hydrogen", ignoreCase = true)
 
         suspend fun runFirebasePath() {
             firebaseAiClient.runAgentLoop(
@@ -619,6 +616,29 @@ class GeminiCodeAssistant {
             )
         }
 
+        val firebaseReady = FirebaseAiAgentClient.isFirebaseConfigured()
+        val preferFirebaseFirst = firebaseReady && (
+            resolvedKey.isEmpty() ||
+                FirebaseAiAgentClient.isFirebaseAiLogicModel(requestedModel) ||
+                requestedModel.equals("gemini-4-hydrogen", ignoreCase = true)
+            )
+
+        fun fallbackRestModelFor(model: String): String {
+            return if (FirebaseAiAgentClient.isFirebaseAiLogicModel(model) ||
+                model.equals("gemini-4-hydrogen", ignoreCase = true)
+            ) {
+                "gemini-2.5-flash"
+            } else {
+                model
+            }
+        }
+
+        if (!firebaseReady && resolvedKey.isEmpty()) {
+            val msg = "Built-in Firebase AI is not bundled in this APK build (google-services.json missing). Tap the Key icon above to add a Gemini API key, or add GOOGLE_SERVICES_JSON to GitHub Secrets."
+            onFinalizeFailure(msg, AiUiState.Error(msg, isRetryable = false))
+            return
+        }
+
         if (preferFirebaseFirst) {
             try {
                 runFirebasePath()
@@ -640,19 +660,15 @@ class GeminiCodeAssistant {
                         status = AgentStepStatus.COMPLETED,
                     ),
                 )
-                val restModel = if (FirebaseAiAgentClient.isFirebaseAiLogicModel(requestedModel)) {
-                    "gemini-2.5-flash"
-                } else {
-                    requestedModel
-                }
-                runRestPath(restModel)
+                runRestPath(fallbackRestModelFor(requestedModel))
             }
         } else {
             try {
-                runRestPath(requestedModel)
+                runRestPath(fallbackRestModelFor(requestedModel))
                 return
             } catch (restErr: Exception) {
                 if (restErr is CancellationException && restErr !is TimeoutCancellationException) throw restErr
+                if (!firebaseReady) throw restErr
                 Log.w(TAG, "REST API key path failed (${restErr.message}); falling back to Firebase AI Logic", restErr)
                 steps.clear()
                 accumulatedVisibleText.clear()

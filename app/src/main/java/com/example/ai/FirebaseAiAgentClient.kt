@@ -591,6 +591,10 @@ internal class FirebaseAiAgentClient {
             "gemini-4-argon",
         )
 
+        fun isFirebaseConfigured(): Boolean {
+            return runCatching { com.google.firebase.FirebaseApp.getInstance() }.isSuccess
+        }
+
         fun isFirebaseAiLogicModel(modelId: String): Boolean {
             return modelId.trim().removePrefix("models/").lowercase() in FIREBASE_MODEL_IDS
         }

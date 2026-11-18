@@ -18,8 +18,10 @@ private const val RECAPTCHA_SITE_KEY_RES = "recaptcha_site_key"
 
 fun configureAppCheck(context: Context, intent: Intent?) {
     try {
-        if (FirebaseApp.getApps(context).isEmpty()) {
-            FirebaseApp.initializeApp(context)
+        val firebaseApp = FirebaseApp.getApps(context).firstOrNull() ?: FirebaseApp.initializeApp(context)
+        if (firebaseApp == null) {
+            Log.w(TAG, "FirebaseApp not configured (no google-services.json); skipping App Check setup.")
+            return
         }
 
         val debugToken = if (BuildConfig.DEBUG) intent?.getStringExtra(DEBUG_TOKEN_EXTRA) else null
