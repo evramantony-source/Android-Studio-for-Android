@@ -80,6 +80,7 @@ internal class FirebaseAiAgentClient {
             tools = listOf(Tool.functionDeclarations(toolDeclarations)),
         ).startChat(history = historyContents)
         var nextTurnInput: Content = initialUserContent
+        var retriedAppCheckForceRefresh = false
 
         for (turn in 0 until FIREBASE_MAX_TURNS) {
             coroutineContext.ensureActive()
@@ -91,10 +92,52 @@ internal class FirebaseAiAgentClient {
                 AgentStep(
                     id = thinkStepId,
                     title = if (turn == 0) "Connecting via Firebase AI ($activeModel)" else "Analyzing tool results ($activeModel)",
-                    detail = "${thinkingMode.badge} • Streaming via Firebase AI Logic...",
+                    detail = if (turn == 0) {
+                        "Verifying Firebase App Check & ${thinkingMode.badge} stream..."
+                    } else {
+                        "${thinkingMode.badge} • Streaming via Firebase AI Logic..."
+                    },
                     status = AgentStepStatus.RUNNING,
                 ),
             )
+
+            if (turn == 0) {
+                when (val check = ensureValidAppCheckToken(timeoutMs = 15_000L)) {
+                    is AppCheckPreflightResult.Invalid -> {
+                        val diag = check.diagnostic
+                        val errMsg = buildString {
+                            append("Firebase App Check failed: ${check.reason}")
+                            append(" [${diag.summaryLabel()}].")
+                            append(" Tap Configure Key below to use a Gemini API key as backup")
+                            if (diag.isDebugBuild) {
+                                append(", or install the Release APK build.")
+                            } else {
+                                append(".")
+                            }
+                        }
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = thinkStepId,
+                                title = "Firebase App Check blocked request",
+                                detail = "${check.reason} (${diag.summaryLabel()})",
+                                status = AgentStepStatus.FAILED,
+                                durationMs = System.currentTimeMillis() - turnStart,
+                            ),
+                        )
+                        throw IllegalStateException(errMsg)
+                    }
+                    is AppCheckPreflightResult.Valid -> {
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = thinkStepId,
+                                title = "Connecting via Firebase AI ($activeModel)",
+                                detail = "${thinkingMode.badge} • App Check (${check.diagnostic.mode.label}) ready...",
+                                status = AgentStepStatus.RUNNING,
+                            ),
+                        )
+                    }
+                }
+            }
 
             val turnPrefixLen = accumulatedVisibleText.length
             if (accumulatedVisibleText.isNotEmpty() && !accumulatedVisibleText.endsWith("\n")) {
@@ -152,6 +195,30 @@ internal class FirebaseAiAgentClient {
                 }
 
                 if (!turnSucceeded) {
+                    if (AppCheckDiagnostics.isAppCheckError(lastTurnError)) {
+                        if (!retriedAppCheckForceRefresh && turnText.isEmpty() && collectedCalls.isEmpty()) {
+                            retriedAppCheckForceRefresh = true
+                            addOrUpdateStep(
+                                AgentStep(
+                                    id = thinkStepId,
+                                    title = "Refreshing App Check token",
+                                    detail = "Retrying attestation (${AppCheckDiagnostics.snapshot.summaryLabel()})...",
+                                    status = AgentStepStatus.RUNNING,
+                                ),
+                            )
+                            val refreshed = forceRefreshAppCheckToken(timeoutMs = 15_000L)
+                            if (refreshed is AppCheckPreflightResult.Valid) {
+                                chat = createGenerativeModel(
+                                    modelName = activeModel,
+                                    systemInstructionText = systemInstructionText,
+                                    tools = listOf(Tool.functionDeclarations(toolDeclarations)),
+                                ).startChat(history = historyContents)
+                                delay(250L)
+                                continue
+                            }
+                        }
+                        break
+                    }
                     if (turn == 0 && turnText.isEmpty() && collectedCalls.isEmpty() && modelIdx + 1 < candidates.size) {
                         modelIdx++
                         activeModel = candidates[modelIdx]
@@ -177,6 +244,27 @@ internal class FirebaseAiAgentClient {
             }
 
             if (!turnSucceeded) {
+                if (AppCheckDiagnostics.isAppCheckError(lastTurnError)) {
+                    val diag = AppCheckDiagnostics.snapshot
+                    val raw = lastTurnError?.localizedMessage?.ifBlank { null } ?: "Firebase App Check token is invalid."
+                    val msg = buildString {
+                        append(raw)
+                        append(" [")
+                        append(diag.summaryLabel())
+                        append("].")
+                        if (!diag.lastTokenError.isNullOrBlank() && !raw.contains(diag.lastTokenError!!, ignoreCase = true)) {
+                            append(" Attestation detail: ${diag.lastTokenError}.")
+                        }
+                        append(" Tap Configure Key below to use a Gemini API key as backup")
+                        if (diag.isDebugBuild) {
+                            append(", or install the Release APK build.")
+                        } else {
+                            append(".")
+                        }
+                    }
+                    throw IllegalStateException(msg, lastTurnError)
+                }
+
                 // Lightweight non-tool Firebase AI rescue pass
                 val rescueResult = tryFirebaseNonToolRescue(
                     candidates = candidates,

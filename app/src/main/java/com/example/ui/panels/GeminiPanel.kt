@@ -564,6 +564,7 @@ fun GeminiPanel(
                                 }
                                 val needsKeyAction = !hasEffectiveKey ||
                                     aiState.message.contains("key", ignoreCase = true) ||
+                                    aiState.message.contains("App Check", ignoreCase = true) ||
                                     aiState.message.contains("401") ||
                                     aiState.message.contains("403")
                                 if (aiState.isRetryable || aiState.isModelOverloaded || needsKeyAction) {

@@ -494,4 +494,25 @@ class GeminiCodeAssistantTest {
         val argonChain = com.example.ai.FirebaseAiAgentClient.buildFirebaseModelCandidates("gemini-4-argon")
         assertEquals(listOf("gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite"), argonChain)
     }
+
+    @Test
+    fun appCheckDiagnosticsDetectsErrorsAndFormatsSummary() {
+        assertTrue(com.example.ai.AppCheckDiagnostics.isAppCheckMessage("Firebase App Check token is invalid."))
+        assertTrue(com.example.ai.AppCheckDiagnostics.isAppCheckMessage("Recaptcha task failed: NETWORK_ERROR"))
+        assertTrue(com.example.ai.AppCheckDiagnostics.isAppCheckMessage("HTTP 403: App attestation failed"))
+        assertFalse(com.example.ai.AppCheckDiagnostics.isAppCheckMessage("Model quota exceeded (429)"))
+
+        val snap = com.example.ai.AppCheckDiagnosticSnapshot(
+            mode = com.example.ai.AppCheckProviderMode.RECAPTCHA_ENTERPRISE,
+            hasSiteKeyResource = false,
+            isDebugBuild = false,
+            projectId = "gen-lang-client-0552974152",
+            certSha1 = "4D:95:5B:76:B0:68:1E",
+        )
+        val label = snap.summaryLabel()
+        assertTrue(label.contains("reCAPTCHA Enterprise"))
+        assertTrue(label.contains("release"))
+        assertTrue(label.contains("4D:95:5B:76"))
+        assertTrue(label.contains("fallback site key"))
+    }
 }

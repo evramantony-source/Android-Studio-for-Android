@@ -36,29 +36,29 @@ jobs:
             "$SDKMANAGER" --sdk_root="$SDK_DIR" "platforms;android-36.1" "build-tools;36.0.0" || true
           fi
 
-      - name: Restore cached CI debug keystore
-        uses: actions/cache@v4
-        with:
-          path: debug.keystore
-          key: ci-debug-keystore-v2
-
-      - name: Ensure consistent debug keystore
+      - name: Ensure consistent signing keystore (always prefer repo debug.keystore.base64)
         env:
           DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
           if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
             echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > debug.keystore
-          elif [ ! -f debug.keystore ]; then
-            if [ -f debug.keystore.base64 ]; then
-              base64 -d debug.keystore.base64 > debug.keystore
-            else
-              keytool -genkeypair -keystore debug.keystore \
-                -storepass android -alias androiddebugkey -keypass android \
-                -keyalg RSA -keysize 2048 -validity 10000 \
-                -dname "CN=Android Debug,O=Android,C=US"
-            fi
+            echo "Decoded debug.keystore from DEBUG_KEYSTORE_BASE64 secret."
+          elif [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+            echo "Decoded debug.keystore from committed debug.keystore.base64."
+          else
+            keytool -genkeypair -keystore debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "::warning::Generated fallback debug.keystore; SHA-1 will differ from AI Studio keystore."
           fi
-          keytool -list -keystore debug.keystore -storepass android -alias androiddebugkey
+          keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | grep -E "SHA1:|SHA256:" || true
+
+          # Prepare a release-aliased copy of the exact same registered keystore certificate
+          cp debug.keystore /tmp/ci-release.keystore
+          keytool -changealias -alias androiddebugkey -destalias upload \
+            -keystore /tmp/ci-release.keystore -storepass android -keypass android
 
       - name: Cache Robolectric Android SDK jars
         uses: actions/cache@v4
@@ -77,10 +77,12 @@ jobs:
             printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY" > .env
           fi
 
-      - name: Configure google-services.json from secret if available
+      - name: Configure Firebase files from secrets if missing in repo
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
           GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+          FIREBASE_APPLET_CONFIG_XML: ${{ secrets.FIREBASE_APPLET_CONFIG_XML }}
+          RECAPTCHA_SITE_KEY: ${{ secrets.RECAPTCHA_SITE_KEY }}
         run: |
           if [ ! -f app/google-services.json ]; then
             if [ -n "$GOOGLE_SERVICES_JSON" ]; then
@@ -93,6 +95,15 @@ jobs:
               echo "::notice::app/google-services.json not present; building without bundled Firebase config (add GOOGLE_SERVICES_JSON secret for zero-key Firebase AI or enter a key in-app)."
             fi
           fi
+          if [ ! -f app/src/main/res/values/firebase_applet_config.xml ]; then
+            if [ -n "$FIREBASE_APPLET_CONFIG_XML" ]; then
+              printf '%s\n' "$FIREBASE_APPLET_CONFIG_XML" > app/src/main/res/values/firebase_applet_config.xml
+              echo "Restored firebase_applet_config.xml from secret."
+            elif [ -n "$RECAPTCHA_SITE_KEY" ]; then
+              printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="recaptcha_site_key" translatable="false">%s</string>\n</resources>\n' "$RECAPTCHA_SITE_KEY" > app/src/main/res/values/firebase_applet_config.xml
+              echo "Generated firebase_applet_config.xml from RECAPTCHA_SITE_KEY secret."
+            fi
+          fi
 
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
@@ -102,14 +113,23 @@ jobs:
       - name: Run unit & Robolectric tests
         run: gradle :app:testDebugUnitTest --no-daemon --stacktrace -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
 
+      - name: Build Release APK (signed with registered cert, non-debuggable for Firebase App Check)
+        env:
+          KEYSTORE_PATH: /tmp/ci-release.keystore
+          STORE_PASSWORD: android
+          KEY_PASSWORD: android
+        run: gradle :app:assembleRelease --no-daemon --stacktrace -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
+
       - name: Build Debug APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
 
-      - name: Upload Debug APK artifact
+      - name: Upload Release & Debug APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: droidforge-studio-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: droidforge-studio-apks
+          path: |
+            app/build/outputs/apk/release/app-release.apk
+            app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
       - name: Publish rolling APK release for direct mobile download
@@ -117,16 +137,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          cp app/build/outputs/apk/release/app-release.apk droidforge-studio-release.apk
           cp app/build/outputs/apk/debug/app-debug.apk droidforge-studio-debug.apk
-          RELEASE_NOTES="Latest automated debug APK build from commit ${GITHUB_SHA::7}."
+          RELEASE_NOTES="Latest automated APK builds from commit ${GITHUB_SHA::7}. Use droidforge-studio-release.apk on physical phones (non-debuggable build for Firebase App Check)."
           RELEASE_OK=true
           if gh release view latest-debug >/dev/null 2>&1; then
-            gh release upload latest-debug droidforge-studio-debug.apk --clobber || RELEASE_OK=false
-            gh release edit latest-debug --prerelease=false --latest --notes "$RELEASE_NOTES" || true
+            gh release upload latest-debug droidforge-studio-release.apk droidforge-studio-debug.apk --clobber || RELEASE_OK=false
+            gh release edit latest-debug --prerelease=false --latest --title "DroidForge Studio (Latest APK)" --notes "$RELEASE_NOTES" || true
           else
-            gh release create latest-debug droidforge-studio-debug.apk \
+            gh release create latest-debug droidforge-studio-release.apk droidforge-studio-debug.apk \
               --target "$GITHUB_SHA" \
-              --title "DroidForge Studio (Latest Debug APK)" \
+              --title "DroidForge Studio (Latest APK)" \
               --notes "$RELEASE_NOTES" \
               --latest || RELEASE_OK=false
           fi
@@ -134,8 +155,8 @@ jobs:
             echo "::warning::Could not publish GitHub Release. Enable 'Read and write permissions' under Repo Settings -> Actions -> General -> Workflow permissions."
           fi
           {
-            echo "### DroidForge Studio APK Ready"
-            echo "- **1-Tap Direct APK Download:** https://github.com/${{ github.repository }}/releases/latest/download/droidforge-studio-debug.apk"
+            echo "### DroidForge Studio APKs Ready"
+            echo "- **1-Tap Release APK (Recommended for Phone + Firebase App Check):** https://github.com/${{ github.repository }}/releases/latest/download/droidforge-studio-release.apk"
+            echo "- **1-Tap Debug APK:** https://github.com/${{ github.repository }}/releases/latest/download/droidforge-studio-debug.apk"
             echo "- **Releases Page:** https://github.com/${{ github.repository }}/releases/tag/latest-debug"
-            echo "- **Workflow Artifact (.zip):** On mobile Chrome, swipe left on the Artifacts row or enable **Desktop site** in Chrome's ⋮ menu to see the Download button."
           } >> "$GITHUB_STEP_SUMMARY"
