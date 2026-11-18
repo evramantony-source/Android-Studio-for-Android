@@ -88,7 +88,9 @@ fun ProviderKeysDialog(
     var keyTestStatus by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
 
     val activeKey = keyInputs[selectedProvider].orEmpty()
-    val hasBuiltInGemini = selectedProvider == AiProvider.GEMINI && GeminiCodeAssistant.hasBuiltInApiKey()
+    val hasBuiltInFirebase = remember { com.example.ai.FirebaseAiAgentClient.isFirebaseConfigured() }
+    val hasBuiltInGemini = selectedProvider == AiProvider.GEMINI &&
+        (hasBuiltInFirebase || GeminiCodeAssistant.hasBuiltInApiKey())
     val currentModel = AiModelsCatalog.normalizeModelId(selectedProvider, providerModels[selectedProvider])
 
     AlertDialog(
@@ -114,12 +116,12 @@ fun ProviderKeysDialog(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     AiProvider.entries.forEach { provider ->
-                        val configured = when (provider) {
-                            AiProvider.GEMINI -> true
-                            else -> keyInputs[provider].orEmpty().isNotBlank()
-                        }
                         val hasCustomGemini = provider == AiProvider.GEMINI &&
                             GeminiCodeAssistant.resolveApiKey(keyInputs[provider].orEmpty()).isNotEmpty()
+                        val configured = when (provider) {
+                            AiProvider.GEMINI -> hasBuiltInFirebase || hasCustomGemini
+                            else -> keyInputs[provider].orEmpty().isNotBlank()
+                        }
                         FilterChip(
                             selected = selectedProvider == provider,
                             onClick = {
@@ -128,8 +130,9 @@ fun ProviderKeysDialog(
                             },
                             label = {
                                 val labelText = when {
-                                    provider == AiProvider.GEMINI && hasCustomGemini -> "${provider.shortName} • Custom + Built-in"
-                                    provider == AiProvider.GEMINI -> "${provider.shortName} • Built-in"
+                                    provider == AiProvider.GEMINI && hasBuiltInFirebase && hasCustomGemini -> "${provider.shortName} • Custom + Built-in"
+                                    provider == AiProvider.GEMINI && hasBuiltInFirebase -> "${provider.shortName} • Built-in"
+                                    provider == AiProvider.GEMINI && hasCustomGemini -> "${provider.shortName} • Ready"
                                     configured -> "${provider.shortName} • Ready"
                                     else -> provider.shortName
                                 }
@@ -145,10 +148,12 @@ fun ProviderKeysDialog(
 
                 Text(
                     text = when {
-                        selectedProvider == AiProvider.GEMINI && activeKey.isBlank() && hasBuiltInGemini ->
-                            "Built-in Gemini (Firebase AI Logic + build key) is active with zero setup. Optionally paste a custom key below."
-                        selectedProvider == AiProvider.GEMINI ->
+                        selectedProvider == AiProvider.GEMINI && hasBuiltInFirebase ->
                             "Built-in Gemini works automatically via Firebase AI Logic (no API key needed). Optionally paste a Google AI Studio key below as a backup/override."
+                        selectedProvider == AiProvider.GEMINI && hasBuiltInGemini ->
+                            "Built-in Gemini API key is bundled. Optionally paste your own Google AI Studio key below."
+                        selectedProvider == AiProvider.GEMINI ->
+                            "This APK was built without google-services.json. Tap 'Get Key' for a free Google AI Studio API key (AIza...) below, or set GOOGLE_SERVICES_JSON in GitHub Secrets for zero-key Firebase AI."
                         selectedProvider == AiProvider.OPENAI ->
                             "OpenAI API key (sk-...) for GPT-6, GPT-5, GPT-4.5, GPT-4.1, GPT-4o, o4-mini, o3, and o1 models."
                         else ->

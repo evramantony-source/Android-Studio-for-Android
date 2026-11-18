@@ -139,9 +139,11 @@ fun GeminiPanel(
     }
 
     val currentModelId = com.example.ai.AiModelsCatalog.normalizeModelId(activeProvider, providerModels[activeProvider])
-    val hasEffectiveKey = remember(activeProvider, providerApiKeys) {
+    val isFirebaseReady = remember { com.example.ai.FirebaseAiAgentClient.isFirebaseConfigured() }
+    val hasEffectiveKey = remember(activeProvider, providerApiKeys, isFirebaseReady) {
         when (activeProvider) {
-            AiProvider.GEMINI -> true
+            AiProvider.GEMINI -> isFirebaseReady ||
+                GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
             else -> providerApiKeys[activeProvider].orEmpty().isNotBlank()
         }
     }
@@ -285,7 +287,8 @@ fun GeminiPanel(
             ) {
                 AiProvider.entries.forEach { provider ->
                     val ready = when (provider) {
-                        AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
+                        AiProvider.GEMINI -> isFirebaseReady ||
+                            GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
                         else -> providerApiKeys[provider].orEmpty().isNotBlank()
                     }
                     FilterChip(

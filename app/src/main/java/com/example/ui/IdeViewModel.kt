@@ -260,6 +260,16 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 val savedKeys = repository.providerApiKeys.first()
                 val savedGeminiKey = savedKeys[AiProvider.GEMINI].orEmpty()
                 val resolvedKey = GeminiCodeAssistant.resolveApiKey(savedGeminiKey)
+                val savedModel = repository.providerModels.first()[AiProvider.GEMINI].orEmpty()
+                val firebaseReady = com.example.ai.FirebaseAiAgentClient.isFirebaseConfigured()
+
+                if (savedModel.equals("gemini-4-hydrogen", ignoreCase = true) ||
+                    (!firebaseReady && resolvedKey.isNotBlank() && com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel(savedModel))
+                ) {
+                    val healed = if (firebaseReady) GEMINI_MODEL_ID else "gemini-2.5-flash"
+                    repository.saveProviderConfig(AiProvider.GEMINI, savedGeminiKey, healed)
+                }
+
                 if (resolvedKey.isNotBlank()) {
                     val fetched = AiModelsCatalog.fetchLiveModels(AiProvider.GEMINI, resolvedKey).getOrNull().orEmpty()
                     if (fetched.isNotEmpty()) {
@@ -725,9 +735,19 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     fun saveProviderConfig(provider: AiProvider, apiKey: String, modelId: String) {
         viewModelScope.launch {
             val cleanedKey = apiKey.trim()
-            repository.saveProviderConfig(provider, cleanedKey, modelId)
+            val firebaseReady = com.example.ai.FirebaseAiAgentClient.isFirebaseConfigured()
+            val adjustedModel = if (
+                provider == AiProvider.GEMINI &&
+                (modelId.equals("gemini-4-hydrogen", ignoreCase = true) ||
+                    (!firebaseReady && cleanedKey.isNotEmpty() && com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel(modelId)))
+            ) {
+                if (firebaseReady) GEMINI_MODEL_ID else "gemini-2.5-flash"
+            } else {
+                modelId
+            }
+            repository.saveProviderConfig(provider, cleanedKey, adjustedModel)
             repository.saveActiveProvider(provider)
-            val cleanModel = modelId.trim().removePrefix("models/").ifBlank { provider.defaultModelId }
+            val cleanModel = adjustedModel.trim().removePrefix("models/").ifBlank { provider.defaultModelId }
             _statusBanner.value = "Saved ${provider.shortName} settings ($cleanModel)."
             if (cleanedKey.isNotBlank()) {
                 refreshLiveModels(provider, explicitApiKey = cleanedKey)
