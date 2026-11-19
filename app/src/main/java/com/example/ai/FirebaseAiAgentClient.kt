@@ -102,18 +102,18 @@ internal class FirebaseAiAgentClient {
             )
 
             if (turn == 0) {
-                when (val check = ensureValidAppCheckToken(timeoutMs = 15_000L)) {
+                when (val check = ensureValidAppCheckToken(timeoutMs = 20_000L)) {
                     is AppCheckPreflightResult.Invalid -> {
                         val diag = check.diagnostic
                         val errMsg = buildString {
                             append("Firebase App Check failed: ${check.reason}")
                             append(" [${diag.summaryLabel()}].")
                             if (diag.hasProvisionedCertMismatch()) {
-                                append(" This APK is signed with cert ${diag.certSha1.take(11)}…, but Firebase expects ${diag.expectedCertSha1Prefix()}… — add DEBUG_KEYSTORE_BASE64 to GitHub Secrets (from debug.keystore.base64) and install the Release APK, or tap Configure Key below for a Gemini API key.")
+                                append(" This GitHub APK is signed with cert ${diag.certSha1.take(11)}…, not Firebase's ${diag.expectedCertSha1Prefix()}…. To fix Firebase zero-key: add DEBUG_KEYSTORE_BASE64 (contents of debug.keystore.base64) to GitHub Secrets, rebuild, uninstall this APK once, and install droidforge-studio-release.apk — or tap Configure Key below.")
                             } else {
                                 append(" Tap Configure Key below to use a Gemini API key as backup")
                                 if (diag.isDebugBuild) {
-                                    append(", or install the Release APK build.")
+                                    append(", or install droidforge-studio-release.apk.")
                                 } else {
                                     append(".")
                                 }
@@ -250,20 +250,27 @@ internal class FirebaseAiAgentClient {
             if (!turnSucceeded) {
                 if (AppCheckDiagnostics.isAppCheckError(lastTurnError)) {
                     val diag = AppCheckDiagnostics.snapshot
-                    val raw = lastTurnError?.localizedMessage?.ifBlank { null } ?: "Firebase App Check token is invalid."
+                    val raw = diag.effectiveErrorMessage(
+                        lastTurnError?.localizedMessage?.ifBlank { null } ?: "Firebase App Check token is invalid.",
+                    )
+                    val detail = diag.lastRootCauseError ?: diag.lastTokenError
                     val msg = buildString {
                         append(raw)
                         append(" [")
                         append(diag.summaryLabel())
                         append("].")
-                        if (!diag.lastTokenError.isNullOrBlank() && !raw.contains(diag.lastTokenError!!, ignoreCase = true)) {
-                            append(" Attestation detail: ${diag.lastTokenError}.")
+                        if (!detail.isNullOrBlank() && !raw.contains(detail, ignoreCase = true)) {
+                            append(" Attestation detail: $detail.")
                         }
-                        append(" Tap Configure Key below to use a Gemini API key as backup")
-                        if (diag.isDebugBuild) {
-                            append(", or install the Release APK build.")
+                        if (diag.hasProvisionedCertMismatch()) {
+                            append(" This GitHub APK is signed with cert ${diag.certSha1.take(11)}…, not Firebase's ${diag.expectedCertSha1Prefix()}…. Add DEBUG_KEYSTORE_BASE64 (from debug.keystore.base64) to GitHub Secrets, rebuild, uninstall this APK once, and install droidforge-studio-release.apk — or tap Configure Key below.")
                         } else {
-                            append(".")
+                            append(" Tap Configure Key below to use a Gemini API key as backup")
+                            if (diag.isDebugBuild) {
+                                append(", or install droidforge-studio-release.apk.")
+                            } else {
+                                append(".")
+                            }
                         }
                     }
                     throw IllegalStateException(msg, lastTurnError)

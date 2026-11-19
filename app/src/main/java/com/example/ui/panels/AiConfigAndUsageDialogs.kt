@@ -91,6 +91,7 @@ fun ProviderKeysDialog(
     val hasBuiltInFirebase = remember { com.example.ai.FirebaseAiAgentClient.isFirebaseConfigured() }
     val hasBuiltInGemini = selectedProvider == AiProvider.GEMINI &&
         (hasBuiltInFirebase || GeminiCodeAssistant.hasBuiltInApiKey())
+    val hasBuiltInOpenRouter = remember { GeminiCodeAssistant.hasBuiltInOpenRouterApiKey() }
     val currentModel = AiModelsCatalog.normalizeModelId(selectedProvider, providerModels[selectedProvider])
 
     AlertDialog(
@@ -118,8 +119,10 @@ fun ProviderKeysDialog(
                     AiProvider.entries.forEach { provider ->
                         val hasCustomGemini = provider == AiProvider.GEMINI &&
                             GeminiCodeAssistant.resolveApiKey(keyInputs[provider].orEmpty()).isNotEmpty()
+                        val hasCustomOpenRouter = keyInputs[provider].orEmpty().isNotBlank()
                         val configured = when (provider) {
                             AiProvider.GEMINI -> hasBuiltInFirebase || hasCustomGemini
+                            AiProvider.OPENROUTER -> hasBuiltInOpenRouter || hasCustomOpenRouter
                             else -> keyInputs[provider].orEmpty().isNotBlank()
                         }
                         FilterChip(
@@ -132,7 +135,7 @@ fun ProviderKeysDialog(
                                 val labelText = when {
                                     provider == AiProvider.GEMINI && hasBuiltInFirebase && hasCustomGemini -> "${provider.shortName} • Custom + Built-in"
                                     provider == AiProvider.GEMINI && hasBuiltInFirebase -> "${provider.shortName} • Built-in"
-                                    provider == AiProvider.GEMINI && hasCustomGemini -> "${provider.shortName} • Ready"
+                                    provider == AiProvider.OPENROUTER && hasBuiltInOpenRouter && !hasCustomOpenRouter -> "${provider.shortName} • Built-in"
                                     configured -> "${provider.shortName} • Ready"
                                     else -> provider.shortName
                                 }
@@ -146,21 +149,32 @@ fun ProviderKeysDialog(
                     }
                 }
 
+                val appCheckDiag = com.example.ai.AppCheckDiagnostics.snapshot
                 Text(
                     text = when {
+                        selectedProvider == AiProvider.GEMINI && hasBuiltInFirebase && appCheckDiag.hasProvisionedCertMismatch() ->
+                            "Built-in Firebase AI is bundled, but this APK is signed with cert ${appCheckDiag.certSha1.take(11)}… instead of ${appCheckDiag.expectedCertSha1Prefix()}…. Add DEBUG_KEYSTORE_BASE64 (from debug.keystore.base64) to GitHub Secrets & install the Release APK for zero-key Firebase, or paste a Google AI Studio key below."
                         selectedProvider == AiProvider.GEMINI && hasBuiltInFirebase ->
                             "Built-in Gemini works automatically via Firebase AI Logic (no API key needed). Optionally paste a Google AI Studio key below as a backup/override."
                         selectedProvider == AiProvider.GEMINI && hasBuiltInGemini ->
                             "Built-in Gemini API key is bundled. Optionally paste your own Google AI Studio key below."
                         selectedProvider == AiProvider.GEMINI ->
                             "This APK was built without google-services.json. Tap 'Get Key' for a free Google AI Studio API key (AIza...) below, or set GOOGLE_SERVICES_JSON in GitHub Secrets for zero-key Firebase AI."
+                        selectedProvider == AiProvider.OPENROUTER && hasBuiltInOpenRouter ->
+                            "Built-in OpenRouter key is bundled (works on all APK builds without Firebase App Check). Optionally paste your own sk-or-v1-... key below."
+                        selectedProvider == AiProvider.OPENROUTER ->
+                            "OpenRouter key (sk-or-v1-...) works on any APK build without Firebase App Check and gives access to free & paid coding models (Qwen3 Coder, DeepSeek, Gemini, Claude, GPT)."
                         selectedProvider == AiProvider.OPENAI ->
                             "OpenAI API key (sk-...) for GPT-6, GPT-5, GPT-4.5, GPT-4.1, GPT-4o, o4-mini, o3, and o1 models."
                         else ->
                             "Anthropic API key (sk-ant-...) for Claude 5.5, 4.5, 4.1, 4, 3.7, 3.5, and 3.0 models."
                     },
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (selectedProvider == AiProvider.GEMINI && hasBuiltInFirebase && appCheckDiag.hasProvisionedCertMismatch()) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                 )
 
                 OutlinedTextField(
@@ -194,6 +208,7 @@ fun ProviderKeysDialog(
                         onClick = {
                             val effectiveKey = when (selectedProvider) {
                                 AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(activeKey)
+                                AiProvider.OPENROUTER -> GeminiCodeAssistant.resolveOpenRouterApiKey(activeKey)
                                 else -> activeKey.trim()
                             }
                             if (effectiveKey.isBlank()) {
@@ -235,12 +250,17 @@ fun ProviderKeysDialog(
                         Text("Verify Key")
                     }
 
-                    if (selectedProvider == AiProvider.GEMINI) {
+                    val getKeyUrl = when (selectedProvider) {
+                        AiProvider.GEMINI -> "https://aistudio.google.com/apikey"
+                        AiProvider.OPENROUTER -> "https://openrouter.ai/keys"
+                        else -> null
+                    }
+                    if (getKeyUrl != null) {
                         AssistChip(
                             onClick = {
                                 runCatching {
                                     context.startActivity(
-                                        Intent(Intent.ACTION_VIEW, Uri.parse("https://aistudio.google.com/apikey")),
+                                        Intent(Intent.ACTION_VIEW, Uri.parse(getKeyUrl)),
                                     )
                                 }
                             },
@@ -348,6 +368,7 @@ fun ModelMenuDialog(
             AiProvider.GEMINI -> listOf("All", "2.5 GA", "2.0", "Gemini 3", "Live")
             AiProvider.OPENAI -> listOf("All", "GPT-6 / 5", "4.1 / 4o", "o-Series", "Live")
             AiProvider.CLAUDE -> listOf("All", "Claude 5", "Claude 4", "Claude 3", "Live")
+            AiProvider.OPENROUTER -> listOf("All", "Free", "Gemini", "Claude", "DeepSeek / Qwen", "Live")
         }
     }
 
@@ -367,6 +388,10 @@ fun ModelMenuDialog(
             val matchesGen = when (generationFilter) {
                 "All" -> true
                 "Live" -> option.isLiveFetched || id in liveIds
+                "Free" -> id.endsWith(":free") || option.badge.equals("Free", ignoreCase = true)
+                "Gemini" -> id.contains("gemini")
+                "Claude" -> id.contains("claude")
+                "DeepSeek / Qwen" -> id.contains("deepseek") || id.contains("qwen")
                 "2.5 GA" -> id.contains("2.5")
                 "2.0" -> id.contains("2.0") || id.contains("flash-latest")
                 "Gemini 3" -> id.contains("gemini-3")

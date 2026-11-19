@@ -258,6 +258,50 @@ internal object ProviderApiClient {
         thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
         onConnected: () -> Unit,
         onTextDelta: (String) -> Unit,
+    ): ExternalTurnOutcome = streamOpenAiCompatible(
+        endpointUrl = "https://api.openai.com/v1/chat/completions",
+        apiKey = apiKey,
+        modelId = modelId,
+        messages = messages,
+        thinkingMode = thinkingMode,
+        isOpenRouter = false,
+        extraHeaders = emptyMap(),
+        onConnected = onConnected,
+        onTextDelta = onTextDelta,
+    )
+
+    suspend fun streamOpenRouter(
+        apiKey: String,
+        modelId: String,
+        messages: JSONArray,
+        thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
+        onConnected: () -> Unit,
+        onTextDelta: (String) -> Unit,
+    ): ExternalTurnOutcome = streamOpenAiCompatible(
+        endpointUrl = "https://openrouter.ai/api/v1/chat/completions",
+        apiKey = apiKey,
+        modelId = modelId,
+        messages = messages,
+        thinkingMode = thinkingMode,
+        isOpenRouter = true,
+        extraHeaders = mapOf(
+            "HTTP-Referer" to "https://github.com/droidforge-studio",
+            "X-Title" to "DroidForge Studio",
+        ),
+        onConnected = onConnected,
+        onTextDelta = onTextDelta,
+    )
+
+    private suspend fun streamOpenAiCompatible(
+        endpointUrl: String,
+        apiKey: String,
+        modelId: String,
+        messages: JSONArray,
+        thinkingMode: AiThinkingMode,
+        isOpenRouter: Boolean,
+        extraHeaders: Map<String, String>,
+        onConnected: () -> Unit,
+        onTextDelta: (String) -> Unit,
     ): ExternalTurnOutcome = withContext(Dispatchers.IO) {
         val startedAt = System.currentTimeMillis()
         val tools = JSONArray().apply {
@@ -284,12 +328,14 @@ internal object ProviderApiClient {
             .put("stream_options", JSONObject().put("include_usage", true))
 
         val lowerModel = modelId.lowercase()
-        val isFixedTempReasoning = lowerModel.startsWith("o1") ||
-            lowerModel.startsWith("o3") ||
-            lowerModel.startsWith("o4") ||
-            lowerModel.startsWith("gpt-5") ||
-            lowerModel.startsWith("gpt-6")
-        if (!isFixedTempReasoning) {
+        val isOpenAiFixedTempReasoning = !isOpenRouter && (
+            lowerModel.startsWith("o1") ||
+                lowerModel.startsWith("o3") ||
+                lowerModel.startsWith("o4") ||
+                lowerModel.startsWith("gpt-5") ||
+                lowerModel.startsWith("gpt-6")
+            )
+        if (!isOpenAiFixedTempReasoning) {
             bodyObj.put("temperature", 0.3)
         } else if (!lowerModel.startsWith("o1")) {
             val effort = when (thinkingMode) {
@@ -301,7 +347,7 @@ internal object ProviderApiClient {
         }
 
         val bodyBytes = bodyObj.toString().toByteArray(Charsets.UTF_8)
-        val conn = (URL("https://api.openai.com/v1/chat/completions").openConnection() as HttpURLConnection).apply {
+        val conn = (URL(endpointUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = CONNECT_TIMEOUT_MS
             readTimeout = READ_TIMEOUT_MS
@@ -312,6 +358,9 @@ internal object ProviderApiClient {
             setRequestProperty("Accept", "text/event-stream")
             setRequestProperty("Accept-Encoding", "identity")
             setRequestProperty("Authorization", "Bearer $apiKey")
+            extraHeaders.forEach { (header, value) ->
+                setRequestProperty(header, value)
+            }
         }
 
         val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->

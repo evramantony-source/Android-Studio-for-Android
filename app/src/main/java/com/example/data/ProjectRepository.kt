@@ -61,10 +61,12 @@ class ProjectRepository(
         val CUSTOM_GEMINI_API_KEY = stringPreferencesKey("custom_gemini_api_key")
         val OPENAI_API_KEY = stringPreferencesKey("openai_api_key")
         val CLAUDE_API_KEY = stringPreferencesKey("claude_api_key")
+        val OPENROUTER_API_KEY = stringPreferencesKey("openrouter_api_key")
 
         val GEMINI_MODEL_ID_KEY = stringPreferencesKey("gemini_model_id")
         val OPENAI_MODEL_ID_KEY = stringPreferencesKey("openai_model_id")
         val CLAUDE_MODEL_ID_KEY = stringPreferencesKey("claude_model_id")
+        val OPENROUTER_MODEL_ID_KEY = stringPreferencesKey("openrouter_model_id")
 
         val AI_THINKING_MODE = stringPreferencesKey("ai_thinking_mode")
         val AI_USAGE_JSON = stringPreferencesKey("ai_usage_summary_json")
@@ -89,6 +91,7 @@ class ProjectRepository(
             AiProvider.GEMINI to prefs[PrefKeys.CUSTOM_GEMINI_API_KEY].orEmpty(),
             AiProvider.OPENAI to prefs[PrefKeys.OPENAI_API_KEY].orEmpty(),
             AiProvider.CLAUDE to prefs[PrefKeys.CLAUDE_API_KEY].orEmpty(),
+            AiProvider.OPENROUTER to prefs[PrefKeys.OPENROUTER_API_KEY].orEmpty(),
         )
     }
 
@@ -97,6 +100,7 @@ class ProjectRepository(
             AiProvider.GEMINI to AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, prefs[PrefKeys.GEMINI_MODEL_ID_KEY]),
             AiProvider.OPENAI to AiModelsCatalog.normalizeModelId(AiProvider.OPENAI, prefs[PrefKeys.OPENAI_MODEL_ID_KEY]),
             AiProvider.CLAUDE to AiModelsCatalog.normalizeModelId(AiProvider.CLAUDE, prefs[PrefKeys.CLAUDE_MODEL_ID_KEY]),
+            AiProvider.OPENROUTER to AiModelsCatalog.normalizeModelId(AiProvider.OPENROUTER, prefs[PrefKeys.OPENROUTER_MODEL_ID_KEY]),
         )
     }
 
@@ -171,6 +175,7 @@ class ProjectRepository(
                 AiProvider.GEMINI -> PrefKeys.CUSTOM_GEMINI_API_KEY
                 AiProvider.OPENAI -> PrefKeys.OPENAI_API_KEY
                 AiProvider.CLAUDE -> PrefKeys.CLAUDE_API_KEY
+                AiProvider.OPENROUTER -> PrefKeys.OPENROUTER_API_KEY
             }
             if (cleanedKey.isEmpty()) prefs.remove(keyPref) else prefs[keyPref] = cleanedKey
 
@@ -180,6 +185,7 @@ class ProjectRepository(
                 AiProvider.GEMINI -> PrefKeys.GEMINI_MODEL_ID_KEY
                 AiProvider.OPENAI -> PrefKeys.OPENAI_MODEL_ID_KEY
                 AiProvider.CLAUDE -> PrefKeys.CLAUDE_MODEL_ID_KEY
+                AiProvider.OPENROUTER -> PrefKeys.OPENROUTER_MODEL_ID_KEY
             }
             if (normalizedModel.isEmpty()) prefs.remove(modelPref) else prefs[modelPref] = normalizedModel
         }

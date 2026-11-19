@@ -35,6 +35,13 @@ enum class AiProvider(
         keyHint = "sk-ant-...",
         usageConsoleUrl = "https://console.anthropic.com/settings/usage",
     ),
+    OPENROUTER(
+        displayName = "OpenRouter",
+        shortName = "OpenRouter",
+        defaultModelId = "openrouter/auto",
+        keyHint = "sk-or-v1-...",
+        usageConsoleUrl = "https://openrouter.ai/activity",
+    ),
 }
 
 enum class AiThinkingMode(
@@ -613,6 +620,105 @@ object AiModelsCatalog {
         ),
     )
 
+    val builtInOpenRouterModels: List<AiModelOption> = listOf(
+        AiModelOption(
+            id = "openrouter/auto",
+            provider = AiProvider.OPENROUTER,
+            label = "OpenRouter Auto",
+            badge = "Auto",
+            description = "Smart OpenRouter router that automatically picks the best available model.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
+            id = "qwen/qwen3-coder:free",
+            provider = AiProvider.OPENROUTER,
+            label = "Qwen3 Coder (Free)",
+            badge = "Free",
+            description = "Free coding-specialized Qwen3 model on OpenRouter — no credits or Firebase required.",
+            contextWindow = "262K ctx",
+        ),
+        AiModelOption(
+            id = "deepseek/deepseek-chat-v3-0324:free",
+            provider = AiProvider.OPENROUTER,
+            label = "DeepSeek V3 (Free)",
+            badge = "Free",
+            description = "Free DeepSeek V3 model with strong Java, Kotlin & tool-calling support.",
+            contextWindow = "164K ctx",
+        ),
+        AiModelOption(
+            id = "deepseek/deepseek-r1:free",
+            provider = AiProvider.OPENROUTER,
+            label = "DeepSeek R1 (Free)",
+            badge = "Free",
+            description = "Free reasoning model for complex debugging, architecture & build fixes.",
+            contextWindow = "164K ctx",
+        ),
+        AiModelOption(
+            id = "meta-llama/llama-3.3-70b-instruct:free",
+            provider = AiProvider.OPENROUTER,
+            label = "Llama 3.3 70B (Free)",
+            badge = "Free",
+            description = "Free open-weight Llama 3.3 70B instruct model on OpenRouter.",
+            contextWindow = "131K ctx",
+        ),
+        AiModelOption(
+            id = "google/gemini-2.5-flash",
+            provider = AiProvider.OPENROUTER,
+            label = "Gemini 2.5 Flash (OR)",
+            badge = "Gemini",
+            description = "Google Gemini 2.5 Flash routed via OpenRouter (no Firebase App Check needed).",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "google/gemini-2.5-pro",
+            provider = AiProvider.OPENROUTER,
+            label = "Gemini 2.5 Pro (OR)",
+            badge = "Gemini Pro",
+            description = "Google Gemini 2.5 Pro routed via OpenRouter for multi-file engineering.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "anthropic/claude-sonnet-4",
+            provider = AiProvider.OPENROUTER,
+            label = "Claude Sonnet 4 (OR)",
+            badge = "Claude",
+            description = "Anthropic Claude Sonnet 4 routed via OpenRouter with accurate tool calling.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
+            id = "anthropic/claude-3.7-sonnet",
+            provider = AiProvider.OPENROUTER,
+            label = "Claude 3.7 Sonnet (OR)",
+            badge = "Claude",
+            description = "Anthropic Claude 3.7 Sonnet routed via OpenRouter.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
+            id = "openai/gpt-5",
+            provider = AiProvider.OPENROUTER,
+            label = "GPT-5 (OR)",
+            badge = "GPT-5",
+            description = "OpenAI GPT-5 routed via OpenRouter.",
+            contextWindow = "400K ctx",
+        ),
+        AiModelOption(
+            id = "openai/gpt-4.1",
+            provider = AiProvider.OPENROUTER,
+            label = "GPT-4.1 (OR)",
+            badge = "GPT-4.1",
+            description = "OpenAI GPT-4.1 routed via OpenRouter with 1M context.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "qwen/qwen3-coder",
+            provider = AiProvider.OPENROUTER,
+            label = "Qwen3 Coder",
+            badge = "Coder",
+            description = "High-throughput paid Qwen3 Coder model on OpenRouter.",
+            contextWindow = "262K ctx",
+        ),
+    )
+
     fun estimateCostUsd(
         modelId: String,
         inputTokens: Long,
@@ -620,6 +726,9 @@ object AiModelsCatalog {
         thinkingTokens: Long = 0L,
     ): Double {
         val id = modelId.lowercase()
+        if (id.endsWith(":free") || id == "openrouter/free" || id.contains(":free")) {
+            return 0.0
+        }
         val (inPerMillion, outPerMillion) = when {
             id.contains("opus-5") || id.contains("opus-4") || id.contains("fable") || id.contains("o3-pro") || id.contains("o1") -> 15.0 to 75.0
             id.contains("gpt-6") -> 5.0 to 20.0
@@ -630,6 +739,7 @@ object AiModelsCatalog {
             id.contains("haiku") || id.contains("mini") -> 0.40 to 1.60
             id.contains("flash-lite") || id.contains("nano") -> 0.08 to 0.30
             id.contains("flash") || id.contains("hydrogen") -> 0.30 to 2.50
+            id.contains("deepseek") || id.contains("qwen") || id.contains("llama") -> 0.30 to 1.00
             else -> 1.0 to 4.0
         }
         val billableOut = outputTokens + thinkingTokens
@@ -644,6 +754,7 @@ object AiModelsCatalog {
             AiProvider.GEMINI -> builtInGeminiModels
             AiProvider.OPENAI -> builtInOpenAiModels
             AiProvider.CLAUDE -> builtInClaudeModels
+            AiProvider.OPENROUTER -> builtInOpenRouterModels
         }
         val merged = linkedMapOf<String, AiModelOption>()
         base.forEach { merged[it.id] = it }
@@ -713,6 +824,13 @@ object AiModelsCatalog {
                 "claude-haiku-4-5",
                 "claude-3-5-sonnet-latest",
             )
+            AiProvider.OPENROUTER -> listOf(
+                "openrouter/auto",
+                "qwen/qwen3-coder:free",
+                "deepseek/deepseek-chat-v3-0324:free",
+                "google/gemini-2.5-flash",
+                "openai/gpt-4o-mini",
+            )
         }
         val ordered = linkedSetOf<String>()
         ordered.add(cleanPrimary)
@@ -733,6 +851,7 @@ object AiModelsCatalog {
                 AiProvider.GEMINI -> fetchGeminiModels(cleanKey)
                 AiProvider.OPENAI -> fetchOpenAiModels(cleanKey)
                 AiProvider.CLAUDE -> fetchClaudeModels(cleanKey)
+                AiProvider.OPENROUTER -> fetchOpenRouterModels(cleanKey)
             }
         }
     }
@@ -883,6 +1002,97 @@ object AiModelsCatalog {
                 )
             }
             return results.sortedBy { it.id }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun fetchOpenRouterModels(apiKey: String): List<AiModelOption> {
+        // Verify the API key explicitly first because /api/v1/models is public on OpenRouter.
+        val keyConn = (URL("https://openrouter.ai/api/v1/key").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 15_000
+            readTimeout = 20_000
+            setRequestProperty("Authorization", "Bearer $apiKey")
+            setRequestProperty("HTTP-Referer", "https://github.com/droidforge-studio")
+            setRequestProperty("X-Title", "DroidForge Studio")
+        }
+        try {
+            val keyCode = keyConn.responseCode
+            val keyBody = (if (keyCode in 200..299) keyConn.inputStream else keyConn.errorStream)
+                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (keyCode !in 200..299) {
+                error("HTTP $keyCode: ${GeminiCodeAssistant.extractApiErrorMessage(keyBody).ifBlank { keyConn.responseMessage ?: "Invalid OpenRouter key" }}")
+            }
+        } finally {
+            keyConn.disconnect()
+        }
+
+        val conn = (URL("https://openrouter.ai/api/v1/models").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 15_000
+            readTimeout = 25_000
+            setRequestProperty("Authorization", "Bearer $apiKey")
+            setRequestProperty("HTTP-Referer", "https://github.com/droidforge-studio")
+            setRequestProperty("X-Title", "DroidForge Studio")
+        }
+        try {
+            val code = conn.responseCode
+            val body = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) {
+                error("HTTP $code: ${GeminiCodeAssistant.extractApiErrorMessage(body).ifBlank { conn.responseMessage }}")
+            }
+            val dataArr = JSONObject(body).optJSONArray("data") ?: JSONArray()
+            val results = mutableListOf<AiModelOption>()
+            for (i in 0 until dataArr.length()) {
+                val item = dataArr.optJSONObject(i) ?: continue
+                val id = item.optString("id").orEmpty().trim()
+                if (id.isBlank()) continue
+                val lower = id.lowercase()
+                if (lower.contains("embed") || lower.contains("tts") || lower.contains("whisper") || lower.contains("moderation")) {
+                    continue
+                }
+                val pricing = item.optJSONObject("pricing")
+                val promptPrice = pricing?.optString("prompt", "")?.trim().orEmpty()
+                val completionPrice = pricing?.optString("completion", "")?.trim().orEmpty()
+                val isFree = lower.endsWith(":free") || (promptPrice == "0" && completionPrice == "0")
+                val ctxLen = item.optInt("context_length", 0)
+                val ctxLabel = when {
+                    ctxLen >= 1_000_000 -> "${ctxLen / 1_000_000}M ctx"
+                    ctxLen >= 1000 -> "${ctxLen / 1000}K ctx"
+                    else -> ""
+                }
+                val badge = when {
+                    isFree -> "Free"
+                    lower.startsWith("google/") -> "Gemini"
+                    lower.startsWith("anthropic/") -> "Claude"
+                    lower.startsWith("openai/") -> "GPT"
+                    lower.contains("coder") -> "Coder"
+                    else -> "Live"
+                }
+                results.add(
+                    AiModelOption(
+                        id = id,
+                        provider = AiProvider.OPENROUTER,
+                        label = item.optString("name").ifBlank { id },
+                        badge = badge,
+                        description = item.optString("description").ifBlank { "Available via OpenRouter API." }.take(120),
+                        contextWindow = ctxLabel,
+                        isLiveFetched = true,
+                    ),
+                )
+            }
+            return results.sortedWith(
+                compareBy<AiModelOption>(
+                    { it.id != "openrouter/auto" },
+                    { !it.id.endsWith(":free", ignoreCase = true) },
+                    {
+                        val l = it.id.lowercase()
+                        !(l.startsWith("qwen/") || l.startsWith("deepseek/") || l.startsWith("google/") || l.startsWith("anthropic/") || l.startsWith("openai/"))
+                    },
+                ).thenBy { it.id },
+            )
         } finally {
             conn.disconnect()
         }

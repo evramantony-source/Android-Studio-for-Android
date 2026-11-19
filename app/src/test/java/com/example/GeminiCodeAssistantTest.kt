@@ -516,5 +516,63 @@ class GeminiCodeAssistantTest {
         assertTrue(label.contains("release"))
         assertTrue(label.contains("4D:95:5B:76"))
         assertTrue(label.contains("fallback site key"))
+
+        val withAttestationErr = snap.withRecordedError("Error returned from API. code: 403 body: App attestation failed.")
+        val withBackoff = withAttestationErr.withRecordedError("Too many attempts.")
+        assertTrue(withBackoff.effectiveErrorMessage("Too many attempts.").contains("403 body: App attestation failed"))
+    }
+
+    @Test
+    fun openRouterProviderIncludesFreeAndPaidModelsZeroCostFreeTierAndFallback() {
+        assertEquals("openrouter/auto", AiProvider.OPENROUTER.defaultModelId)
+        assertEquals("openrouter/auto", AiModelsCatalog.normalizeModelId(AiProvider.OPENROUTER, ""))
+
+        val openRouterModels = AiModelsCatalog.modelsFor(AiProvider.OPENROUTER)
+        assertTrue(openRouterModels.any { it.id == "openrouter/auto" })
+        assertTrue(openRouterModels.any { it.id == "qwen/qwen3-coder:free" })
+        assertTrue(openRouterModels.any { it.id == "deepseek/deepseek-chat-v3-0324:free" })
+        assertTrue(openRouterModels.any { it.id == "google/gemini-2.5-flash" })
+        assertTrue(openRouterModels.any { it.id == "anthropic/claude-sonnet-4" })
+
+        // Free tier models must always estimate $0.00 cost
+        assertEquals(
+            0.0,
+            AiModelsCatalog.estimateCostUsd("qwen/qwen3-coder:free", inputTokens = 50_000L, outputTokens = 10_000L),
+            0.0,
+        )
+        assertEquals(
+            0.0,
+            AiModelsCatalog.estimateCostUsd("deepseek/deepseek-chat-v3-0324:free", inputTokens = 25_000L, outputTokens = 5_000L),
+            0.0,
+        )
+        assertTrue(
+            AiModelsCatalog.estimateCostUsd("anthropic/claude-sonnet-4", inputTokens = 10_000L, outputTokens = 2_000L) > 0.0,
+        )
+
+        val chain = AiModelsCatalog.fallbackChain(AiProvider.OPENROUTER, "anthropic/claude-sonnet-4")
+        assertEquals("anthropic/claude-sonnet-4", chain.first())
+        assertTrue(chain.contains("openrouter/auto"))
+        assertTrue(chain.contains("qwen/qwen3-coder:free"))
+
+        assertEquals("sk-or-v1-user", GeminiCodeAssistant.resolveOpenRouterApiKey("  sk-or-v1-user  "))
+
+        val usageSummary = com.example.ai.AiUsageSummary(
+            byProvider = mapOf(
+                AiProvider.OPENROUTER to com.example.ai.ProviderUsageStats(
+                    provider = AiProvider.OPENROUTER,
+                    requests = 2,
+                    toolCalls = 3,
+                    inputTokens = 500,
+                    outputTokens = 200,
+                    totalTokens = 700,
+                    estimatedCostUsd = 0.0,
+                    lastModelId = "qwen/qwen3-coder:free",
+                ),
+            ),
+            byModel = mapOf("qwen/qwen3-coder:free" to 700L),
+        )
+        val decoded = com.example.ai.AiUsageSummary.fromJson(usageSummary.toJson())
+        assertEquals("qwen/qwen3-coder:free", decoded.byProvider[AiProvider.OPENROUTER]?.lastModelId)
+        assertEquals(700L, decoded.totalTokens)
     }
 }

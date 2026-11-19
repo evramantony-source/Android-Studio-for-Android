@@ -163,6 +163,7 @@ class GeminiCodeAssistant {
         val requestedModel = AiModelsCatalog.normalizeModelId(provider, modelId)
         val resolvedKey = when (provider) {
             AiProvider.GEMINI -> resolveApiKey(apiKey)
+            AiProvider.OPENROUTER -> resolveOpenRouterApiKey(apiKey)
             AiProvider.OPENAI, AiProvider.CLAUDE -> apiKey.trim()
         }
 
@@ -353,7 +354,8 @@ class GeminiCodeAssistant {
                         onUsageRecorded(provider, usedModel, delta, toolCalls, false)
                     },
                 )
-                AiProvider.OPENAI -> runOpenAiLoop(
+                AiProvider.OPENAI, AiProvider.OPENROUTER -> runOpenAiLoop(
+                    provider = provider,
                     initialModel = requestedModel,
                     apiKey = resolvedKey,
                     thinkingMode = thinkingMode,
@@ -1013,6 +1015,7 @@ class GeminiCodeAssistant {
     }
 
     private suspend fun runOpenAiLoop(
+        provider: AiProvider = AiProvider.OPENAI,
         initialModel: String,
         apiKey: String,
         thinkingMode: AiThinkingMode,
@@ -1070,8 +1073,8 @@ class GeminiCodeAssistant {
             addOrUpdateStep(
                 AgentStep(
                     id = thinkStepId,
-                    title = if (turn == 0) "Connecting to ChatGPT ($activeModel)" else "Analyzing tool output ($activeModel)",
-                    detail = "${thinkingMode.badge} • Waiting for OpenAI...",
+                    title = if (turn == 0) "Connecting to ${provider.shortName} ($activeModel)" else "Analyzing tool output ($activeModel)",
+                    detail = "${thinkingMode.badge} • Waiting for ${provider.displayName}...",
                     status = AgentStepStatus.RUNNING,
                 ),
             )
@@ -1085,36 +1088,49 @@ class GeminiCodeAssistant {
 
             val (usedModel, outcome) = withTimeout(TURN_TIMEOUT_MS) {
                 callExternalWithRetryAndFailover(
-                    provider = AiProvider.OPENAI,
+                    provider = provider,
                     primaryModelId = activeModel,
                     onStatusUpdate = { title, detail ->
                         addOrUpdateStep(AgentStep(id = thinkStepId, title = title, detail = detail, status = AgentStepStatus.RUNNING))
                     },
                 ) { candidate ->
-                    ProviderApiClient.streamOpenAi(
-                        apiKey = apiKey,
-                        modelId = candidate,
-                        messages = openAiMessages,
-                        thinkingMode = thinkingMode,
-                        onConnected = {
-                            activeModel = candidate
-                            addOrUpdateStep(
-                                AgentStep(
-                                    id = thinkStepId,
-                                    title = "Streaming from $candidate",
-                                    detail = "${thinkingMode.badge} • Connected...",
-                                    status = AgentStepStatus.RUNNING,
-                                ),
-                            )
-                        },
-                        onTextDelta = { delta ->
-                            turnText.append(delta)
-                            accumulatedVisibleText.clear()
-                            accumulatedVisibleText.append(textBeforeTurn)
-                            accumulatedVisibleText.append(turnText)
-                            onStreamText(accumulatedVisibleText.toString(), candidate)
-                        },
-                    )
+                    val onConnected = {
+                        activeModel = candidate
+                        addOrUpdateStep(
+                            AgentStep(
+                                id = thinkStepId,
+                                title = "Streaming from $candidate",
+                                detail = "${thinkingMode.badge} • Connected...",
+                                status = AgentStepStatus.RUNNING,
+                            ),
+                        )
+                    }
+                    val onDelta: (String) -> Unit = { delta ->
+                        turnText.append(delta)
+                        accumulatedVisibleText.clear()
+                        accumulatedVisibleText.append(textBeforeTurn)
+                        accumulatedVisibleText.append(turnText)
+                        onStreamText(accumulatedVisibleText.toString(), candidate)
+                    }
+                    if (provider == AiProvider.OPENROUTER) {
+                        ProviderApiClient.streamOpenRouter(
+                            apiKey = apiKey,
+                            modelId = candidate,
+                            messages = openAiMessages,
+                            thinkingMode = thinkingMode,
+                            onConnected = onConnected,
+                            onTextDelta = onDelta,
+                        )
+                    } else {
+                        ProviderApiClient.streamOpenAi(
+                            apiKey = apiKey,
+                            modelId = candidate,
+                            messages = openAiMessages,
+                            thinkingMode = thinkingMode,
+                            onConnected = onConnected,
+                            onTextDelta = onDelta,
+                        )
+                    }
                 }
             }
 
@@ -1404,7 +1420,9 @@ class GeminiCodeAssistant {
                         delay(400L)
                         continue
                     }
-                    if (shouldFailoverHttpStatus(e.httpCode) && hasNextCandidate) {
+                    val canFailover = shouldFailoverHttpStatus(e.httpCode) ||
+                        (provider == AiProvider.OPENROUTER && e.httpCode == 402)
+                    if (canFailover && hasNextCandidate) {
                         val nextModel = candidates[index + 1]
                         onStatusUpdate(
                             "Switching model (${e.httpCode})",
@@ -2425,6 +2443,21 @@ class GeminiCodeAssistant {
         fun hasBuiltInApiKey(): Boolean {
             val builtIn = BuildConfig.GEMINI_API_KEY.trim()
             return builtIn.isNotEmpty() && !builtIn.equals("GEMINI_API_KEY_DEFAULT_VALUE", ignoreCase = true)
+        }
+
+        fun resolveOpenRouterApiKey(customApiKey: String): String {
+            val custom = customApiKey.trim()
+            if (custom.isNotEmpty()) return custom
+            val builtIn = BuildConfig.OPENROUTER_API_KEY.trim()
+            if (builtIn.isNotEmpty() && !builtIn.equals("OPENROUTER_API_KEY_DEFAULT_VALUE", ignoreCase = true)) {
+                return builtIn
+            }
+            return ""
+        }
+
+        fun hasBuiltInOpenRouterApiKey(): Boolean {
+            val builtIn = BuildConfig.OPENROUTER_API_KEY.trim()
+            return builtIn.isNotEmpty() && !builtIn.equals("OPENROUTER_API_KEY_DEFAULT_VALUE", ignoreCase = true)
         }
 
         internal fun isTransientHttpStatus(httpCode: Int): Boolean {

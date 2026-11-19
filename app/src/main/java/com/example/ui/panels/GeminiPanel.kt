@@ -144,6 +144,9 @@ fun GeminiPanel(
         when (activeProvider) {
             AiProvider.GEMINI -> isFirebaseReady ||
                 GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
+            AiProvider.OPENROUTER -> GeminiCodeAssistant.resolveOpenRouterApiKey(
+                providerApiKeys[AiProvider.OPENROUTER].orEmpty(),
+            ).isNotEmpty()
             else -> providerApiKeys[activeProvider].orEmpty().isNotBlank()
         }
     }
@@ -289,6 +292,9 @@ fun GeminiPanel(
                     val ready = when (provider) {
                         AiProvider.GEMINI -> isFirebaseReady ||
                             GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
+                        AiProvider.OPENROUTER -> GeminiCodeAssistant.resolveOpenRouterApiKey(
+                            providerApiKeys[AiProvider.OPENROUTER].orEmpty(),
+                        ).isNotEmpty()
                         else -> providerApiKeys[provider].orEmpty().isNotBlank()
                     }
                     FilterChip(

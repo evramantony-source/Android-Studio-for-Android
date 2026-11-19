@@ -203,6 +203,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
             AiProvider.GEMINI to GEMINI_MODEL_ID,
             AiProvider.OPENAI to AiProvider.OPENAI.defaultModelId,
             AiProvider.CLAUDE to AiProvider.CLAUDE.defaultModelId,
+            AiProvider.OPENROUTER to AiProvider.OPENROUTER.defaultModelId,
         ),
     )
 
@@ -763,6 +764,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         if (_isFetchingModels.value) return
         val key = explicitApiKey?.trim()?.takeIf { it.isNotEmpty() } ?: when (provider) {
             AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(providerApiKeys.value[AiProvider.GEMINI].orEmpty())
+            AiProvider.OPENROUTER -> GeminiCodeAssistant.resolveOpenRouterApiKey(providerApiKeys.value[AiProvider.OPENROUTER].orEmpty())
             else -> providerApiKeys.value[provider].orEmpty()
         }
         viewModelScope.launch {

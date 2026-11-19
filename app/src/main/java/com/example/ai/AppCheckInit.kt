@@ -46,6 +46,7 @@ data class AppCheckDiagnosticSnapshot(
     val projectId: String = "",
     val certSha1: String = "",
     val lastTokenError: String? = null,
+    val lastRootCauseError: String? = null,
 ) {
     fun hasProvisionedCertMismatch(): Boolean {
         return projectId == PROVISIONED_FIREBASE_PROJECT_ID &&
@@ -54,6 +55,30 @@ data class AppCheckDiagnosticSnapshot(
     }
 
     fun expectedCertSha1Prefix(): String = PROVISIONED_CERT_SHA1.take(11)
+
+    fun effectiveErrorMessage(currentError: String): String {
+        val root = lastRootCauseError
+        return if (currentError.contains("too many attempts", ignoreCase = true) && !root.isNullOrBlank()) {
+            "$root (SDK backoff active — $currentError)"
+        } else {
+            currentError
+        }
+    }
+
+    fun withRecordedError(error: String): AppCheckDiagnosticSnapshot {
+        val isBackoff = error.contains("too many attempts", ignoreCase = true)
+        val nextRoot = if (isBackoff && !lastRootCauseError.isNullOrBlank()) {
+            lastRootCauseError
+        } else if (!isBackoff) {
+            error
+        } else {
+            lastRootCauseError
+        }
+        return copy(
+            lastTokenError = error,
+            lastRootCauseError = nextRoot,
+        )
+    }
 
     fun summaryLabel(): String {
         val buildKind = if (isDebugBuild) "debug" else "release"
@@ -190,26 +215,26 @@ fun configureAppCheck(context: Context, intent: Intent?) {
                     projectId = projectId,
                     certSha1 = certSha1,
                     lastTokenError = "recaptcha_site_key resource missing",
+                    lastRootCauseError = "recaptcha_site_key resource missing",
                 )
             }
         }
     } catch (e: Exception) {
         Log.e(TAG, "Failed to initialize Firebase App Check", e)
-        AppCheckDiagnostics.snapshot = AppCheckDiagnostics.snapshot.copy(
-            lastTokenError = e.localizedMessage ?: e.javaClass.simpleName,
-            certSha1 = certSha1,
-        )
+        AppCheckDiagnostics.snapshot = AppCheckDiagnostics.snapshot
+            .copy(certSha1 = certSha1)
+            .withRecordedError(e.localizedMessage ?: e.javaClass.simpleName)
     }
 }
 
-suspend fun ensureValidAppCheckToken(timeoutMs: Long = 15_000L): AppCheckPreflightResult {
+suspend fun ensureValidAppCheckToken(timeoutMs: Long = 20_000L): AppCheckPreflightResult {
     // Do NOT immediately follow a failed getAppCheckToken(false) with getAppCheckToken(true):
     // Firebase App Check's RetryManager triggers backoff and overwrites the real underlying HTTP/Recaptcha
     // error with "Too many attempts."
     return fetchAppCheckTokenOnce(forceRefresh = false, timeoutMs = timeoutMs)
 }
 
-suspend fun forceRefreshAppCheckToken(timeoutMs: Long = 15_000L): AppCheckPreflightResult {
+suspend fun forceRefreshAppCheckToken(timeoutMs: Long = 20_000L): AppCheckPreflightResult {
     return fetchAppCheckTokenOnce(forceRefresh = true, timeoutMs = timeoutMs)
 }
 
@@ -225,24 +250,28 @@ private suspend fun fetchAppCheckTokenOnce(
         val raw = token.token
         if (raw.isBlank() || raw == DUMMY_ERROR_TOKEN) {
             val reason = "App Check returned placeholder error token (${diag.summaryLabel()})."
-            AppCheckDiagnostics.snapshot = diag.copy(lastTokenError = reason)
-            AppCheckPreflightResult.Invalid(reason, AppCheckDiagnostics.snapshot)
+            val updated = diag.withRecordedError(reason)
+            AppCheckDiagnostics.snapshot = updated
+            AppCheckPreflightResult.Invalid(updated.effectiveErrorMessage(reason), updated)
         } else {
-            AppCheckDiagnostics.snapshot = diag.copy(lastTokenError = null)
-            AppCheckPreflightResult.Valid(raw.take(12), AppCheckDiagnostics.snapshot)
+            val updated = diag.copy(lastTokenError = null, lastRootCauseError = null)
+            AppCheckDiagnostics.snapshot = updated
+            AppCheckPreflightResult.Valid(raw.take(12), updated)
         }
     } catch (e: CancellationException) {
         if (e is TimeoutCancellationException) {
             val reason = "App Check attestation timed out after ${timeoutMs / 1000}s (${diag.summaryLabel()})."
-            AppCheckDiagnostics.snapshot = diag.copy(lastTokenError = reason)
-            return AppCheckPreflightResult.Invalid(reason, AppCheckDiagnostics.snapshot)
+            val updated = diag.withRecordedError(reason)
+            AppCheckDiagnostics.snapshot = updated
+            return AppCheckPreflightResult.Invalid(updated.effectiveErrorMessage(reason), updated)
         }
         throw e
     } catch (e: Exception) {
         val rawMsg = e.localizedMessage?.ifBlank { null } ?: e.javaClass.simpleName
         Log.w(TAG, "App Check token fetch failed (forceRefresh=$forceRefresh, ${diag.summaryLabel()}): $rawMsg", e)
-        AppCheckDiagnostics.snapshot = diag.copy(lastTokenError = rawMsg)
-        AppCheckPreflightResult.Invalid(rawMsg, AppCheckDiagnostics.snapshot)
+        val updated = diag.withRecordedError(rawMsg)
+        AppCheckDiagnostics.snapshot = updated
+        AppCheckPreflightResult.Invalid(updated.effectiveErrorMessage(rawMsg), updated)
     }
 }
 
