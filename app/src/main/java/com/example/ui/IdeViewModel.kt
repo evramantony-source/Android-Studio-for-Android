@@ -716,6 +716,9 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     fun selectProvider(provider: AiProvider) {
         viewModelScope.launch {
             repository.saveActiveProvider(provider)
+            if (provider == AiProvider.OPENROUTER && _liveModels.value.none { it.provider == AiProvider.OPENROUTER }) {
+                refreshLiveModels(AiProvider.OPENROUTER, silentOnEmptyKey = true)
+            }
         }
     }
 
@@ -750,8 +753,8 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
             repository.saveActiveProvider(provider)
             val cleanModel = adjustedModel.trim().removePrefix("models/").ifBlank { provider.defaultModelId }
             _statusBanner.value = "Saved ${provider.shortName} settings ($cleanModel)."
-            if (cleanedKey.isNotBlank()) {
-                refreshLiveModels(provider, explicitApiKey = cleanedKey)
+            if (cleanedKey.isNotBlank() || provider == AiProvider.OPENROUTER) {
+                refreshLiveModels(provider, explicitApiKey = cleanedKey.ifBlank { null }, silentOnEmptyKey = cleanedKey.isBlank())
             }
         }
     }
@@ -760,7 +763,11 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         saveProviderConfig(AiProvider.GEMINI, apiKey, modelId)
     }
 
-    fun refreshLiveModels(provider: AiProvider, explicitApiKey: String? = null) {
+    fun refreshLiveModels(
+        provider: AiProvider,
+        explicitApiKey: String? = null,
+        silentOnEmptyKey: Boolean = false,
+    ) {
         if (_isFetchingModels.value) return
         val key = explicitApiKey?.trim()?.takeIf { it.isNotEmpty() } ?: when (provider) {
             AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(providerApiKeys.value[AiProvider.GEMINI].orEmpty())
@@ -769,7 +776,11 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             _isFetchingModels.value = true
-            val res = AiModelsCatalog.fetchLiveModels(provider, key)
+            val res = if (provider == AiProvider.OPENROUTER && key.isBlank()) {
+                AiModelsCatalog.fetchOpenRouterPublicModels()
+            } else {
+                AiModelsCatalog.fetchLiveModels(provider, key)
+            }
             _isFetchingModels.value = false
             res.onSuccess { fetched ->
                 val otherProviders = _liveModels.value.filter { it.provider != provider }
@@ -777,9 +788,13 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 if (provider == AiProvider.GEMINI && fetched.isNotEmpty()) {
                     autoHealUnavailableGeminiModel(fetched, explicitApiKey = explicitApiKey)
                 }
-                _statusBanner.value = "Loaded ${fetched.size} ${provider.shortName} model(s)."
+                if (!silentOnEmptyKey) {
+                    _statusBanner.value = "Loaded ${fetched.size} ${provider.shortName} model(s)."
+                }
             }.onFailure { err ->
-                _statusBanner.value = err.localizedMessage ?: "Failed to fetch models."
+                if (!silentOnEmptyKey) {
+                    _statusBanner.value = err.localizedMessage ?: "Failed to fetch models."
+                }
             }
         }
     }
@@ -1590,6 +1605,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 runCatching { repository.providerModels.first()[provider] }.getOrNull() ?: modelId,
             )
             val executor = createToolExecutor(project.id, project.packageName)
+            val providerLiveModels = _liveModels.value.filter { it.provider == provider }
             geminiAssistant.askGemini(
                 userPrompt = prompt,
                 apiKey = freshKey,
@@ -1608,6 +1624,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 toolExecutor = executor,
                 githubConnected = githubConnected,
                 verifiedLiveModelIds = verifiedIds,
+                liveModelOptions = providerLiveModels,
                 shouldPublishToUi = { _activeThreadId.value == threadIdAtStart },
                 onModelAutoCorrected = { failedModel, workingModel ->
                     viewModelScope.launch {

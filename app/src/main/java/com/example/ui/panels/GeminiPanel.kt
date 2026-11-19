@@ -83,6 +83,7 @@ import com.example.ai.ProjectChatThread
 import com.example.ai.SuggestedCodeBlock
 import com.example.model.AiAttachment
 import com.example.model.BuildDiagnostic
+import com.example.model.DiagnosticSeverity
 import com.example.ui.theme.JetBrainsMonoFontFamily
 
 @Composable
@@ -432,12 +433,15 @@ fun GeminiPanel(
                     .padding(horizontal = 10.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                if (diagnostics.isNotEmpty()) {
+                val errorDiagnosticsCount = remember(diagnostics) {
+                    diagnostics.count { it.severity == DiagnosticSeverity.ERROR }
+                }
+                if (errorDiagnosticsCount > 0) {
                     AssistChip(
                         onClick = {
                             onSendPrompt("Inspect the build errors, edit the broken files directly, and rebuild until it succeeds.")
                         },
-                        label = { Text("Auto-Fix Errors (${diagnostics.size})") },
+                        label = { Text("Auto-Fix Errors ($errorDiagnosticsCount)") },
                         leadingIcon = {
                             Icon(Icons.Default.ErrorOutline, contentDescription = null, modifier = Modifier.size(16.dp))
                         },

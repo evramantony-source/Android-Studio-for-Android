@@ -74,6 +74,8 @@ data class AiModelOption(
     val description: String,
     val contextWindow: String = "",
     val isLiveFetched: Boolean = false,
+    val supportsTools: Boolean = true,
+    val supportsSystemPrompt: Boolean = true,
 )
 
 data class TokenUsageDelta(
@@ -630,12 +632,28 @@ object AiModelsCatalog {
             contextWindow = "200K ctx",
         ),
         AiModelOption(
+            id = "openrouter/free",
+            provider = AiProvider.OPENROUTER,
+            label = "OpenRouter Free Router",
+            badge = "Free",
+            description = "Official OpenRouter router that automatically selects a healthy free model ($0).",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
             id = "qwen/qwen3-coder:free",
             provider = AiProvider.OPENROUTER,
             label = "Qwen3 Coder (Free)",
             badge = "Free",
             description = "Free coding-specialized Qwen3 model on OpenRouter — no credits or Firebase required.",
             contextWindow = "262K ctx",
+        ),
+        AiModelOption(
+            id = "deepseek/deepseek-r1-0528:free",
+            provider = AiProvider.OPENROUTER,
+            label = "DeepSeek R1 0528 (Free)",
+            badge = "Free",
+            description = "Free DeepSeek R1 reasoning model for debugging, architecture & build fixes.",
+            contextWindow = "164K ctx",
         ),
         AiModelOption(
             id = "deepseek/deepseek-chat-v3-0324:free",
@@ -646,12 +664,14 @@ object AiModelsCatalog {
             contextWindow = "164K ctx",
         ),
         AiModelOption(
-            id = "deepseek/deepseek-r1:free",
+            id = "google/gemma-3-27b-it:free",
             provider = AiProvider.OPENROUTER,
-            label = "DeepSeek R1 (Free)",
+            label = "Gemma 3 27B (Free)",
             badge = "Free",
-            description = "Free reasoning model for complex debugging, architecture & build fixes.",
-            contextWindow = "164K ctx",
+            description = "Free Google Gemma 3 27B instruct model on OpenRouter (auto-adapted for Gemma).",
+            contextWindow = "131K ctx",
+            supportsTools = false,
+            supportsSystemPrompt = false,
         ),
         AiModelOption(
             id = "meta-llama/llama-3.3-70b-instruct:free",
@@ -659,6 +679,30 @@ object AiModelsCatalog {
             label = "Llama 3.3 70B (Free)",
             badge = "Free",
             description = "Free open-weight Llama 3.3 70B instruct model on OpenRouter.",
+            contextWindow = "131K ctx",
+        ),
+        AiModelOption(
+            id = "mistralai/mistral-small-3.1-24b-instruct:free",
+            provider = AiProvider.OPENROUTER,
+            label = "Mistral Small 3.1 (Free)",
+            badge = "Free",
+            description = "Free Mistral Small 3.1 24B model on OpenRouter for fast Android edits.",
+            contextWindow = "128K ctx",
+        ),
+        AiModelOption(
+            id = "nvidia/nemotron-nano-9b-v2:free",
+            provider = AiProvider.OPENROUTER,
+            label = "Nemotron Nano 9B v2 (Free)",
+            badge = "Free",
+            description = "Fast free NVIDIA Nemotron Nano 9B v2 model on OpenRouter.",
+            contextWindow = "128K ctx",
+        ),
+        AiModelOption(
+            id = "qwen/qwen3-235b-a22b:free",
+            provider = AiProvider.OPENROUTER,
+            label = "Qwen3 235B (Free)",
+            badge = "Free",
+            description = "Free large Qwen3 235B MoE model on OpenRouter.",
             contextWindow = "131K ctx",
         ),
         AiModelOption(
@@ -719,6 +763,11 @@ object AiModelsCatalog {
         ),
     )
 
+    fun isFreeOpenRouterModel(modelId: String): Boolean {
+        val id = modelId.trim().lowercase()
+        return id == "openrouter/free" || id.endsWith(":free") || id.contains(":free")
+    }
+
     fun estimateCostUsd(
         modelId: String,
         inputTokens: Long,
@@ -726,7 +775,7 @@ object AiModelsCatalog {
         thinkingTokens: Long = 0L,
     ): Double {
         val id = modelId.lowercase()
-        if (id.endsWith(":free") || id == "openrouter/free" || id.contains(":free")) {
+        if (isFreeOpenRouterModel(id)) {
             return 0.0
         }
         val (inPerMillion, outPerMillion) = when {
@@ -801,7 +850,11 @@ object AiModelsCatalog {
         return excludedTokens.none { id.contains(it) }
     }
 
-    fun fallbackChain(provider: AiProvider, primaryModelId: String): List<String> {
+    fun fallbackChain(
+        provider: AiProvider,
+        primaryModelId: String,
+        liveModels: List<AiModelOption> = emptyList(),
+    ): List<String> {
         val cleanPrimary = normalizeModelId(provider, primaryModelId)
         val pool = when (provider) {
             AiProvider.GEMINI -> listOf(
@@ -824,13 +877,28 @@ object AiModelsCatalog {
                 "claude-haiku-4-5",
                 "claude-3-5-sonnet-latest",
             )
-            AiProvider.OPENROUTER -> listOf(
-                "openrouter/auto",
-                "qwen/qwen3-coder:free",
-                "deepseek/deepseek-chat-v3-0324:free",
-                "google/gemini-2.5-flash",
-                "openai/gpt-4o-mini",
-            )
+            AiProvider.OPENROUTER -> {
+                val liveFree = liveModels
+                    .filter { it.provider == AiProvider.OPENROUTER && isFreeOpenRouterModel(it.id) }
+                    .sortedWith(compareBy<AiModelOption>({ !it.supportsTools }, { it.id }))
+                    .map { it.id }
+                    .take(6)
+                if (isFreeOpenRouterModel(cleanPrimary)) {
+                    // Never fall back from a :free model into a paid model.
+                    listOf("openrouter/free") + liveFree + listOf(
+                        "qwen/qwen3-coder:free",
+                        "deepseek/deepseek-r1-0528:free",
+                        "meta-llama/llama-3.3-70b-instruct:free",
+                        "google/gemma-3-27b-it:free",
+                    )
+                } else {
+                    listOf("openrouter/auto", "openrouter/free") + liveFree.take(3) + listOf(
+                        "google/gemini-2.5-flash",
+                        "openai/gpt-4o-mini",
+                        "qwen/qwen3-coder:free",
+                    )
+                }
+            }
         }
         val ordered = linkedSetOf<String>()
         ordered.add(cleanPrimary)
@@ -855,6 +923,11 @@ object AiModelsCatalog {
             }
         }
     }
+
+    suspend fun fetchOpenRouterPublicModels(apiKey: String = ""): Result<List<AiModelOption>> =
+        withContext(Dispatchers.IO) {
+            runCatching { fetchOpenRouterModelsList(apiKey.trim()) }
+        }
 
     private fun fetchGeminiModels(apiKey: String): List<AiModelOption> {
         val url = URL("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200")
@@ -1028,11 +1101,17 @@ object AiModelsCatalog {
             keyConn.disconnect()
         }
 
+        return fetchOpenRouterModelsList(apiKey)
+    }
+
+    private fun fetchOpenRouterModelsList(apiKey: String): List<AiModelOption> {
         val conn = (URL("https://openrouter.ai/api/v1/models").openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 15_000
             readTimeout = 25_000
-            setRequestProperty("Authorization", "Bearer $apiKey")
+            if (apiKey.isNotBlank()) {
+                setRequestProperty("Authorization", "Bearer $apiKey")
+            }
             setRequestProperty("HTTP-Referer", "https://github.com/droidforge-studio")
             setRequestProperty("X-Title", "DroidForge Studio")
         }
@@ -1056,15 +1135,27 @@ object AiModelsCatalog {
                 val pricing = item.optJSONObject("pricing")
                 val promptPrice = pricing?.optString("prompt", "")?.trim().orEmpty()
                 val completionPrice = pricing?.optString("completion", "")?.trim().orEmpty()
-                val isFree = lower.endsWith(":free") || (promptPrice == "0" && completionPrice == "0")
+                val isFree = isFreeOpenRouterModel(id) ||
+                    ((promptPrice == "0" || promptPrice == "0.0") && (completionPrice == "0" || completionPrice == "0.0"))
                 val ctxLen = item.optInt("context_length", 0)
                 val ctxLabel = when {
                     ctxLen >= 1_000_000 -> "${ctxLen / 1_000_000}M ctx"
                     ctxLen >= 1000 -> "${ctxLen / 1000}K ctx"
                     else -> ""
                 }
+                val supportedParamsArr = item.optJSONArray("supported_parameters")
+                val supportedParams = buildSet {
+                    if (supportedParamsArr != null) {
+                        for (pIdx in 0 until supportedParamsArr.length()) {
+                            add(supportedParamsArr.optString(pIdx).lowercase())
+                        }
+                    }
+                }
+                val supportsTools = supportedParams.isEmpty() || "tools" in supportedParams
+                val supportsSystem = !lower.contains("gemma")
                 val badge = when {
                     isFree -> "Free"
+                    lower == "openrouter/auto" -> "Auto"
                     lower.startsWith("google/") -> "Gemini"
                     lower.startsWith("anthropic/") -> "Claude"
                     lower.startsWith("openai/") -> "GPT"
@@ -1080,13 +1171,15 @@ object AiModelsCatalog {
                         description = item.optString("description").ifBlank { "Available via OpenRouter API." }.take(120),
                         contextWindow = ctxLabel,
                         isLiveFetched = true,
+                        supportsTools = supportsTools,
+                        supportsSystemPrompt = supportsSystem,
                     ),
                 )
             }
             return results.sortedWith(
                 compareBy<AiModelOption>(
-                    { it.id != "openrouter/auto" },
-                    { !it.id.endsWith(":free", ignoreCase = true) },
+                    { it.id != "openrouter/free" && it.id != "openrouter/auto" },
+                    { !isFreeOpenRouterModel(it.id) },
                     {
                         val l = it.id.lowercase()
                         !(l.startsWith("qwen/") || l.startsWith("deepseek/") || l.startsWith("google/") || l.startsWith("anthropic/") || l.startsWith("openai/"))

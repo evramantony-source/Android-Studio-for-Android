@@ -575,4 +575,125 @@ class GeminiCodeAssistantTest {
         assertEquals("qwen/qwen3-coder:free", decoded.byProvider[AiProvider.OPENROUTER]?.lastModelId)
         assertEquals(700L, decoded.totalTokens)
     }
+
+    @Test
+    fun openRouterFreeModelsNeverFailoverToPaidModels() {
+        assertTrue(AiModelsCatalog.isFreeOpenRouterModel("openrouter/free"))
+        assertTrue(AiModelsCatalog.isFreeOpenRouterModel("google/gemma-3-27b-it:free"))
+        assertFalse(AiModelsCatalog.isFreeOpenRouterModel("openrouter/auto"))
+        assertFalse(AiModelsCatalog.isFreeOpenRouterModel("google/gemini-2.5-flash"))
+
+        val liveModels = listOf(
+            com.example.ai.AiModelOption(
+                id = "nvidia/nemotron-3-super-120b-a12b:free",
+                provider = AiProvider.OPENROUTER,
+                label = "Nemotron 120B (Free)",
+                badge = "Free",
+                description = "Live free model",
+                isLiveFetched = true,
+                supportsTools = true,
+            ),
+            com.example.ai.AiModelOption(
+                id = "anthropic/claude-opus-4",
+                provider = AiProvider.OPENROUTER,
+                label = "Claude Opus 4",
+                badge = "Claude",
+                description = "Paid model",
+                isLiveFetched = true,
+            ),
+        )
+
+        val gemmaFreeChain = AiModelsCatalog.fallbackChain(
+            provider = AiProvider.OPENROUTER,
+            primaryModelId = "google/gemma-3-27b-it:free",
+            liveModels = liveModels,
+        )
+        assertEquals("google/gemma-3-27b-it:free", gemmaFreeChain.first())
+        assertTrue(gemmaFreeChain.contains("openrouter/free"))
+        assertTrue(gemmaFreeChain.contains("nvidia/nemotron-3-super-120b-a12b:free"))
+        assertTrue(gemmaFreeChain.all { AiModelsCatalog.isFreeOpenRouterModel(it) })
+        assertFalse(gemmaFreeChain.contains("google/gemini-2.5-flash"))
+        assertFalse(gemmaFreeChain.contains("openai/gpt-4o-mini"))
+        assertFalse(gemmaFreeChain.contains("anthropic/claude-opus-4"))
+    }
+
+    @Test
+    fun providerApiClientAdaptsSystemToolHistoryAndImagesForRestrictedFreeModels() {
+        val rawMessages = org.json.JSONArray().apply {
+            put(JSONObject().put("role", "system").put("content", "You are an Android coding agent."))
+            put(
+                JSONObject().put("role", "user").put(
+                    "content",
+                    org.json.JSONArray()
+                        .put(JSONObject().put("type", "text").put("text", "Fix MainActivity"))
+                        .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:image/png;base64,AAA"))),
+                ),
+            )
+            put(
+                JSONObject().put("role", "assistant").put("content", "").put(
+                    "tool_calls",
+                    org.json.JSONArray().put(
+                        JSONObject().put("id", "call_1").put("type", "function").put(
+                            "function",
+                            JSONObject().put("name", "read_file").put("arguments", "{\"path\":\"AndroidManifest.xml\"}"),
+                        ),
+                    ),
+                ),
+            )
+            put(JSONObject().put("role", "tool").put("tool_call_id", "call_1").put("content", "{\"content\":\"<manifest/>\"}"))
+        }
+
+        val adapted = com.example.ai.ProviderApiClient.buildAdaptedOpenAiMessages(
+            messages = rawMessages,
+            foldSystemIntoUser = true,
+            convertToolsToTextHistory = true,
+            stripImages = true,
+            textToolPromptSuffix = com.example.ai.ProviderApiClient.buildTextModeToolPrompt(includeGitHubTools = false),
+        )
+
+        // System message must be folded into first user message for models like Gemma 3.
+        for (i in 0 until adapted.length()) {
+            assertFalse("system role should be folded", adapted.getJSONObject(i).getString("role") == "system")
+            assertFalse("tool role should be converted", adapted.getJSONObject(i).getString("role") == "tool")
+            assertFalse("tool_calls should be stripped in text mode", adapted.getJSONObject(i).has("tool_calls"))
+        }
+        val firstUserContent = adapted.getJSONObject(0).getString("content")
+        assertTrue(firstUserContent.contains("You are an Android coding agent."))
+        assertTrue(firstUserContent.contains("<tool_call>"))
+        assertTrue(firstUserContent.contains("Fix MainActivity"))
+        assertTrue(firstUserContent.contains("Image attachment omitted"))
+        assertFalse(firstUserContent.contains("base64,AAA"))
+        assertTrue(adapted.getJSONObject(2).getString("content").contains("[Tool Result]"))
+    }
+
+    @Test
+    fun providerApiClientExtractsTextToolCallsAndStripsThinkBlocks() {
+        val raw = """
+            <think>Let me think step by step about the fix.</think>
+            Applying the change now.
+            <tool_call>{"name":"edit_file","arguments":{"path":"MainActivity.java","old_text":"a","new_text":"b"}}</tool_call>
+            <tool_call>{"name":"unknown_fake_tool","arguments":{}}</tool_call>
+        """.trimIndent()
+
+        val withoutThink = com.example.ai.ProviderApiClient.stripThinkBlocks(raw)
+        assertFalse(withoutThink.contains("<think>"))
+        assertTrue(withoutThink.contains("Applying the change now."))
+
+        val (cleanedText, extracted) = com.example.ai.ProviderApiClient.extractTextToolCalls(withoutThink)
+        assertEquals(1, extracted.size)
+        assertEquals("edit_file", extracted[0].name)
+        assertTrue(extracted[0].argsJson.contains("MainActivity.java"))
+        assertTrue(cleanedText.contains("Applying the change now."))
+        assertFalse(cleanedText.contains("edit_file"))
+
+        // Streaming sanitizer should suppress partial unclosed <think> and <tool_call> blocks
+        assertEquals("", com.example.ai.ProviderApiClient.sanitizeStreamingVisibleText("<think>partial reasoning", hideToolCalls = true))
+        assertEquals(
+            "Hello world",
+            com.example.ai.ProviderApiClient.sanitizeStreamingVisibleText(
+                "<think>reasoning</think>Hello world<tool_call>{\"name\":\"build_",
+                hideToolCalls = true,
+            ),
+        )
+    }
 }

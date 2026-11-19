@@ -256,6 +256,8 @@ internal object ProviderApiClient {
         modelId: String,
         messages: JSONArray,
         thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
+        includeGitHubTools: Boolean = true,
+        includeTools: Boolean = true,
         onConnected: () -> Unit,
         onTextDelta: (String) -> Unit,
     ): ExternalTurnOutcome = streamOpenAiCompatible(
@@ -266,7 +268,14 @@ internal object ProviderApiClient {
         thinkingMode = thinkingMode,
         isOpenRouter = false,
         extraHeaders = emptyMap(),
+        includeTools = includeTools,
+        includeGitHubTools = includeGitHubTools,
+        allowTextToolCalls = false,
+        includeStreamOptions = true,
+        foldSystemIntoUser = false,
+        stripImages = false,
         onConnected = onConnected,
+        onReasoningDelta = {},
         onTextDelta = onTextDelta,
     )
 
@@ -275,7 +284,14 @@ internal object ProviderApiClient {
         modelId: String,
         messages: JSONArray,
         thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
+        includeTools: Boolean = true,
+        includeGitHubTools: Boolean = false,
+        allowTextToolCalls: Boolean = true,
+        includeStreamOptions: Boolean = true,
+        foldSystemIntoUser: Boolean = false,
+        stripImages: Boolean = false,
         onConnected: () -> Unit,
+        onReasoningDelta: () -> Unit = {},
         onTextDelta: (String) -> Unit,
     ): ExternalTurnOutcome = streamOpenAiCompatible(
         endpointUrl = "https://openrouter.ai/api/v1/chat/completions",
@@ -288,9 +304,218 @@ internal object ProviderApiClient {
             "HTTP-Referer" to "https://github.com/droidforge-studio",
             "X-Title" to "DroidForge Studio",
         ),
+        includeTools = includeTools,
+        includeGitHubTools = includeGitHubTools,
+        allowTextToolCalls = allowTextToolCalls,
+        includeStreamOptions = includeStreamOptions,
+        foldSystemIntoUser = foldSystemIntoUser,
+        stripImages = stripImages,
         onConnected = onConnected,
+        onReasoningDelta = onReasoningDelta,
         onTextDelta = onTextDelta,
     )
+
+    internal fun buildAdaptedOpenAiMessages(
+        messages: JSONArray,
+        foldSystemIntoUser: Boolean,
+        convertToolsToTextHistory: Boolean,
+        stripImages: Boolean,
+        textToolPromptSuffix: String = "",
+    ): JSONArray {
+        val systemParts = mutableListOf<String>()
+        val intermediate = mutableListOf<JSONObject>()
+
+        for (i in 0 until messages.length()) {
+            val orig = messages.optJSONObject(i) ?: continue
+            val copy = JSONObject(orig.toString())
+            val role = copy.optString("role")
+
+            if (stripImages) {
+                val contentVal = copy.opt("content")
+                if (contentVal is JSONArray) {
+                    val textBuilder = StringBuilder()
+                    for (j in 0 until contentVal.length()) {
+                        val part = contentVal.optJSONObject(j) ?: continue
+                        when (part.optString("type")) {
+                            "text" -> {
+                                val t = part.optString("text", "")
+                                if (t.isNotEmpty()) {
+                                    if (textBuilder.isNotEmpty()) textBuilder.append("\n")
+                                    textBuilder.append(t)
+                                }
+                            }
+                            "image_url" -> {
+                                if (textBuilder.isNotEmpty()) textBuilder.append("\n")
+                                textBuilder.append("[Image attachment omitted for text-only model]")
+                            }
+                        }
+                    }
+                    copy.put("content", textBuilder.toString())
+                }
+            }
+
+            if (convertToolsToTextHistory) {
+                if (role == "tool") {
+                    val toolText = copy.optString("content", "{}")
+                    intermediate.add(
+                        JSONObject()
+                            .put("role", "user")
+                            .put("content", "[Tool Result]\n$toolText"),
+                    )
+                    continue
+                }
+                if (role == "assistant" && copy.has("tool_calls")) {
+                    val tcArr = copy.optJSONArray("tool_calls")
+                    val callsSummary = buildList {
+                        if (tcArr != null) {
+                            for (k in 0 until tcArr.length()) {
+                                val fn = tcArr.optJSONObject(k)?.optJSONObject("function")
+                                val n = fn?.optString("name").orEmpty()
+                                val a = fn?.optString("arguments").orEmpty()
+                                if (n.isNotBlank()) add("<tool_call>{\"name\":\"$n\",\"arguments\":$a}</tool_call>")
+                            }
+                        }
+                    }.joinToString("\n")
+                    val existing = copy.optString("content", "").let { if (it == "null") "" else it }
+                    val merged = listOf(existing, callsSummary).filter { it.isNotBlank() }.joinToString("\n")
+                    copy.remove("tool_calls")
+                    copy.put("content", merged.ifBlank { "Executing requested tool." })
+                }
+            } else if (role == "assistant" && !copy.has("content")) {
+                copy.put("content", "")
+            }
+
+            if (foldSystemIntoUser && role == "system") {
+                val sysText = copy.optString("content", "")
+                if (sysText.isNotBlank()) systemParts.add(sysText)
+            } else {
+                intermediate.add(copy)
+            }
+        }
+
+        val combinedSystemPrefix = buildString {
+            if (systemParts.isNotEmpty()) {
+                append(systemParts.joinToString("\n\n"))
+            }
+            if (textToolPromptSuffix.isNotBlank()) {
+                if (isNotEmpty()) append("\n\n")
+                append(textToolPromptSuffix)
+            }
+        }
+
+        if (foldSystemIntoUser && combinedSystemPrefix.isNotBlank()) {
+            val firstUserIdx = intermediate.indexOfFirst { it.optString("role") == "user" }
+            if (firstUserIdx >= 0) {
+                val firstUser = intermediate[firstUserIdx]
+                val existingContent = firstUser.opt("content")
+                if (existingContent is JSONArray) {
+                    val updatedArr = JSONArray().apply {
+                        put(JSONObject().put("type", "text").put("text", "Instructions:\n$combinedSystemPrefix\n\nUser request:"))
+                        for (j in 0 until existingContent.length()) {
+                            put(existingContent.get(j))
+                        }
+                    }
+                    firstUser.put("content", updatedArr)
+                } else {
+                    val origText = if (existingContent == null || existingContent === JSONObject.NULL) "" else existingContent.toString()
+                    firstUser.put("content", "Instructions:\n$combinedSystemPrefix\n\nUser request:\n$origText")
+                }
+            } else {
+                intermediate.add(0, JSONObject().put("role", "user").put("content", combinedSystemPrefix))
+            }
+        } else if (!foldSystemIntoUser && textToolPromptSuffix.isNotBlank()) {
+            val sysIdx = intermediate.indexOfFirst { it.optString("role") == "system" }
+            if (sysIdx >= 0) {
+                val prev = intermediate[sysIdx].optString("content", "")
+                intermediate[sysIdx].put("content", "$prev\n\n$textToolPromptSuffix")
+            } else {
+                intermediate.add(0, JSONObject().put("role", "system").put("content", textToolPromptSuffix))
+            }
+        }
+
+        return JSONArray().apply {
+            intermediate.forEach { put(it) }
+        }
+    }
+
+    internal fun buildTextModeToolPrompt(includeGitHubTools: Boolean): String {
+        val allowedNames = buildSharedToolSpecs()
+            .filter { (name, _, _) -> includeGitHubTools || !name.startsWith("github_") }
+            .joinToString(", ") { (name, _, _) -> name }
+        return """
+            |Tool Calling Format (CRITICAL when native function calling is unavailable):
+            |Available tools: $allowedNames
+            |Key tool arguments:
+            |- list_files: {}
+            |- read_file: {"path":"..."}
+            |- write_file: {"path":"...","content":"..."}
+            |- edit_file: {"path":"...","old_text":"...","new_text":"..."}
+            |- delete_file: {"path":"..."}
+            |- search_files: {"query":"..."}
+            |- build_apk: {"release":false}
+            |- build_aab: {}
+            |To execute a tool, emit one or more blocks using this exact XML tag:
+            |<tool_call>{"name":"edit_file","arguments":{"path":"...","old_text":"...","new_text":"..."}}</tool_call>
+            |Only emit <tool_call> when you actually want a tool run; otherwise give your normal Markdown response.
+        """.trimMargin()
+    }
+
+    internal fun extractTextToolCalls(rawText: String): Pair<String, List<OpenAiToolCallRecord>> {
+        val knownTools = buildSharedToolSpecs().map { it.first }.toSet()
+        val found = mutableListOf<OpenAiToolCallRecord>()
+        val tagRegex = Regex("""<tool_call>\s*(\{[\s\S]*?\})\s*</tool_call>""", RegexOption.IGNORE_CASE)
+        var cleaned = rawText
+        tagRegex.findAll(rawText).forEachIndexed { idx, match ->
+            val jsonStr = match.groupValues[1].trim()
+            val obj = runCatching { JSONObject(jsonStr) }.getOrNull() ?: return@forEachIndexed
+            val name = obj.optString("name").trim()
+            if (name in knownTools) {
+                val argsAny = obj.opt("arguments") ?: obj.opt("parameters") ?: JSONObject()
+                val argsJson = when (argsAny) {
+                    is JSONObject -> argsAny.toString()
+                    is String -> argsAny.ifBlank { "{}" }
+                    else -> "{}"
+                }
+                found.add(
+                    OpenAiToolCallRecord(
+                        id = "text_call_${System.currentTimeMillis()}_$idx",
+                        name = name,
+                        argsJson = argsJson,
+                    ),
+                )
+                cleaned = cleaned.replace(match.value, "")
+            }
+        }
+        return cleaned.trim() to found
+    }
+
+    internal fun stripThinkBlocks(rawText: String): String {
+        val stripped = rawText
+            .replace(Regex("""<think>[\s\S]*?</think>""", RegexOption.IGNORE_CASE), "")
+            .trim()
+        return stripped.ifBlank { rawText.trim() }
+    }
+
+    internal fun sanitizeStreamingVisibleText(rawText: String, hideToolCalls: Boolean): String {
+        var text = rawText
+            .replace(Regex("""<think>[\s\S]*?</think>""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""<think>[\s\S]*$""", RegexOption.IGNORE_CASE), "")
+        if (hideToolCalls) {
+            text = text
+                .replace(Regex("""<tool_call>[\s\S]*?</tool_call>""", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("""<tool_call>[\s\S]*$""", RegexOption.IGNORE_CASE), "")
+        }
+        val lastLt = text.lastIndexOf('<')
+        if (lastLt >= 0) {
+            val tail = text.substring(lastLt).lowercase()
+            val matchesThinkStart = "<think>".startsWith(tail)
+            val matchesToolStart = hideToolCalls && "<tool_call>".startsWith(tail)
+            if (matchesThinkStart || matchesToolStart) {
+                text = text.substring(0, lastLt)
+            }
+        }
+        return text
+    }
 
     private suspend fun streamOpenAiCompatible(
         endpointUrl: String,
@@ -300,12 +525,22 @@ internal object ProviderApiClient {
         thinkingMode: AiThinkingMode,
         isOpenRouter: Boolean,
         extraHeaders: Map<String, String>,
+        includeTools: Boolean,
+        includeGitHubTools: Boolean,
+        allowTextToolCalls: Boolean,
+        includeStreamOptions: Boolean,
+        foldSystemIntoUser: Boolean,
+        stripImages: Boolean,
         onConnected: () -> Unit,
+        onReasoningDelta: () -> Unit,
         onTextDelta: (String) -> Unit,
     ): ExternalTurnOutcome = withContext(Dispatchers.IO) {
         val startedAt = System.currentTimeMillis()
+        val activeSpecs = buildSharedToolSpecs().filter { (name, _, _) ->
+            includeGitHubTools || !name.startsWith("github_")
+        }
         val tools = JSONArray().apply {
-            buildSharedToolSpecs().forEach { (name, desc, schema) ->
+            activeSpecs.forEach { (name, desc, schema) ->
                 put(
                     JSONObject()
                         .put("type", "function")
@@ -320,12 +555,30 @@ internal object ProviderApiClient {
             }
         }
 
+        val textToolSuffix = if (!includeTools && allowTextToolCalls) {
+            buildTextModeToolPrompt(includeGitHubTools)
+        } else {
+            ""
+        }
+        val adaptedMessages = buildAdaptedOpenAiMessages(
+            messages = messages,
+            foldSystemIntoUser = foldSystemIntoUser,
+            convertToolsToTextHistory = !includeTools,
+            stripImages = stripImages,
+            textToolPromptSuffix = textToolSuffix,
+        )
+
         val bodyObj = JSONObject()
             .put("model", modelId)
-            .put("messages", messages)
-            .put("tools", tools)
+            .put("messages", adaptedMessages)
             .put("stream", true)
-            .put("stream_options", JSONObject().put("include_usage", true))
+
+        if (includeTools) {
+            bodyObj.put("tools", tools)
+        }
+        if (includeStreamOptions) {
+            bodyObj.put("stream_options", JSONObject().put("include_usage", true))
+        }
 
         val lowerModel = modelId.lowercase()
         val isOpenAiFixedTempReasoning = !isOpenRouter && (
@@ -368,6 +621,9 @@ internal object ProviderApiClient {
         }
 
         val textSb = StringBuilder()
+        val rawNonSseSb = StringBuilder()
+        var sawSseData = false
+        var lastStreamedVisible = ""
         val toolCallIds = mutableMapOf<Int, String>()
         val toolCallNames = mutableMapOf<Int, String>()
         val toolCallArgs = mutableMapOf<Int, StringBuilder>()
@@ -395,13 +651,30 @@ internal object ProviderApiClient {
                 while (true) {
                     coroutineContext.ensureActive()
                     val line = reader.readLine() ?: break
-                    if (!line.startsWith("data:")) continue
+                    if (!line.startsWith("data:")) {
+                        if (!sawSseData && rawNonSseSb.length < 512_000 && !line.startsWith(":")) {
+                            rawNonSseSb.append(line).append('\n')
+                        }
+                        continue
+                    }
+                    sawSseData = true
                     val payload = line.removePrefix("data:").trim()
                     if (payload.isEmpty() || payload == "[DONE]") continue
 
                     val root = runCatching { JSONObject(payload) }.getOrNull() ?: continue
                     root.optJSONObject("error")?.let { err ->
-                        throw GeminiApiException(status, err.optString("message", "OpenAI streaming error"))
+                        val errMsg = err.optString("message").ifBlank { "Streaming error from provider" }
+                        val rawMeta = err.optJSONObject("metadata")?.optString("raw").orEmpty()
+                        val fullMsg = if (rawMeta.isNotBlank() && !errMsg.contains(rawMeta)) "$errMsg ($rawMeta)" else errMsg
+                        val parsedCode = err.optInt("code", 0)
+                        val effectiveCode = when {
+                            parsedCode in 400..599 -> parsedCode
+                            fullMsg.contains("rate", ignoreCase = true) || fullMsg.contains("limit", ignoreCase = true) -> 429
+                            fullMsg.contains("credit", ignoreCase = true) || fullMsg.contains("afford", ignoreCase = true) -> 402
+                            fullMsg.contains("not found", ignoreCase = true) || fullMsg.contains("no endpoints", ignoreCase = true) -> 404
+                            else -> 502
+                        }
+                        throw GeminiApiException(effectiveCode, fullMsg)
                     }
 
                     root.optJSONObject("usage")?.let { u ->
@@ -415,16 +688,34 @@ internal object ProviderApiClient {
                     if (fr.isNotBlank() && fr != "null") finishReason = fr
 
                     val delta = choice.optJSONObject("delta") ?: continue
+                    val reasoningDelta = delta.optString("reasoning", "").let { r ->
+                        if (r.isNotEmpty() && r != "null") r else delta.optString("reasoning_content", "")
+                    }
+                    if (reasoningDelta.isNotEmpty() && reasoningDelta != "null") {
+                        onReasoningDelta()
+                    }
+
                     val contentDelta = delta.optString("content", "")
                     if (contentDelta.isNotEmpty() && contentDelta != "null") {
                         textSb.append(contentDelta)
-                        onTextDelta(contentDelta)
+                        val hideToolsDuringStream = !includeTools && allowTextToolCalls
+                        val sanitizedNow = sanitizeStreamingVisibleText(
+                            rawText = textSb.toString(),
+                            hideToolCalls = hideToolsDuringStream,
+                        ).let { if (lastStreamedVisible.isEmpty()) it.trimStart() else it }
+                        if (sanitizedNow.length > lastStreamedVisible.length && sanitizedNow.startsWith(lastStreamedVisible)) {
+                            val incremental = sanitizedNow.substring(lastStreamedVisible.length)
+                            lastStreamedVisible = sanitizedNow
+                            onTextDelta(incremental)
+                        } else if (textSb.contains("<think>", ignoreCase = true) && !textSb.contains("</think>", ignoreCase = true)) {
+                            onReasoningDelta()
+                        }
                     }
 
                     val tcArr = delta.optJSONArray("tool_calls") ?: continue
                     for (i in 0 until tcArr.length()) {
                         val tc = tcArr.optJSONObject(i) ?: continue
-                        val idx = tc.optInt("index", 0)
+                        val idx = if (tc.has("index")) tc.optInt("index", i) else i
                         val id = tc.optString("id", "")
                         if (id.isNotBlank()) toolCallIds[idx] = id
                         val fn = tc.optJSONObject("function") ?: continue
@@ -438,13 +729,67 @@ internal object ProviderApiClient {
                 }
             }
 
-            val calls = toolCallNames.keys.sorted().mapNotNull { idx ->
+            // Fallback when an upstream provider returns a non-SSE application/json body despite stream=true.
+            if (!sawSseData && rawNonSseSb.isNotEmpty()) {
+                val rawJson = rawNonSseSb.toString().trim()
+                val root = runCatching { JSONObject(rawJson) }.getOrNull()
+                if (root != null) {
+                    root.optJSONObject("error")?.let { err ->
+                        val parsedCode = err.optInt("code", 502).let { if (it in 400..599) it else 502 }
+                        throw GeminiApiException(parsedCode, err.optString("message", "Provider error"))
+                    }
+                    root.optJSONObject("usage")?.let { u ->
+                        inputTokens = u.optLong("prompt_tokens", inputTokens)
+                        outputTokens = u.optLong("completion_tokens", outputTokens)
+                        totalTokens = u.optLong("total_tokens", inputTokens + outputTokens)
+                    }
+                    val choice = root.optJSONArray("choices")?.optJSONObject(0)
+                    val fr = choice?.optString("finish_reason", "").orEmpty()
+                    if (fr.isNotBlank() && fr != "null") finishReason = fr
+                    val msgObj = choice?.optJSONObject("message")
+                    val content = msgObj?.optString("content", "").orEmpty()
+                    if (content.isNotEmpty() && content != "null") {
+                        textSb.append(content)
+                        onTextDelta(stripThinkBlocks(content))
+                    }
+                    val tcArr = msgObj?.optJSONArray("tool_calls")
+                    if (tcArr != null) {
+                        for (i in 0 until tcArr.length()) {
+                            val tc = tcArr.optJSONObject(i) ?: continue
+                            val id = tc.optString("id", "call_$i")
+                            val fn = tc.optJSONObject("function") ?: continue
+                            val fnName = fn.optString("name", "")
+                            val fnArgs = fn.optString("arguments", "{}")
+                            if (fnName.isNotBlank()) {
+                                toolCallIds[i] = id
+                                toolCallNames[i] = fnName
+                                toolCallArgs[i] = StringBuilder(fnArgs)
+                            }
+                        }
+                    }
+                }
+            }
+
+            var calls = toolCallNames.keys.sorted().mapNotNull { idx ->
                 val name = toolCallNames[idx]?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 OpenAiToolCallRecord(
                     id = toolCallIds[idx] ?: "call_$idx",
                     name = name,
                     argsJson = toolCallArgs[idx]?.toString().orEmpty().ifBlank { "{}" },
                 )
+            }
+
+            var finalVisibleText = stripThinkBlocks(textSb.toString())
+            if (calls.isEmpty() && !includeTools && allowTextToolCalls && finalVisibleText.contains("<tool_call>", ignoreCase = true)) {
+                val (cleaned, parsedTextCalls) = extractTextToolCalls(finalVisibleText)
+                if (parsedTextCalls.isNotEmpty()) {
+                    finalVisibleText = cleaned
+                    calls = parsedTextCalls
+                }
+            }
+
+            if (calls.isEmpty() && finalVisibleText.isBlank()) {
+                throw GeminiApiException(502, "$modelId returned an empty response")
             }
 
             val remReq = conn.getHeaderField("x-ratelimit-remaining-requests")
@@ -455,7 +800,7 @@ internal object ProviderApiClient {
             ).joinToString(" • ")
 
             ExternalTurnOutcome(
-                text = textSb.toString(),
+                text = finalVisibleText,
                 openAiToolCalls = calls,
                 usage = TokenUsageDelta(
                     inputTokens = inputTokens,

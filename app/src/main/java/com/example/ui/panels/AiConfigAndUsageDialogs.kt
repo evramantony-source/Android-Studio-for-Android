@@ -43,6 +43,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -376,6 +377,12 @@ fun ModelMenuDialog(
         liveModels.filter { it.provider == browsedProvider }.map { it.id.lowercase() }.toSet()
     }
 
+    LaunchedEffect(browsedProvider) {
+        if (browsedProvider == AiProvider.OPENROUTER && liveIds.isEmpty() && !isFetchingModels) {
+            onRefreshLiveModels(AiProvider.OPENROUTER)
+        }
+    }
+
     val allModels = remember(browsedProvider, liveModels, searchQuery, generationFilter) {
         val base = AiModelsCatalog.modelsFor(browsedProvider, liveModels)
         base.filter { option ->
@@ -388,7 +395,7 @@ fun ModelMenuDialog(
             val matchesGen = when (generationFilter) {
                 "All" -> true
                 "Live" -> option.isLiveFetched || id in liveIds
-                "Free" -> id.endsWith(":free") || option.badge.equals("Free", ignoreCase = true)
+                "Free" -> AiModelsCatalog.isFreeOpenRouterModel(id) || option.badge.equals("Free", ignoreCase = true)
                 "Gemini" -> id.contains("gemini")
                 "Claude" -> id.contains("claude")
                 "DeepSeek / Qwen" -> id.contains("deepseek") || id.contains("qwen")

@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -32,7 +33,7 @@ import kotlin.coroutines.coroutineContext
 private const val TAG = "GeminiCodeAssistant"
 const val GEMINI_MODEL_ID = "gemini-3.8-flash"
 private const val GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-private const val MAX_AGENT_TURNS = 12
+private const val MAX_AGENT_TURNS = 24
 private const val CONNECT_TIMEOUT_MS = 15_000
 private const val READ_TIMEOUT_MS = 65_000
 private const val UNARY_FALLBACK_READ_TIMEOUT_MS = 115_000
@@ -149,6 +150,7 @@ class GeminiCodeAssistant {
         toolExecutor: ProjectToolExecutor,
         githubConnected: Boolean = false,
         verifiedLiveModelIds: Set<String> = emptySet(),
+        liveModelOptions: List<AiModelOption> = emptyList(),
         shouldPublishToUi: () -> Boolean = { true },
         onModelAutoCorrected: (failedModel: String, workingModel: String) -> Unit = { _, _ -> },
         onUsageRecorded: (provider: AiProvider, modelId: String, delta: TokenUsageDelta, toolCount: Int, failed: Boolean) -> Unit = { _, _, _, _, _ -> },
@@ -354,54 +356,65 @@ class GeminiCodeAssistant {
                         onUsageRecorded(provider, usedModel, delta, toolCalls, false)
                     },
                 )
-                AiProvider.OPENAI, AiProvider.OPENROUTER -> runOpenAiLoop(
-                    provider = provider,
-                    initialModel = requestedModel,
-                    apiKey = resolvedKey,
-                    thinkingMode = thinkingMode,
-                    projectLanguage = projectLanguage,
-                    javaVersion = javaVersion,
-                    minSdkVersion = minSdkVersion,
-                    imageAttachments = imageAttachments,
-                    priorHistory = priorHistory,
-                    promptWithContext = promptWithContext,
-                    steps = steps,
-                    accumulatedVisibleText = accumulatedVisibleText,
-                    addOrUpdateStep = ::addOrUpdateStep,
-                    onStreamText = { text, usedModel ->
-                        effectiveModelInUse = usedModel
-                        updateRunAssistantMessage(
-                            text = text,
-                            isStreaming = true,
-                            stepList = steps.toList(),
-                            codeBlocks = emptyList(),
-                            totalTokens = totalMessageTokens,
-                            modelUsed = usedModel,
-                            forceEmit = false,
-                        )
-                    },
-                    onFinalizeSuccess = { finalText, finalSteps, tokens, usedModel ->
-                        effectiveModelInUse = usedModel
-                        updateRunAssistantMessage(
-                            text = finalText,
-                            isStreaming = false,
-                            stepList = finalSteps,
-                            codeBlocks = extractCodeBlocks(finalText),
-                            totalTokens = tokens,
-                            modelUsed = usedModel,
-                            forceEmit = true,
-                        )
-                        if (shouldPublishToUi() && activeRunId == assistantMsgId) {
-                            _uiState.value = AiUiState.Idle
-                        }
-                    },
-                    toolExecutor = toolExecutor,
-                    onUsage = { usedModel, delta, toolCalls ->
-                        effectiveModelInUse = usedModel
-                        totalMessageTokens += delta.totalTokens
-                        onUsageRecorded(provider, usedModel, delta, toolCalls, false)
-                    },
-                )
+                AiProvider.OPENAI, AiProvider.OPENROUTER -> {
+                    val effectiveLiveModels = if (provider == AiProvider.OPENROUTER && liveModelOptions.none { it.provider == AiProvider.OPENROUTER }) {
+                        withTimeoutOrNull(6_000L) {
+                            AiModelsCatalog.fetchOpenRouterPublicModels(resolvedKey).getOrDefault(emptyList())
+                        }.orEmpty()
+                    } else {
+                        liveModelOptions
+                    }
+                    runOpenAiLoop(
+                        provider = provider,
+                        initialModel = requestedModel,
+                        apiKey = resolvedKey,
+                        thinkingMode = thinkingMode,
+                        includeGitHubTools = includeGitHubTools,
+                        liveModelOptions = effectiveLiveModels,
+                        projectLanguage = projectLanguage,
+                        javaVersion = javaVersion,
+                        minSdkVersion = minSdkVersion,
+                        imageAttachments = imageAttachments,
+                        priorHistory = priorHistory,
+                        promptWithContext = promptWithContext,
+                        steps = steps,
+                        accumulatedVisibleText = accumulatedVisibleText,
+                        addOrUpdateStep = ::addOrUpdateStep,
+                        onStreamText = { text, usedModel ->
+                            effectiveModelInUse = usedModel
+                            updateRunAssistantMessage(
+                                text = text,
+                                isStreaming = true,
+                                stepList = steps.toList(),
+                                codeBlocks = emptyList(),
+                                totalTokens = totalMessageTokens,
+                                modelUsed = usedModel,
+                                forceEmit = false,
+                            )
+                        },
+                        onFinalizeSuccess = { finalText, finalSteps, tokens, usedModel ->
+                            effectiveModelInUse = usedModel
+                            updateRunAssistantMessage(
+                                text = finalText,
+                                isStreaming = false,
+                                stepList = finalSteps,
+                                codeBlocks = extractCodeBlocks(finalText),
+                                totalTokens = tokens,
+                                modelUsed = usedModel,
+                                forceEmit = true,
+                            )
+                            if (shouldPublishToUi() && activeRunId == assistantMsgId) {
+                                _uiState.value = AiUiState.Idle
+                            }
+                        },
+                        toolExecutor = toolExecutor,
+                        onUsage = { usedModel, delta, toolCalls ->
+                            effectiveModelInUse = usedModel
+                            totalMessageTokens += delta.totalTokens
+                            onUsageRecorded(provider, usedModel, delta, toolCalls, false)
+                        },
+                    )
+                }
                 AiProvider.CLAUDE -> runClaudeLoop(
                     initialModel = requestedModel,
                     apiKey = resolvedKey,
@@ -1009,7 +1022,7 @@ class GeminiCodeAssistant {
 
         if (!completed) {
             val summary = accumulatedVisibleText.toString().trim()
-                .ifBlank { "Stopped after reaching the maximum autonomous step limit ($MAX_AGENT_TURNS turns)." }
+                .ifBlank { buildCompletedStepsSummary(steps) }
             onFinalizeSuccess(summary, steps.toList(), cumulativeTokens, activeModel)
         }
     }
@@ -1019,6 +1032,8 @@ class GeminiCodeAssistant {
         initialModel: String,
         apiKey: String,
         thinkingMode: AiThinkingMode,
+        includeGitHubTools: Boolean = true,
+        liveModelOptions: List<AiModelOption> = emptyList(),
         projectLanguage: ProjectLanguage,
         javaVersion: JavaVersionOption,
         minSdkVersion: Int,
@@ -1063,6 +1078,157 @@ class GeminiCodeAssistant {
             }
         }
 
+        val knownModels = (liveModelOptions + AiModelsCatalog.builtInOpenRouterModels)
+            .associateBy { it.id.lowercase() }
+
+        suspend fun invokeOpenAiCompatibleCandidate(
+            candidate: String,
+            allowToolsThisCall: Boolean,
+            allowTextToolFallback: Boolean,
+            thinkStepId: String,
+            textBeforeTurn: String,
+            turnText: StringBuilder,
+        ): ExternalTurnOutcome {
+            val meta = knownModels[candidate.lowercase()]
+            var useNativeTools = if (!allowToolsThisCall) {
+                false
+            } else if (provider == AiProvider.OPENROUTER) {
+                meta?.supportsTools ?: true
+            } else {
+                true
+            }
+            var foldSystem = if (provider == AiProvider.OPENROUTER) {
+                meta?.supportsSystemPrompt == false || candidate.lowercase().contains("gemma")
+            } else {
+                false
+            }
+            var includeStreamOptions = true
+            var stripImages = false
+
+            var adaptAttempt = 0
+            while (true) {
+                coroutineContext.ensureActive()
+                adaptAttempt++
+                turnText.clear()
+                accumulatedVisibleText.clear()
+                accumulatedVisibleText.append(textBeforeTurn)
+
+                val onConnected = {
+                    activeModel = candidate
+                    addOrUpdateStep(
+                        AgentStep(
+                            id = thinkStepId,
+                            title = "Streaming from $candidate",
+                            detail = "${thinkingMode.badge} • Connected...",
+                            status = AgentStepStatus.RUNNING,
+                        ),
+                    )
+                }
+                val onReasoning = {
+                    addOrUpdateStep(
+                        AgentStep(
+                            id = thinkStepId,
+                            title = "Reasoning ($candidate)",
+                            detail = "${thinkingMode.badge} • Thinking...",
+                            status = AgentStepStatus.RUNNING,
+                        ),
+                    )
+                }
+                val onDelta: (String) -> Unit = { delta ->
+                    turnText.append(delta)
+                    accumulatedVisibleText.clear()
+                    accumulatedVisibleText.append(textBeforeTurn)
+                    accumulatedVisibleText.append(turnText)
+                    onStreamText(accumulatedVisibleText.toString(), candidate)
+                }
+
+                try {
+                    return if (provider == AiProvider.OPENROUTER) {
+                        ProviderApiClient.streamOpenRouter(
+                            apiKey = apiKey,
+                            modelId = candidate,
+                            messages = openAiMessages,
+                            thinkingMode = thinkingMode,
+                            includeTools = useNativeTools,
+                            includeGitHubTools = includeGitHubTools,
+                            allowTextToolCalls = allowTextToolFallback,
+                            includeStreamOptions = includeStreamOptions,
+                            foldSystemIntoUser = foldSystem,
+                            stripImages = stripImages,
+                            onConnected = onConnected,
+                            onReasoningDelta = onReasoning,
+                            onTextDelta = onDelta,
+                        )
+                    } else {
+                        ProviderApiClient.streamOpenAi(
+                            apiKey = apiKey,
+                            modelId = candidate,
+                            messages = openAiMessages,
+                            thinkingMode = thinkingMode,
+                            includeGitHubTools = includeGitHubTools,
+                            includeTools = useNativeTools,
+                            onConnected = onConnected,
+                            onTextDelta = onDelta,
+                        )
+                    }
+                } catch (e: GeminiApiException) {
+                    val lowerMsg = e.message.orEmpty().lowercase()
+                    val canAdapt = provider == AiProvider.OPENROUTER && adaptAttempt < 4
+                    if (canAdapt) {
+                        if (useNativeTools &&
+                            (e.httpCode == 400 || e.httpCode == 404 || e.httpCode == 422) &&
+                            (lowerMsg.contains("tool") || lowerMsg.contains("function"))
+                        ) {
+                            useNativeTools = false
+                            addOrUpdateStep(
+                                AgentStep(
+                                    id = thinkStepId,
+                                    title = "Adapting tools for $candidate",
+                                    detail = "Using text-mode tool calling on $candidate...",
+                                    status = AgentStepStatus.RUNNING,
+                                ),
+                            )
+                            continue
+                        }
+                        if (!foldSystem &&
+                            (e.httpCode == 400 || e.httpCode == 422) &&
+                            (lowerMsg.contains("developer instruction") || lowerMsg.contains("system"))
+                        ) {
+                            foldSystem = true
+                            addOrUpdateStep(
+                                AgentStep(
+                                    id = thinkStepId,
+                                    title = "Adapting prompt for $candidate",
+                                    detail = "Folding system instructions for model compatibility...",
+                                    status = AgentStepStatus.RUNNING,
+                                ),
+                            )
+                            continue
+                        }
+                        if (includeStreamOptions &&
+                            (e.httpCode == 400 || e.httpCode == 422) &&
+                            (lowerMsg.contains("stream_options") || lowerMsg.contains("include_usage"))
+                        ) {
+                            includeStreamOptions = false
+                            continue
+                        }
+                        if (!stripImages &&
+                            (e.httpCode == 400 || e.httpCode == 404 || e.httpCode == 422) &&
+                            (lowerMsg.contains("image") || lowerMsg.contains("vision") || lowerMsg.contains("multimodal"))
+                        ) {
+                            stripImages = true
+                            continue
+                        }
+                    }
+                    throw e
+                } catch (e: SocketTimeoutException) {
+                    throw e
+                } catch (e: IOException) {
+                    throw GeminiApiException(502, e.message ?: "Upstream stream connection dropped")
+                }
+            }
+        }
+
         var totalTokens = 0L
         var completed = false
 
@@ -1090,52 +1256,32 @@ class GeminiCodeAssistant {
                 callExternalWithRetryAndFailover(
                     provider = provider,
                     primaryModelId = activeModel,
+                    liveModels = liveModelOptions,
                     onStatusUpdate = { title, detail ->
                         addOrUpdateStep(AgentStep(id = thinkStepId, title = title, detail = detail, status = AgentStepStatus.RUNNING))
                     },
                 ) { candidate ->
-                    val onConnected = {
-                        activeModel = candidate
-                        addOrUpdateStep(
-                            AgentStep(
-                                id = thinkStepId,
-                                title = "Streaming from $candidate",
-                                detail = "${thinkingMode.badge} • Connected...",
-                                status = AgentStepStatus.RUNNING,
-                            ),
-                        )
-                    }
-                    val onDelta: (String) -> Unit = { delta ->
-                        turnText.append(delta)
-                        accumulatedVisibleText.clear()
-                        accumulatedVisibleText.append(textBeforeTurn)
-                        accumulatedVisibleText.append(turnText)
-                        onStreamText(accumulatedVisibleText.toString(), candidate)
-                    }
-                    if (provider == AiProvider.OPENROUTER) {
-                        ProviderApiClient.streamOpenRouter(
-                            apiKey = apiKey,
-                            modelId = candidate,
-                            messages = openAiMessages,
-                            thinkingMode = thinkingMode,
-                            onConnected = onConnected,
-                            onTextDelta = onDelta,
-                        )
-                    } else {
-                        ProviderApiClient.streamOpenAi(
-                            apiKey = apiKey,
-                            modelId = candidate,
-                            messages = openAiMessages,
-                            thinkingMode = thinkingMode,
-                            onConnected = onConnected,
-                            onTextDelta = onDelta,
-                        )
-                    }
+                    invokeOpenAiCompatibleCandidate(
+                        candidate = candidate,
+                        allowToolsThisCall = true,
+                        allowTextToolFallback = provider == AiProvider.OPENROUTER,
+                        thinkStepId = thinkStepId,
+                        textBeforeTurn = textBeforeTurn,
+                        turnText = turnText,
+                    )
                 }
             }
 
             activeModel = usedModel
-            if (turnText.isEmpty()) accumulatedVisibleText.setLength(turnPrefixLen)
+            accumulatedVisibleText.clear()
+            accumulatedVisibleText.append(textBeforeTurn)
+            if (outcome.text.isNotBlank()) {
+                accumulatedVisibleText.append(outcome.text)
+                onStreamText(accumulatedVisibleText.toString(), activeModel)
+            } else {
+                accumulatedVisibleText.setLength(turnPrefixLen)
+                onStreamText(accumulatedVisibleText.toString(), activeModel)
+            }
             totalTokens += outcome.usage.totalTokens
             onUsage(activeModel, outcome.usage, outcome.openAiToolCalls.size)
 
@@ -1149,7 +1295,9 @@ class GeminiCodeAssistant {
                         durationMs = System.currentTimeMillis() - turnStart,
                     ),
                 )
-                val finalText = accumulatedVisibleText.toString().trim().ifBlank { "All requested actions finished." }
+                val finalText = accumulatedVisibleText.toString().trim()
+                    .ifBlank { outcome.text.trim() }
+                    .ifBlank { buildCompletedStepsSummary(steps) }
                 onFinalizeSuccess(finalText, steps.toList(), totalTokens, activeModel)
                 completed = true
                 break
@@ -1166,7 +1314,7 @@ class GeminiCodeAssistant {
             )
 
             val assistantMsg = JSONObject().put("role", "assistant")
-            if (outcome.text.isNotEmpty()) assistantMsg.put("content", outcome.text)
+            assistantMsg.put("content", outcome.text)
             val tcArray = JSONArray()
             outcome.openAiToolCalls.forEach { tc ->
                 tcArray.put(
@@ -1210,7 +1358,44 @@ class GeminiCodeAssistant {
         }
 
         if (!completed) {
-            val summary = accumulatedVisibleText.toString().trim().ifBlank { "Reached max step limit ($MAX_AGENT_TURNS turns)." }
+            if (accumulatedVisibleText.toString().isBlank()) {
+                openAiMessages.put(
+                    JSONObject()
+                        .put("role", "user")
+                        .put("content", "Provide a concise Markdown summary of the changes completed and the latest build result, without calling any tools."),
+                )
+                val finalStepId = "think_summary"
+                val textBeforeSummary = accumulatedVisibleText.toString()
+                val summaryTurnText = StringBuilder()
+                runCatching {
+                    withTimeout(30_000L) {
+                        invokeOpenAiCompatibleCandidate(
+                            candidate = activeModel,
+                            allowToolsThisCall = false,
+                            allowTextToolFallback = false,
+                            thinkStepId = finalStepId,
+                            textBeforeTurn = textBeforeSummary,
+                            turnText = summaryTurnText,
+                        )
+                    }
+                }.onSuccess { finalOutcome ->
+                    totalTokens += finalOutcome.usage.totalTokens
+                    onUsage(activeModel, finalOutcome.usage, 0)
+                    addOrUpdateStep(
+                        AgentStep(
+                            id = finalStepId,
+                            title = "Summarized via $activeModel",
+                            detail = "${finalOutcome.usage.totalTokens} tokens",
+                            status = AgentStepStatus.COMPLETED,
+                        ),
+                    )
+                    if (accumulatedVisibleText.isBlank() && finalOutcome.text.isNotBlank()) {
+                        accumulatedVisibleText.append(finalOutcome.text)
+                    }
+                }
+            }
+            val summary = accumulatedVisibleText.toString().trim()
+                .ifBlank { buildCompletedStepsSummary(steps) }
             onFinalizeSuccess(summary, steps.toList(), totalTokens, activeModel)
         }
     }
@@ -1386,18 +1571,47 @@ class GeminiCodeAssistant {
         }
 
         if (!completed) {
-            val summary = accumulatedVisibleText.toString().trim().ifBlank { "Reached max step limit ($MAX_AGENT_TURNS turns)." }
+            val summary = accumulatedVisibleText.toString().trim()
+                .ifBlank { buildCompletedStepsSummary(steps) }
             onFinalizeSuccess(summary, steps.toList(), totalTokens, activeModel)
         }
+    }
+
+    private fun buildCompletedStepsSummary(steps: List<AgentStep>): String {
+        val toolSteps = steps.filter { it.toolName != null }
+        if (toolSteps.isEmpty()) {
+            return "Finished processing."
+        }
+        val succeeded = toolSteps.count { it.status == AgentStepStatus.COMPLETED }
+        val latestBuild = toolSteps.lastOrNull { it.toolName == "build_apk" || it.toolName == "build_aab" }
+        val edited = toolSteps.filter { it.toolName == "write_file" || it.toolName == "edit_file" }
+            .map { it.title }
+            .distinct()
+            .takeLast(6)
+        return buildString {
+            appendLine("### Summary")
+            appendLine("Completed $succeeded of ${toolSteps.size} tool action(s).")
+            if (edited.isNotEmpty()) {
+                appendLine()
+                appendLine("### Changes Made")
+                edited.forEach { appendLine("- $it") }
+            }
+            if (latestBuild != null) {
+                appendLine()
+                appendLine("### Build Status")
+                appendLine("- **${latestBuild.title}:** ${latestBuild.detail}")
+            }
+        }.trim()
     }
 
     private suspend fun callExternalWithRetryAndFailover(
         provider: AiProvider,
         primaryModelId: String,
+        liveModels: List<AiModelOption> = emptyList(),
         onStatusUpdate: (String, String) -> Unit,
         invoke: suspend (String) -> ExternalTurnOutcome,
     ): Pair<String, ExternalTurnOutcome> {
-        val candidates = AiModelsCatalog.fallbackChain(provider, primaryModelId)
+        val candidates = AiModelsCatalog.fallbackChain(provider, primaryModelId, liveModels)
         var lastError: Throwable? = null
 
         for ((index, candidate) in candidates.withIndex()) {
@@ -1413,15 +1627,16 @@ class GeminiCodeAssistant {
                     lastError = e
                     val canRetrySame = isTransientHttpStatus(e.httpCode) && attemptsOnCandidate == 1
                     if (canRetrySame) {
+                        val waitMs = if (e.httpCode == 429) (e.retryAfterMs ?: 1000L) else 450L
                         onStatusUpdate(
                             "Retrying $candidate",
                             "HTTP ${e.httpCode} — quick retry before failover...",
                         )
-                        delay(400L)
+                        delay(waitMs)
                         continue
                     }
                     val canFailover = shouldFailoverHttpStatus(e.httpCode) ||
-                        (provider == AiProvider.OPENROUTER && e.httpCode == 402)
+                        (provider == AiProvider.OPENROUTER && (e.httpCode == 402 || e.httpCode == 400))
                     if (canFailover && hasNextCandidate) {
                         val nextModel = candidates[index + 1]
                         onStatusUpdate(
