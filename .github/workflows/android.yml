@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build:
-    name: Build & Test DroidForge Studio
+    name: Build & Test Android Studio: For Android
     runs-on: ubuntu-latest
 
     steps:
@@ -152,7 +152,7 @@ jobs:
       - name: Upload Release & Debug APK artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: droidforge-studio-apks
+          name: android-studio-for-android-apks
           path: |
             app/build/outputs/apk/release/app-release.apk
             app/build/outputs/apk/debug/app-debug.apk
@@ -163,7 +163,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cp app/build/outputs/apk/release/app-release.apk droidforge-studio-release.apk
+          cp app/build/outputs/apk/release/app-release.apk android-studio-for-android-release.apk
           if [ "$KEYSTORE_SOURCE" = "secret-DEBUG_KEYSTORE_BASE64" ] || [ "$KEYSTORE_SOURCE" = "repo-debug.keystore.base64" ]; then
             CERT_STATUS="Signed with registered Firebase keystore ($CERT_SHA1)"
           else
@@ -172,13 +172,14 @@ jobs:
           RELEASE_NOTES=$(printf 'Latest Release APK from commit %s.\n- Bundled google-services.json: %s\n- Signing cert (%s): %s' "${GITHUB_SHA::7}" "$HAS_GOOGLE_SERVICES" "$KEYSTORE_SOURCE" "$CERT_STATUS")
           RELEASE_OK=true
           if gh release view latest-debug >/dev/null 2>&1; then
-            gh release upload latest-debug droidforge-studio-release.apk --clobber || RELEASE_OK=false
+            gh release upload latest-debug android-studio-for-android-release.apk --clobber || RELEASE_OK=false
+            gh release delete-asset latest-debug droidforge-studio-release.apk -y || true
             gh release delete-asset latest-debug droidforge-studio-debug.apk -y || true
-            gh release edit latest-debug --prerelease=false --latest --title "DroidForge Studio (Latest APK)" --notes "$RELEASE_NOTES" || true
+            gh release edit latest-debug --prerelease=false --latest --title "Android Studio: For Android (Latest APK)" --notes "$RELEASE_NOTES" || true
           else
-            gh release create latest-debug droidforge-studio-release.apk \
+            gh release create latest-debug android-studio-for-android-release.apk \
               --target "$GITHUB_SHA" \
-              --title "DroidForge Studio (Latest APK)" \
+              --title "Android Studio: For Android (Latest APK)" \
               --notes "$RELEASE_NOTES" \
               --latest || RELEASE_OK=false
           fi
@@ -186,8 +187,8 @@ jobs:
             echo "::warning::Could not publish GitHub Release. Enable 'Read and write permissions' under Repo Settings -> Actions -> General -> Workflow permissions."
           fi
           {
-            echo "### DroidForge Studio APK Ready"
-            echo "- **1-Tap Release APK (Recommended for Phone + Firebase App Check):** https://github.com/${{ github.repository }}/releases/latest/download/droidforge-studio-release.apk"
+            echo "### Android Studio: For Android APK Ready"
+            echo "- **1-Tap Release APK (Recommended for Phone + Firebase App Check):** https://github.com/${{ github.repository }}/releases/latest/download/android-studio-for-android-release.apk"
             echo "- **Releases Page:** https://github.com/${{ github.repository }}/releases/tag/latest-debug"
             echo "- **Signing:** ${CERT_STATUS}"
             echo "- **google-services.json bundled:** ${HAS_GOOGLE_SERVICES}"

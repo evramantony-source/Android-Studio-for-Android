@@ -1,5 +1,5 @@
 {
-  "name": "DroidForge Studio",
+  "name": "Android Studio: For Android",
   "description": "Offline Android Java IDE and in-app APK compiler with a built-in Gemini coding assistant.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

@@ -124,63 +124,72 @@ fun EmulatorPanel(
         mutableStateListOf("I/ActivityTaskManager: START u0 {cmp=$packageName/.MainActivity}")
     }
 
+    fun appendLog(line: String) {
+        logcat.add(line)
+        while (logcat.size > 120) logcat.removeAt(0)
+    }
+
+    fun syncFromLiveVm(targetSession: LiveVmSession? = liveSession) {
+        val session = targetSession ?: return
+        session.drainLogs().forEach(::appendLog)
+        session.drainLatestToast()?.let { latest ->
+            toastText = latest
+        }
+    }
+
     LaunchedEffect(appName, packageName, files, restartNonce) {
         isBootingVm = true
         yield()
-        val (bootedSession, parsedProgram) = withContext(Dispatchers.Default) {
-            val session = EmulatorEngine.createLiveSession(appName, packageName, files)?.let { s ->
-                if (s.start()) s else null
+        val bootResult = withContext(Dispatchers.Default) {
+            runCatching {
+                val session = EmulatorEngine.createLiveSession(appName, packageName, files)?.let { s ->
+                    if (s.start()) s else null
+                }
+                val prog = EmulatorEngine.parseProject(appName, packageName, files)
+                session to prog
             }
-            val prog = EmulatorEngine.parseProject(appName, packageName, files)
-            session to prog
+        }
+        val (bootedSession, parsedProgram) = bootResult.getOrElse { err ->
+            if (err is kotlinx.coroutines.CancellationException) throw err
+            appendLog("E/DroidForgeVM: Boot error: ${err.message ?: err.javaClass.simpleName}")
+            null to EmulatorEngine.parseProject(appName, packageName, emptyList())
         }
         liveSession = bootedSession
         program = parsedProgram
         runtimeState.clear()
         runtimeState.putAll(parsedProgram.initialState)
         if (bootedSession != null) {
-            logcat.add("D/DroidForgeVM: Live AST VM executing ${files.size} project file(s)")
-            logcat.addAll(bootedSession.logs)
-            bootedSession.logs.clear()
+            appendLog("D/DroidForgeVM: Live AST VM executing ${files.size} project file(s)")
+            syncFromLiveVm(bootedSession)
         } else {
-            logcat.add("D/DroidForgeVM: Fallback layout (${parsedProgram.detectedWidgetsCount} widgets)")
+            appendLog("D/DroidForgeVM: Fallback layout (${parsedProgram.detectedWidgetsCount} widgets)")
         }
         isBootingVm = false
     }
 
-    fun appendLog(line: String) {
-        logcat.add(line)
-        if (logcat.size > 120) logcat.removeAt(0)
-    }
-
-    fun syncFromLiveVm() {
-        val session = liveSession ?: return
-        while (session.logs.isNotEmpty()) {
-            appendLog(session.logs.removeAt(0))
-        }
-        if (session.toastQueue.isNotEmpty()) {
-            toastText = session.toastQueue.removeAt(session.toastQueue.lastIndex)
-            session.toastQueue.clear()
-        }
-    }
-
-    // 60fps Live VM frame pump for Handler.postDelayed / game loops / animations
-    LaunchedEffect(liveSession, restartNonce) {
+    // 60fps Live VM frame pump only while timers/animations are actively queued
+    LaunchedEffect(liveSession, vmFrameTick, restartNonce) {
         val session = liveSession ?: return@LaunchedEffect
-        syncFromLiveVm()
-        while (isActive) {
+        syncFromLiveVm(session)
+        while (isActive && session.hasPendingTimers()) {
             withFrameNanos { _ ->
-                val ticked = session.tickTimers(System.currentTimeMillis())
+                val ticked = runCatching {
+                    session.tickTimers(System.currentTimeMillis())
+                }.onFailure { err ->
+                    appendLog("E/DroidForgeVM: Timer error: ${err.message ?: err.javaClass.simpleName}")
+                }.getOrDefault(false)
                 if (ticked) {
                     vmFrameTick++
-                    syncFromLiveVm()
+                    syncFromLiveVm(session)
                 }
             }
         }
     }
 
     val vmSnapshot = remember(liveSession, vmFrameTick, restartNonce) {
-        liveSession?.buildSnapshot()
+        runCatching { liveSession?.buildSnapshot() }.onFailure { err ->
+            appendLog("E/DroidForgeVM: Render error: ${err.message ?: err.javaClass.simpleName}")
+        }.getOrNull()
     }
 
     // Fallback timer coroutine when Live VM is absent & static PulseTimer fallback is active
@@ -460,9 +469,13 @@ fun EmulatorPanel(
                 } else {
                     (profile.aspectWidth / profile.aspectHeight).coerceIn(0.45f, 0.85f)
                 }
+                val availW = maxWidth.coerceAtLeast(1.dp)
+                val availH = maxHeight.coerceAtLeast(1.dp)
                 val maxCapW = if (isLandscape) 560.dp else 440.dp
-                val fittedWidth = minOf(maxWidth, maxHeight * ratio).coerceAtMost(maxCapW).coerceAtLeast(180.dp)
-                val fittedHeight = (fittedWidth / ratio).coerceAtMost(maxHeight).coerceAtLeast(200.dp)
+                val minW = minOf(120.dp, availW)
+                val minH = minOf(140.dp, availH)
+                val fittedWidth = minOf(availW, availH * ratio).coerceAtMost(maxCapW).coerceAtLeast(minW)
+                val fittedHeight = (fittedWidth / ratio).coerceAtMost(availH).coerceAtLeast(minH)
                 val frameModifier = Modifier
                     .width(fittedWidth)
                     .height(fittedHeight)
@@ -538,8 +551,10 @@ fun EmulatorPanel(
                                     .onSizeChanged { size ->
                                         val activeSession = liveSession
                                         if (activeSession != null && size.width > 0 && size.height > 0) {
-                                            activeSession.updateViewportSize(size.width, size.height)
-                                            vmFrameTick++
+                                            if (activeSession.updateViewportSize(size.width, size.height)) {
+                                                syncFromLiveVm(activeSession)
+                                                vmFrameTick++
+                                            }
                                         }
                                     },
                             ) {
@@ -742,6 +757,7 @@ private fun RenderVmNode(
     session: LiveVmSession,
     onMutate: () -> Unit,
     modifier: Modifier = Modifier,
+    insideVerticalScroll: Boolean = false,
 ) {
     if (node.visibility == 8) return // View.GONE
     if (node.visibility == 4) { // View.INVISIBLE
@@ -749,7 +765,8 @@ private fun RenderVmNode(
         return
     }
 
-    val shape = RoundedCornerShape((node.cornerRadiusPx / 2.5f).coerceIn(0f, 24f).dp)
+    val safeCornerDp = (if (node.cornerRadiusPx.isFinite()) node.cornerRadiusPx / 2.5f else 0f).coerceIn(0f, 24f)
+    val shape = RoundedCornerShape(safeCornerDp.dp)
     val baseModifier = modifier
         .let { m ->
             val bg = node.backgroundColor
@@ -782,6 +799,7 @@ private fun RenderVmNode(
                                         session = session,
                                         onMutate = onMutate,
                                         modifier = Modifier.weight(1f),
+                                        insideVerticalScroll = insideVerticalScroll,
                                     )
                                 }
                             }
@@ -792,11 +810,18 @@ private fun RenderVmNode(
                 node.kind == "FrameLayout" || node.kind == "RelativeLayout" -> {
                     Box(modifier = baseModifier) {
                         node.children.forEach { child ->
+                            val childMod = when {
+                                insideVerticalScroll && child is VmViewNode.CustomCanvasView ->
+                                    Modifier.fillMaxWidth().height(260.dp)
+                                insideVerticalScroll -> Modifier.fillMaxWidth()
+                                else -> Modifier.fillMaxSize()
+                            }
                             RenderVmNode(
                                 node = child,
                                 session = session,
                                 onMutate = onMutate,
-                                modifier = Modifier.fillMaxSize(),
+                                modifier = childMod,
+                                insideVerticalScroll = insideVerticalScroll,
                             )
                         }
                     }
@@ -804,8 +829,14 @@ private fun RenderVmNode(
 
                 !node.orientationVertical -> {
                     val centeredH = (node.gravity and 0x01) != 0 || (node.gravity and 0x11) == 0x11
+                    val anyRowWeight = node.children.any { it.layoutWeight.isFinite() && it.layoutWeight > 0f && it.layoutWeight < 100f }
+                    val rowMod = if (anyRowWeight) {
+                        baseModifier.fillMaxWidth()
+                    } else {
+                        baseModifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    }
                     Row(
-                        modifier = baseModifier.fillMaxWidth(),
+                        modifier = rowMod,
                         horizontalArrangement = if (centeredH) Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally) else Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -815,7 +846,8 @@ private fun RenderVmNode(
                                 node = child,
                                 session = session,
                                 onMutate = onMutate,
-                                modifier = if (w > 0f) Modifier.weight(w) else Modifier,
+                                modifier = if (w.isFinite() && w > 0f && w < 100f) Modifier.weight(w) else Modifier,
+                                insideVerticalScroll = insideVerticalScroll,
                             )
                         }
                     }
@@ -823,10 +855,13 @@ private fun RenderVmNode(
 
                 else -> {
                     val isScroll = node.kind == "ScrollView"
-                    val anyExplicitWeight = node.children.any { it.layoutWeight > 0f }
-                    val hasWeightedCustomChild = !isScroll && node.children.any { it.layoutWeight > 0f || it is VmViewNode.CustomCanvasView }
+                    val anyExplicitWeight = node.children.any { it.layoutWeight.isFinite() && it.layoutWeight > 0f }
+                    val hasWeightedCustomChild = !isScroll && !insideVerticalScroll &&
+                        node.children.any { (it.layoutWeight.isFinite() && it.layoutWeight > 0f) || it is VmViewNode.CustomCanvasView }
                     val centeredV = (node.gravity and 0x10) != 0 || (node.gravity and 0x11) == 0x11
-                    val colModifier = if (isScroll || (!hasWeightedCustomChild && node.children.size > 6)) {
+                    val useScroll = !insideVerticalScroll && (isScroll || !hasWeightedCustomChild)
+                    val childInsideScroll = insideVerticalScroll || isScroll || useScroll
+                    val colModifier = if (useScroll) {
                         baseModifier.verticalScroll(rememberScrollState())
                     } else {
                         baseModifier
@@ -842,9 +877,11 @@ private fun RenderVmNode(
                     ) {
                         node.children.forEach { child ->
                             val w = child.layoutWeight
+                            val validWeight = w.isFinite() && w > 0f && w < 100f
                             val childMod = when {
-                                isScroll && child is VmViewNode.CustomCanvasView -> Modifier.fillMaxWidth().height(340.dp)
-                                w > 0f -> Modifier.weight(w).fillMaxWidth()
+                                childInsideScroll && child is VmViewNode.CustomCanvasView -> Modifier.fillMaxWidth().height(320.dp)
+                                childInsideScroll -> Modifier.fillMaxWidth()
+                                validWeight -> Modifier.weight(w).fillMaxWidth()
                                 child is VmViewNode.CustomCanvasView && !anyExplicitWeight -> Modifier.weight(1f).fillMaxWidth()
                                 else -> Modifier
                             }
@@ -853,6 +890,7 @@ private fun RenderVmNode(
                                 session = session,
                                 onMutate = onMutate,
                                 modifier = childMod,
+                                insideVerticalScroll = childInsideScroll,
                             )
                         }
                     }
@@ -923,8 +961,9 @@ private fun RenderVmNode(
                     .fillMaxWidth()
                     .onSizeChanged { s ->
                         if (s.width > 0 && s.height > 0) {
-                            session.updateViewportSize(s.width, s.height)
-                            onMutate()
+                            if (session.updateViewportSize(s.width, s.height)) {
+                                onMutate()
+                            }
                         }
                     }
                     .pointerInput(node.id, session) {
@@ -940,105 +979,146 @@ private fun RenderVmNode(
                                 }
                                 if (action != null) {
                                     change.consume()
-                                    session.dispatchTouch(node.id, action, change.position.x, change.position.y)
-                                    onMutate()
+                                    runCatching {
+                                        session.dispatchTouch(node.id, action, change.position.x, change.position.y)
+                                        onMutate()
+                                    }
                                 }
                             }
                         }
                     },
             ) {
+                if (size.width <= 0f || size.height <= 0f) return@Canvas
                 drawIntoCanvas { canvas ->
                     val native = canvas.nativeCanvas
                     val initialSave = native.save()
-                    native.clipRect(0f, 0f, size.width, size.height)
+                    try {
+                        native.clipRect(0f, 0f, size.width, size.height)
 
-                    node.ops.forEach { op ->
-                        when (op) {
-                            is VmCanvasOp.FillColor -> {
-                                native.drawColor(op.argb)
-                            }
-                            is VmCanvasOp.DrawRect -> {
-                                paint.color = op.argb
-                                paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
-                                paint.strokeWidth = op.strokeWidth
-                                if (op.radius > 0f) {
-                                    native.drawRoundRect(op.left, op.top, op.right, op.bottom, op.radius, op.radius, paint)
-                                } else {
-                                    native.drawRect(op.left, op.top, op.right, op.bottom, paint)
+                        node.ops.forEach { op ->
+                            when (op) {
+                                is VmCanvasOp.FillColor -> {
+                                    native.drawColor(op.argb)
                                 }
-                            }
-                            is VmCanvasOp.DrawCircle -> {
-                                paint.color = op.argb
-                                paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
-                                paint.strokeWidth = op.strokeWidth
-                                native.drawCircle(op.cx, op.cy, op.radius, paint)
-                            }
-                            is VmCanvasOp.DrawOval -> {
-                                paint.color = op.argb
-                                paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
-                                paint.strokeWidth = op.strokeWidth
-                                native.drawOval(op.left, op.top, op.right, op.bottom, paint)
-                            }
-                            is VmCanvasOp.DrawLine -> {
-                                paint.color = op.argb
-                                paint.style = Paint.Style.STROKE
-                                paint.strokeWidth = op.strokeWidth
-                                paint.strokeCap = Paint.Cap.ROUND
-                                native.drawLine(op.x1, op.y1, op.x2, op.y2, paint)
-                            }
-                            is VmCanvasOp.DrawArc -> {
-                                paint.color = op.argb
-                                paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
-                                paint.strokeWidth = op.strokeWidth
-                                native.drawArc(
-                                    op.left, op.top, op.right, op.bottom,
-                                    op.startAngle, op.sweepAngle, op.useCenter, paint,
-                                )
-                            }
-                            is VmCanvasOp.DrawPath -> {
-                                val androidPath = android.graphics.Path()
-                                op.segments.forEach { seg ->
-                                    when (seg) {
-                                        is VmPathSegment.MoveTo -> androidPath.moveTo(seg.x, seg.y)
-                                        is VmPathSegment.LineTo -> androidPath.lineTo(seg.x, seg.y)
-                                        is VmPathSegment.QuadTo -> androidPath.quadTo(seg.cx, seg.cy, seg.x, seg.y)
-                                        VmPathSegment.Close -> androidPath.close()
+                                is VmCanvasOp.DrawRect -> {
+                                    val l = op.left.safeFinite()
+                                    val t = op.top.safeFinite()
+                                    val r = op.right.safeFinite()
+                                    val b = op.bottom.safeFinite()
+                                    val left = minOf(l, r)
+                                    val right = maxOf(l, r)
+                                    val top = minOf(t, b)
+                                    val bottom = maxOf(t, b)
+                                    val rad = op.radius.safeFinite(0f).coerceAtLeast(0f)
+                                    paint.color = op.argb
+                                    paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
+                                    paint.strokeWidth = op.strokeWidth.safeFinite(2f).coerceIn(0.5f, 128f)
+                                    if (rad > 0f) {
+                                        native.drawRoundRect(left, top, right, bottom, rad, rad, paint)
+                                    } else {
+                                        native.drawRect(left, top, right, bottom, paint)
                                     }
                                 }
-                                paint.color = op.argb
-                                paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
-                                paint.strokeWidth = op.strokeWidth
-                                paint.strokeCap = Paint.Cap.ROUND
-                                paint.strokeJoin = Paint.Join.ROUND
-                                native.drawPath(androidPath, paint)
-                            }
-                            is VmCanvasOp.DrawText -> {
-                                textPaint.color = op.argb
-                                textPaint.textSize = op.textSizePx.coerceAtLeast(10f)
-                                textPaint.typeface = if (op.isBold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-                                textPaint.textAlign = when (op.align) {
-                                    "CENTER" -> Paint.Align.CENTER
-                                    "RIGHT" -> Paint.Align.RIGHT
-                                    else -> Paint.Align.LEFT
+                                is VmCanvasOp.DrawCircle -> {
+                                    val rad = op.radius.safeFinite(0f)
+                                    if (rad > 0f) {
+                                        paint.color = op.argb
+                                        paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
+                                        paint.strokeWidth = op.strokeWidth.safeFinite(2f).coerceIn(0.5f, 128f)
+                                        native.drawCircle(op.cx.safeFinite(), op.cy.safeFinite(), rad, paint)
+                                    }
                                 }
-                                native.drawText(op.text, op.x, op.y, textPaint)
+                                is VmCanvasOp.DrawOval -> {
+                                    val l = op.left.safeFinite()
+                                    val t = op.top.safeFinite()
+                                    val r = op.right.safeFinite()
+                                    val b = op.bottom.safeFinite()
+                                    paint.color = op.argb
+                                    paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
+                                    paint.strokeWidth = op.strokeWidth.safeFinite(2f).coerceIn(0.5f, 128f)
+                                    native.drawOval(minOf(l, r), minOf(t, b), maxOf(l, r), maxOf(t, b), paint)
+                                }
+                                is VmCanvasOp.DrawLine -> {
+                                    paint.color = op.argb
+                                    paint.style = Paint.Style.STROKE
+                                    paint.strokeWidth = op.strokeWidth.safeFinite(2f).coerceIn(0.5f, 128f)
+                                    paint.strokeCap = Paint.Cap.ROUND
+                                    native.drawLine(op.x1.safeFinite(), op.y1.safeFinite(), op.x2.safeFinite(), op.y2.safeFinite(), paint)
+                                }
+                                is VmCanvasOp.DrawArc -> {
+                                    val l = op.left.safeFinite()
+                                    val t = op.top.safeFinite()
+                                    val r = op.right.safeFinite()
+                                    val b = op.bottom.safeFinite()
+                                    paint.color = op.argb
+                                    paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
+                                    paint.strokeWidth = op.strokeWidth.safeFinite(2f).coerceIn(0.5f, 128f)
+                                    native.drawArc(
+                                        minOf(l, r), minOf(t, b), maxOf(l, r), maxOf(t, b),
+                                        op.startAngle.safeFinite(), op.sweepAngle.safeFinite(), op.useCenter, paint,
+                                    )
+                                }
+                                is VmCanvasOp.DrawPath -> {
+                                    if (op.segments.isNotEmpty()) {
+                                        val androidPath = android.graphics.Path()
+                                        op.segments.forEach { seg ->
+                                            when (seg) {
+                                                is VmPathSegment.MoveTo -> androidPath.moveTo(seg.x.safeFinite(), seg.y.safeFinite())
+                                                is VmPathSegment.LineTo -> androidPath.lineTo(seg.x.safeFinite(), seg.y.safeFinite())
+                                                is VmPathSegment.QuadTo -> androidPath.quadTo(seg.cx.safeFinite(), seg.cy.safeFinite(), seg.x.safeFinite(), seg.y.safeFinite())
+                                                VmPathSegment.Close -> androidPath.close()
+                                            }
+                                        }
+                                        paint.color = op.argb
+                                        paint.style = if (op.isStroke) Paint.Style.STROKE else Paint.Style.FILL
+                                        paint.strokeWidth = op.strokeWidth.safeFinite(2f).coerceIn(0.5f, 128f)
+                                        paint.strokeCap = Paint.Cap.ROUND
+                                        paint.strokeJoin = Paint.Join.ROUND
+                                        native.drawPath(androidPath, paint)
+                                    }
+                                }
+                                is VmCanvasOp.DrawText -> {
+                                    textPaint.color = op.argb
+                                    textPaint.textSize = op.textSizePx.safeFinite(24f).coerceIn(8f, 200f)
+                                    textPaint.typeface = if (op.isBold) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                                    textPaint.textAlign = when (op.align) {
+                                        "CENTER" -> Paint.Align.CENTER
+                                        "RIGHT" -> Paint.Align.RIGHT
+                                        else -> Paint.Align.LEFT
+                                    }
+                                    native.drawText(op.text, op.x.safeFinite(), op.y.safeFinite(), textPaint)
+                                }
+                                VmCanvasOp.Save -> {
+                                    if (native.saveCount < initialSave + 32) native.save()
+                                }
+                                VmCanvasOp.Restore -> {
+                                    if (native.saveCount > initialSave) native.restore()
+                                }
+                                is VmCanvasOp.Translate -> native.translate(op.dx.safeFinite(), op.dy.safeFinite())
+                                is VmCanvasOp.Rotate -> native.rotate(op.degrees.safeFinite(), op.px.safeFinite(), op.py.safeFinite())
+                                is VmCanvasOp.Scale -> {
+                                    val sx = op.sx.safeFinite(1f).coerceIn(-100f, 100f)
+                                    val sy = op.sy.safeFinite(1f).coerceIn(-100f, 100f)
+                                    native.scale(sx, sy, op.px.safeFinite(), op.py.safeFinite())
+                                }
                             }
-                            VmCanvasOp.Save -> native.save()
-                            VmCanvasOp.Restore -> {
-                                if (native.saveCount > initialSave) native.restore()
+                        }
+                    } catch (_: Throwable) {
+                        // Never allow malformed custom Canvas commands to crash the host UI
+                    } finally {
+                        runCatching {
+                            if (native.saveCount >= initialSave) {
+                                native.restoreToCount(initialSave)
                             }
-                            is VmCanvasOp.Translate -> native.translate(op.dx, op.dy)
-                            is VmCanvasOp.Rotate -> native.rotate(op.degrees, op.px, op.py)
-                            is VmCanvasOp.Scale -> native.scale(op.sx, op.sy, op.px, op.py)
                         }
                     }
-
-                    native.restoreToCount(initialSave)
                 }
             }
         }
     }
 }
+
+private fun Float.safeFinite(fallback: Float = 0f): Float = if (isFinite()) this else fallback
 
 @Composable
 private fun RenderEmulatorNode(
@@ -1048,23 +1128,29 @@ private fun RenderEmulatorNode(
     activeStrokePoints: MutableList<Offset>,
     onAction: (EmulatorActionKind, String) -> Unit,
     modifier: Modifier = Modifier,
+    insideVerticalScroll: Boolean = false,
 ) {
     when (node) {
         is EmulatorNode.ColumnContainer -> {
+            val hasCanvasChild = node.children.any { it is EmulatorNode.DrawingCanvasWidget }
+            val useScroll = !insideVerticalScroll && !hasCanvasChild
+            val childInsideScroll = insideVerticalScroll || useScroll
+            val colModifier = modifier
+                .fillMaxSize()
+                .background(node.backgroundColor ?: Color(0xFF0F172A))
+                .let { if (useScroll) it.verticalScroll(rememberScrollState()) else it }
+                .padding(horizontal = node.horizontalPaddingDp.coerceIn(0, 64).dp, vertical = 14.dp)
+
             Column(
-                modifier = modifier
-                    .fillMaxSize()
-                    .background(node.backgroundColor ?: Color(0xFF0F172A))
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = node.horizontalPaddingDp.dp, vertical = 14.dp),
-                verticalArrangement = if (node.centered) Arrangement.spacedBy(10.dp, Alignment.CenterVertically) else Arrangement.spacedBy(10.dp),
+                modifier = colModifier,
+                verticalArrangement = if (node.centered && !hasCanvasChild) Arrangement.spacedBy(10.dp, Alignment.CenterVertically) else Arrangement.spacedBy(10.dp),
                 horizontalAlignment = if (node.centered) Alignment.CenterHorizontally else Alignment.Start,
             ) {
                 node.children.forEach { child ->
-                    val childModifier = if (child is EmulatorNode.DrawingCanvasWidget) {
-                        Modifier.weight(1f).fillMaxWidth()
-                    } else {
-                        Modifier
+                    val childModifier = when {
+                        child is EmulatorNode.DrawingCanvasWidget && !childInsideScroll -> Modifier.weight(1f).fillMaxWidth()
+                        child is EmulatorNode.DrawingCanvasWidget -> Modifier.fillMaxWidth().height(240.dp)
+                        else -> Modifier
                     }
                     RenderEmulatorNode(
                         node = child,
@@ -1073,6 +1159,7 @@ private fun RenderEmulatorNode(
                         activeStrokePoints = activeStrokePoints,
                         onAction = onAction,
                         modifier = childModifier,
+                        insideVerticalScroll = childInsideScroll,
                     )
                 }
             }
@@ -1095,18 +1182,20 @@ private fun RenderEmulatorNode(
                         strokes = strokes,
                         activeStrokePoints = activeStrokePoints,
                         onAction = onAction,
-                        modifier = if (w > 0f) Modifier.weight(w) else Modifier,
+                        modifier = if (w.isFinite() && w > 0f && w < 100f) Modifier.weight(w) else Modifier,
+                        insideVerticalScroll = insideVerticalScroll,
                     )
                 }
             }
         }
 
         is EmulatorNode.GridContainer -> {
+            val cols = node.columns.coerceAtLeast(1)
             Column(
                 modifier = modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                node.children.chunked(node.columns).forEach { rowItems ->
+                node.children.chunked(cols).forEach { rowItems ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1119,6 +1208,7 @@ private fun RenderEmulatorNode(
                                 activeStrokePoints = activeStrokePoints,
                                 onAction = onAction,
                                 modifier = Modifier.weight(1f),
+                                insideVerticalScroll = insideVerticalScroll,
                             )
                         }
                     }
@@ -1128,7 +1218,7 @@ private fun RenderEmulatorNode(
 
         is EmulatorNode.TextWidget -> {
             val resolvedText = node.bindStateKey?.let { state[it] } ?: node.text
-            val shape = RoundedCornerShape(node.cornerRadiusDp.dp)
+            val shape = RoundedCornerShape(node.cornerRadiusDp.safeFinite(0f).coerceIn(0f, 32f).dp)
             Box(
                 modifier = modifier
                     .let {
@@ -1142,7 +1232,7 @@ private fun RenderEmulatorNode(
             ) {
                 Text(
                     text = resolvedText,
-                    fontSize = (node.textSizeSp * 0.78f).sp,
+                    fontSize = (node.textSizeSp * 0.78f).safeFinite(14f).coerceIn(8f, 52f).sp,
                     color = node.textColor ?: Color.White,
                     fontWeight = if (node.isBold) FontWeight.Bold else FontWeight.Normal,
                     fontFamily = if (node.isMonospace) FontFamily.Monospace else FontFamily.SansSerif,
@@ -1158,7 +1248,7 @@ private fun RenderEmulatorNode(
                     containerColor = node.backgroundColor ?: Color(0xFF0284C7),
                     contentColor = node.textColor ?: Color.White,
                 ),
-                shape = RoundedCornerShape(node.cornerRadiusDp.dp),
+                shape = RoundedCornerShape(node.cornerRadiusDp.safeFinite(8f).coerceIn(0f, 24f).dp),
                 modifier = modifier,
             ) {
                 Text(
@@ -1216,11 +1306,16 @@ private fun RenderEmulatorNode(
                         detectDragGestures(
                             onDragStart = { start ->
                                 activeStrokePoints.clear()
-                                activeStrokePoints.add(start)
+                                if (start.x.isFinite() && start.y.isFinite()) {
+                                    activeStrokePoints.add(start)
+                                }
                             },
                             onDrag = { change, _ ->
                                 change.consume()
-                                activeStrokePoints.add(change.position)
+                                val pt = change.position
+                                if (pt.x.isFinite() && pt.y.isFinite()) {
+                                    activeStrokePoints.add(pt)
+                                }
                             },
                             onDragEnd = {
                                 if (activeStrokePoints.isNotEmpty()) {
@@ -1232,10 +1327,11 @@ private fun RenderEmulatorNode(
                     },
             ) {
                 fun drawPts(pts: List<Offset>, color: Color) {
-                    if (pts.size < 2) return
+                    val valid = pts.filter { it.x.isFinite() && it.y.isFinite() }
+                    if (valid.size < 2) return
                     val path = Path().apply {
-                        moveTo(pts.first().x, pts.first().y)
-                        pts.drop(1).forEach { p -> lineTo(p.x, p.y) }
+                        moveTo(valid.first().x, valid.first().y)
+                        valid.drop(1).forEach { p -> lineTo(p.x, p.y) }
                     }
                     drawPath(
                         path = path,

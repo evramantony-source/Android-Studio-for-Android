@@ -60,8 +60,8 @@ object KeystoreManager {
         validityYears: Int = 20,
     ): ReleaseSigningConfig {
         val cleanAlias = alias.trim().ifBlank { "release" }
-        val cleanCn = commonName.trim().ifBlank { "DroidForge Developer" }
-        val cleanOrg = organization.trim().ifBlank { "DroidForge Studio" }
+        val cleanCn = commonName.trim().ifBlank { "Android Studio Developer" }
+        val cleanOrg = organization.trim().ifBlank { "Android Studio: For Android" }
         val cleanCountry = country.trim().take(2).uppercase(Locale.US).ifBlank { "US" }
         val effectiveKeyPass = keyPassword.ifBlank { storePassword }
 
@@ -147,7 +147,7 @@ object KeystoreManager {
 
         val mainHeader = buildString {
             appendManifestLine(this, "Manifest-Version", "1.0")
-            appendManifestLine(this, "Created-By", "DroidForge Studio")
+            appendManifestLine(this, "Created-By", "Android Studio: For Android")
             append("\r\n")
         }
         val manifestAll = StringBuilder(mainHeader)
@@ -188,7 +188,7 @@ object KeystoreManager {
         val mainAttrDigestB64 = base64Encode(sha256.digest(mainHeader.toByteArray(Charsets.UTF_8)))
         val sfBuilder = StringBuilder().apply {
             appendManifestLine(this, "Signature-Version", "1.0")
-            appendManifestLine(this, "Created-By", "DroidForge Studio")
+            appendManifestLine(this, "Created-By", "Android Studio: For Android")
             appendManifestLine(this, "SHA-256-Digest-Manifest", manifestDigestB64)
             appendManifestLine(this, "SHA-256-Digest-Manifest-Main-Attributes", mainAttrDigestB64)
             append("\r\n")

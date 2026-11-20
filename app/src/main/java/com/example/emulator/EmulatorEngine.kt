@@ -110,17 +110,19 @@ object EmulatorEngine {
         packageName: String,
         files: List<ProjectFile>,
     ): LiveVmSession? {
-        val stringsMap = parseStringsXml(files.find { it.relativePath == "res/values/strings.xml" }?.content.orEmpty())
-        val manifestXml = files.find { it.relativePath == "AndroidManifest.xml" }?.content.orEmpty()
-        val resolvedAppName = resolveStringRef(
-            extractManifestAttr(manifestXml, "label") ?: appName,
-            stringsMap,
-        ).ifBlank { appName }
-        return LiveActivityVm.createSession(
-            appName = resolvedAppName,
-            packageName = packageName,
-            files = files,
-        )
+        return runCatching {
+            val stringsMap = parseStringsXml(files.find { it.relativePath == "res/values/strings.xml" }?.content.orEmpty())
+            val manifestXml = files.find { it.relativePath == "AndroidManifest.xml" }?.content.orEmpty()
+            val resolvedAppName = resolveStringRef(
+                extractManifestAttr(manifestXml, "label") ?: appName,
+                stringsMap,
+            ).ifBlank { appName }
+            LiveActivityVm.createSession(
+                appName = resolvedAppName,
+                packageName = packageName,
+                files = files,
+            )
+        }.getOrNull()
     }
 
     fun parseProject(
@@ -128,36 +130,44 @@ object EmulatorEngine {
         packageName: String,
         files: List<ProjectFile>,
     ): EmulatorProgram {
-        val stringsMap = parseStringsXml(files.find { it.relativePath == "res/values/strings.xml" }?.content.orEmpty())
-        val colorsMap = parseColorsXml(files.find { it.relativePath == "res/values/colors.xml" }?.content.orEmpty())
-        val manifestXml = files.find { it.relativePath == "AndroidManifest.xml" }?.content.orEmpty()
-        val resolvedAppName = resolveStringRef(
-            extractManifestAttr(manifestXml, "label") ?: appName,
-            stringsMap,
-        ).ifBlank { appName }
+        return runCatching {
+            val stringsMap = parseStringsXml(files.find { it.relativePath == "res/values/strings.xml" }?.content.orEmpty())
+            val colorsMap = parseColorsXml(files.find { it.relativePath == "res/values/colors.xml" }?.content.orEmpty())
+            val manifestXml = files.find { it.relativePath == "AndroidManifest.xml" }?.content.orEmpty()
+            val resolvedAppName = resolveStringRef(
+                extractManifestAttr(manifestXml, "label") ?: appName,
+                stringsMap,
+            ).ifBlank { appName }
 
-        val codeFiles = files.filter { it.relativePath.endsWith(".java") || it.relativePath.endsWith(".kt") }
-        val mainSource = codeFiles.find { it.fileName == "MainActivity.kt" || it.fileName == "MainActivity.java" }
-            ?: codeFiles.firstOrNull()
+            val codeFiles = files.filter { it.relativePath.endsWith(".java") || it.relativePath.endsWith(".kt") }
+            val mainSource = codeFiles.find { it.fileName == "MainActivity.kt" || it.fileName == "MainActivity.java" }
+                ?: codeFiles.firstOrNull()
 
-        if (mainSource == null) {
-            return fallbackProgram(resolvedAppName, packageName, "No MainActivity.java or MainActivity.kt found in src/")
-        }
+            if (mainSource == null) {
+                return@runCatching fallbackProgram(resolvedAppName, packageName, "No MainActivity.java or MainActivity.kt found in src/")
+            }
 
-        val code = mainSource.content
-        val hasCanvas = code.contains("DrawingPadView")
-        val isCalculator = code.contains("GridLayout") && code.contains("onKeyPress")
-        val isCounter = code.contains("countDisplay") || (code.contains("count++") && code.contains("count--"))
-        val isNotes = code.contains("EditText") && (code.contains("notes") || code.contains("Note"))
-        val isTimer = code.contains("Chronometer") || code.contains("elapsedMs") || code.contains("lap")
+            val code = mainSource.content
+            val hasCanvas = code.contains("DrawingPadView")
+            val isCalculator = code.contains("GridLayout") && code.contains("onKeyPress")
+            val isCounter = code.contains("countDisplay") || (code.contains("count++") && code.contains("count--"))
+            val isNotes = code.contains("EditText") && (code.contains("notes") || code.contains("Note"))
+            val isTimer = code.contains("Chronometer") || code.contains("elapsedMs") || code.contains("lap")
 
-        return when {
-            hasCanvas -> buildCanvasProgram(resolvedAppName, packageName, code, stringsMap)
-            isCalculator -> buildCalculatorProgram(resolvedAppName, packageName, code)
-            isCounter -> buildCounterProgram(resolvedAppName, packageName, code, stringsMap)
-            isNotes -> buildNotesProgram(resolvedAppName, packageName, code, stringsMap)
-            isTimer -> buildTimerProgram(resolvedAppName, packageName, code, stringsMap)
-            else -> buildGenericJavaActivityProgram(resolvedAppName, packageName, code, stringsMap, colorsMap)
+            when {
+                hasCanvas -> buildCanvasProgram(resolvedAppName, packageName, code, stringsMap)
+                isCalculator -> buildCalculatorProgram(resolvedAppName, packageName, code)
+                isCounter -> buildCounterProgram(resolvedAppName, packageName, code, stringsMap)
+                isNotes -> buildNotesProgram(resolvedAppName, packageName, code, stringsMap)
+                isTimer -> buildTimerProgram(resolvedAppName, packageName, code, stringsMap)
+                else -> buildGenericJavaActivityProgram(resolvedAppName, packageName, code, stringsMap, colorsMap)
+            }
+        }.getOrElse { err ->
+            fallbackProgram(
+                appName = appName.ifBlank { "App" },
+                packageName = packageName,
+                message = "Preview fallback: ${err.message ?: err.javaClass.simpleName}",
+            )
         }
     }
 

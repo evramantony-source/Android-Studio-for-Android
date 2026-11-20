@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "DroidForge Studio"
+rootProject.name = "Android Studio: For Android"
 
 include(":app")

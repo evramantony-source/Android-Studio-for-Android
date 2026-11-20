@@ -131,7 +131,7 @@ internal object ProviderApiClient {
             ),
             Triple(
                 "github_link_repo",
-                "Links an existing GitHub repository to the active DroidForge project.",
+                "Links an existing GitHub repository to the active Android Studio: For Android project.",
                 JSONObject().put("type", "object")
                     .put(
                         "properties",
@@ -187,7 +187,7 @@ internal object ProviderApiClient {
                         "properties",
                         JSONObject()
                             .put("remote_path", strProp("Target file path inside the GitHub repository."))
-                            .put("local_path", strProp("Optional relative file path inside the DroidForge project to upload."))
+                            .put("local_path", strProp("Optional relative file path inside the project to upload."))
                             .put("content", strProp("Optional explicit text content if local_path is omitted."))
                             .put("commit_message", strProp("Optional commit message.")),
                     )
@@ -195,13 +195,13 @@ internal object ProviderApiClient {
             ),
             Triple(
                 "github_download_file",
-                "Downloads a file from the linked or specified GitHub repository and saves it into the active DroidForge project.",
+                "Downloads a file from the linked or specified GitHub repository and saves it into the active project.",
                 JSONObject().put("type", "object")
                     .put(
                         "properties",
                         JSONObject()
                             .put("remote_path", strProp("Source file path in the GitHub repository."))
-                            .put("local_path", strProp("Optional destination relative path in the DroidForge project (defaults to remote_path)."))
+                            .put("local_path", strProp("Optional destination relative path in the project (defaults to remote_path)."))
                             .put("owner", strProp("Optional GitHub owner (defaults to linked repo owner)."))
                             .put("repo", strProp("Optional repository name (defaults to linked repo)."))
                             .put("branch", strProp("Optional branch name.")),
@@ -301,8 +301,8 @@ internal object ProviderApiClient {
         thinkingMode = thinkingMode,
         isOpenRouter = true,
         extraHeaders = mapOf(
-            "HTTP-Referer" to "https://github.com/droidforge-studio",
-            "X-Title" to "DroidForge Studio",
+            "HTTP-Referer" to "https://github.com/android-studio-for-android",
+            "X-Title" to "Android Studio: For Android",
         ),
         includeTools = includeTools,
         includeGitHubTools = includeGitHubTools,

@@ -186,7 +186,7 @@ fun ProjectsScreen(
                         }
                         Column(modifier = Modifier.weight(1f, fill = false)) {
                             Text(
-                                text = "DroidForge Studio",
+                                text = "Android Studio: For Android",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
@@ -503,7 +503,7 @@ fun ProjectsScreen(
                                         style = MaterialTheme.typography.titleSmall,
                                     )
                                     Text(
-                                        text = "Preparing DroidForge Studio workspace",
+                                        text = "Preparing Android Studio: For Android workspace",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )

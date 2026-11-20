@@ -48,7 +48,7 @@ object TemplateProvider {
             <?xml version="1.0" encoding="utf-8"?>
             <resources>
                 <string name="app_name">${escapeXml(appName)}</string>
-                <string name="welcome_subtitle">Built offline on Android with DroidForge</string>
+                <string name="welcome_subtitle">Built offline with Android Studio: For Android</string>
             </resources>
         """.trimIndent() + "\n"
 

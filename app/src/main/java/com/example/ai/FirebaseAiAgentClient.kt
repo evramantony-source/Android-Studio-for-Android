@@ -109,11 +109,11 @@ internal class FirebaseAiAgentClient {
                             append("Firebase App Check failed: ${check.reason}")
                             append(" [${diag.summaryLabel()}].")
                             if (diag.hasProvisionedCertMismatch()) {
-                                append(" This GitHub APK is signed with cert ${diag.certSha1.take(11)}…, not Firebase's ${diag.expectedCertSha1Prefix()}…. To fix Firebase zero-key: add DEBUG_KEYSTORE_BASE64 (contents of debug.keystore.base64) to GitHub Secrets, rebuild, uninstall this APK once, and install droidforge-studio-release.apk — or tap Configure Key below.")
+                                append(" This GitHub APK is signed with cert ${diag.certSha1.take(11)}…, not Firebase's ${diag.expectedCertSha1Prefix()}…. To fix Firebase zero-key: add DEBUG_KEYSTORE_BASE64 (contents of debug.keystore.base64) to GitHub Secrets, rebuild, uninstall this APK once, and install android-studio-for-android-release.apk — or tap Configure Key below.")
                             } else {
                                 append(" Tap Configure Key below to use a Gemini API key as backup")
                                 if (diag.isDebugBuild) {
-                                    append(", or install droidforge-studio-release.apk.")
+                                    append(", or install android-studio-for-android-release.apk.")
                                 } else {
                                     append(".")
                                 }
@@ -263,11 +263,11 @@ internal class FirebaseAiAgentClient {
                             append(" Attestation detail: $detail.")
                         }
                         if (diag.hasProvisionedCertMismatch()) {
-                            append(" This GitHub APK is signed with cert ${diag.certSha1.take(11)}…, not Firebase's ${diag.expectedCertSha1Prefix()}…. Add DEBUG_KEYSTORE_BASE64 (from debug.keystore.base64) to GitHub Secrets, rebuild, uninstall this APK once, and install droidforge-studio-release.apk — or tap Configure Key below.")
+                            append(" This GitHub APK is signed with cert ${diag.certSha1.take(11)}…, not Firebase's ${diag.expectedCertSha1Prefix()}…. Add DEBUG_KEYSTORE_BASE64 (from debug.keystore.base64) to GitHub Secrets, rebuild, uninstall this APK once, and install android-studio-for-android-release.apk — or tap Configure Key below.")
                         } else {
                             append(" Tap Configure Key below to use a Gemini API key as backup")
                             if (diag.isDebugBuild) {
-                                append(", or install droidforge-studio-release.apk.")
+                                append(", or install android-studio-for-android-release.apk.")
                             } else {
                                 append(".")
                             }
@@ -508,7 +508,7 @@ internal class FirebaseAiAgentClient {
             append(promptWithContext.take(6_500))
         }
         val rescueInput = buildInitialUserContent(rescuePrompt, imageAttachments)
-        val systemText = "You are an Android coding assistant inside DroidForge Studio. Answer directly with concise Markdown and complete runnable code blocks marked `// file: <path>`."
+        val systemText = "You are an Android coding assistant inside Android Studio: For Android. Answer directly with concise Markdown and complete runnable code blocks marked `// file: <path>`."
 
         for (candidate in candidates) {
             coroutineContext.ensureActive()

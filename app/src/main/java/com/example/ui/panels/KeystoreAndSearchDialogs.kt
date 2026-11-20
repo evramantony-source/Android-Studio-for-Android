@@ -63,10 +63,10 @@ fun ReleaseKeystoreDialog(
     }
     var passwordInput by remember { mutableStateOf("") }
     var commonNameInput by remember(signingConfig.commonName) {
-        mutableStateOf(signingConfig.commonName.ifBlank { "DroidForge Publisher" })
+        mutableStateOf(signingConfig.commonName.ifBlank { "Android Studio Publisher" })
     }
     var orgInput by remember(signingConfig.organization) {
-        mutableStateOf(signingConfig.organization.ifBlank { "DroidForge Studio" })
+        mutableStateOf(signingConfig.organization.ifBlank { "Android Studio: For Android" })
     }
     var importAliasInput by remember { mutableStateOf("release") }
     var importPasswordInput by remember { mutableStateOf("") }

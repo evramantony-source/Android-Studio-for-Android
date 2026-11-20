@@ -287,14 +287,14 @@ private fun StudioLaunchLoadingScreen() {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.Default.Android,
-                        contentDescription = "DroidForge Studio icon",
+                        contentDescription = "Android Studio: For Android icon",
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(44.dp),
                     )
                 }
             }
             Text(
-                text = "DroidForge Studio",
+                text = "Android Studio: For Android",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onBackground,

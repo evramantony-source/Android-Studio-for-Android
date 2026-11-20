@@ -489,7 +489,7 @@ private fun ArtifactInspectorTab(
                                 style = MaterialTheme.typography.labelLarge,
                             )
                             Text(
-                                text = buildResult.signerSubject.ifBlank { "DroidForge Signing Key" },
+                                text = buildResult.signerSubject.ifBlank { "Android Studio Signing Key" },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,

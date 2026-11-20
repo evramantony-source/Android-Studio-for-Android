@@ -231,6 +231,9 @@ class LiveVmSession internal constructor(
     private var nextTaskId = 1L
     private var stepBudget = 0
     private val maxStepsPerCall = 120_000
+    private var callDepth = 0
+    private val maxCallDepth = 64
+    private val stateLock = Any()
 
     var canvasWidthPx: Int = 900
         private set
@@ -260,12 +263,16 @@ class LiveVmSession internal constructor(
     private class ContinueSignal : RuntimeException()
 
     fun start(): Boolean {
-        logs.clear()
-        toastQueue.clear()
-        pendingTimers.clear()
+        synchronized(stateLock) {
+            logs.clear()
+            toastQueue.clear()
+            pendingTimers.clear()
+        }
         viewsById.clear()
         viewNodeIds.clear()
         activeDialog = null
+        stepBudget = 0
+        callDepth = 0
 
         val cls = classes[mainClassName] ?: return false
         return runCatching {
@@ -278,49 +285,85 @@ class LiveVmSession internal constructor(
         }.getOrDefault(false)
     }
 
-    fun updateViewportSize(widthPx: Int, heightPx: Int) {
+    fun updateViewportSize(widthPx: Int, heightPx: Int): Boolean {
         val w = widthPx.coerceIn(240, 2400)
         val h = heightPx.coerceIn(240, 3200)
-        if (w == canvasWidthPx && h == canvasHeightPx) return
+        if (w == canvasWidthPx && h == canvasHeightPx) return false
         canvasWidthPx = w
         canvasHeightPx = h
-        dispatchSizeChanged(rootViewObj, w, h)
+        stepBudget = 0
+        callDepth = 0
+        val visited = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<VmObject, Boolean>())
+        dispatchSizeChanged(rootViewObj, w, h, visited, depth = 0)
+        return true
     }
 
-    private fun dispatchSizeChanged(view: VmObject?, w: Int, h: Int) {
-        if (view == null) return
+    private fun dispatchSizeChanged(
+        view: VmObject?,
+        w: Int,
+        h: Int,
+        visited: MutableSet<VmObject> = java.util.Collections.newSetFromMap(java.util.IdentityHashMap()),
+        depth: Int = 0,
+    ) {
+        if (view == null || depth > 32 || !visited.add(view)) return
         if (view.classDecl != null && hasMethod(view.classDecl, "onSizeChanged")) {
             runSafely {
                 callMethod(view, "onSizeChanged", listOf(w, h, 0, 0))
             }
         }
-        val children = (view.nativeTag as? MutableList<*>)?.filterIsInstance<VmObject>().orEmpty()
-        children.forEach { dispatchSizeChanged(it, w, h) }
+        val children = (view.nativeTag as? List<*>)?.filterIsInstance<VmObject>().orEmpty()
+        children.forEach { dispatchSizeChanged(it, w, h, visited, depth + 1) }
     }
 
     fun tickTimers(nowMillis: Long): Boolean {
-        if (pendingTimers.isEmpty()) return false
-        val due = pendingTimers.filter { it.triggerAtMillis <= nowMillis }.toList()
-        if (due.isEmpty()) return false
-        due.forEach { pendingTimers.remove(it) }
+        val due = synchronized(stateLock) {
+            if (pendingTimers.isEmpty()) return false
+            val ready = pendingTimers.filter { it.triggerAtMillis <= nowMillis }
+            if (ready.isEmpty()) return false
+            pendingTimers.removeAll(ready.toSet())
+            ready
+        }
+        stepBudget = 0
+        callDepth = 0
         due.forEach { task ->
-            invokeCallback(task.runnable)
+            runSafely {
+                invokeCallback(task.runnable)
+            }
         }
         return true
     }
 
-    fun hasPendingTimers(): Boolean = pendingTimers.isNotEmpty()
+    fun hasPendingTimers(): Boolean = synchronized(stateLock) { pendingTimers.isNotEmpty() }
+
+    fun drainLogs(): List<String> = synchronized(stateLock) {
+        if (logs.isEmpty()) emptyList() else logs.toList().also { logs.clear() }
+    }
+
+    fun drainLatestToast(): String? = synchronized(stateLock) {
+        val latest = toastQueue.lastOrNull()
+        toastQueue.clear()
+        latest
+    }
 
     fun buildSnapshot(): VmViewNode? {
         viewNodeIds.clear()
         lastRenderOpsCount = 0
+        stepBudget = 0
+        callDepth = 0
         val root = rootViewObj ?: return null
-        return snapshotView(root, "root")
+        val visited = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<VmObject, Boolean>())
+        return runCatching {
+            snapshotView(root, "root", visited, depth = 0)
+        }.onFailure { err ->
+            appendLog("E/DroidForgeVM: Snapshot failed: ${err.message ?: err.javaClass.simpleName}")
+        }.getOrNull()
     }
 
     fun dispatchClick(nodeId: String) {
         val view = viewNodeIds[nodeId] ?: return
         val listener = view.fields["__onClickListener"] ?: return
+        stepBudget = 0
+        callDepth = 0
         runSafely {
             invokeCallback(listener, listOf(view))
         }
@@ -335,11 +378,15 @@ class LiveVmSession internal constructor(
         val view = viewNodeIds[nodeId] ?: return
         val cls = view.classDecl ?: return
         if (!hasMethod(cls, "onTouchEvent")) return
+        val safeX = if (xPx.isFinite()) xPx else 0f
+        val safeY = if (yPx.isFinite()) yPx else 0f
         val event = VmObject("MotionEvent", null).apply {
             fields["__action"] = action
-            fields["__x"] = xPx
-            fields["__y"] = yPx
+            fields["__x"] = safeX
+            fields["__y"] = safeY
         }
+        stepBudget = 0
+        callDepth = 0
         runSafely {
             callMethod(view, "onTouchEvent", listOf(event))
         }
@@ -350,7 +397,11 @@ class LiveVmSession internal constructor(
         activeDialog = null
         activeDialogPositive = null
         activeDialogNegative = null
-        if (cb != null) runSafely { cb() }
+        if (cb != null) {
+            stepBudget = 0
+            callDepth = 0
+            runSafely { cb() }
+        }
     }
 
     private fun runSafely(block: () -> Unit) {
@@ -362,11 +413,18 @@ class LiveVmSession internal constructor(
     }
 
     private fun appendLog(line: String) {
-        logs.add(line)
-        if (logs.size > 120) logs.removeAt(0)
+        synchronized(stateLock) {
+            logs.add(line)
+            while (logs.size > 120) logs.removeAt(0)
+        }
     }
 
-    private fun snapshotView(view: VmObject, pathId: String): VmViewNode {
+    private fun snapshotView(
+        view: VmObject,
+        pathId: String,
+        visited: MutableSet<VmObject>,
+        depth: Int,
+    ): VmViewNode {
         viewNodeIds[pathId] = view
         val kind = view.typeName
         val cls = view.classDecl
@@ -387,7 +445,7 @@ class LiveVmSession internal constructor(
         val idName = view.fields["__idName"] as? String ?: ""
 
         if (hasCustomOnDraw || surfaceOps != null) {
-            val ops = if (hasCustomOnDraw && cls != null) {
+            val ops = if (cls != null && hasCustomOnDraw) {
                 val canvasObj = VmObject("Canvas", null)
                 val drawn = mutableListOf<VmCanvasOp>()
                 canvasObj.nativeTag = drawn
@@ -419,9 +477,14 @@ class LiveVmSession internal constructor(
         val nativeKind = resolveNativeWidgetType(kind, cls)
         return when (nativeKind) {
             "LinearLayout", "FrameLayout", "ScrollView", "GridLayout", "RelativeLayout" -> {
-                val rawChildren = (view.nativeTag as? MutableList<*>)?.filterIsInstance<VmObject>().orEmpty()
-                val childNodes = rawChildren.mapIndexed { idx, child ->
-                    snapshotView(child, "${pathId}_$idx")
+                val canRecurse = depth < 32 && visited.add(view)
+                val rawChildren = if (canRecurse) {
+                    (view.nativeTag as? List<*>)?.filterIsInstance<VmObject>().orEmpty()
+                } else {
+                    emptyList()
+                }
+                val childNodes = rawChildren.mapIndexedNotNull { idx, child ->
+                    if (child in visited) null else snapshotView(child, "${pathId}_$idx", visited, depth + 1)
                 }
                 val vertical = (view.fields["__orientation"] as? Number)?.toInt() != 0
                 val gravity = (view.fields["__gravity"] as? Number)?.toInt() ?: 0
@@ -496,55 +559,90 @@ class LiveVmSession internal constructor(
         }
     }
 
-    private fun resolveNativeWidgetType(typeName: String, cls: VmClass?): String {
+    private fun resolveNativeWidgetType(
+        typeName: String,
+        cls: VmClass?,
+        visited: MutableSet<String> = mutableSetOf(),
+    ): String {
         val simple = typeName.substringAfterLast('.')
+        if (!visited.add(simple)) return "View"
         return when (simple) {
             "LinearLayout", "FrameLayout", "ScrollView", "GridLayout", "RelativeLayout",
             "Button", "EditText", "TextView", "SurfaceView", "View" -> if (simple == "SurfaceView") "View" else simple
             else -> {
                 val superName = cls?.superName?.substringAfterLast('.') ?: "View"
-                if (superName != simple) resolveNativeWidgetType(superName, classes[superName]) else "View"
+                if (superName != simple) resolveNativeWidgetType(superName, classes[superName], visited) else "View"
             }
         }
     }
 
-    private fun hasMethod(cls: VmClass, name: String): Boolean {
+    private fun hasMethod(
+        cls: VmClass,
+        name: String,
+        visited: MutableSet<String> = mutableSetOf(),
+    ): Boolean {
+        if (!visited.add(cls.name)) return false
         if (cls.methods.any { it.name == name }) return true
         val sup = cls.superName?.let { classes[it] } ?: return false
-        return hasMethod(sup, name)
+        return hasMethod(sup, name, visited)
     }
 
-    private fun findMethod(cls: VmClass, name: String, argCount: Int): VmMethod? {
+    private fun findMethod(
+        cls: VmClass,
+        name: String,
+        argCount: Int,
+        visited: MutableSet<String> = mutableSetOf(),
+    ): VmMethod? {
+        if (!visited.add(cls.name)) return null
         val candidates = cls.methods.filter { it.name == name }
         val exact = candidates.firstOrNull { it.params.size == argCount }
         if (exact != null) return exact
         if (candidates.isNotEmpty()) return candidates.first()
         val sup = cls.superName?.let { classes[it] } ?: return null
-        return findMethod(sup, name, argCount)
+        return findMethod(sup, name, argCount, visited)
     }
 
-    private fun createInstance(cls: VmClass, args: List<Any?>): VmObject {
-        val obj = VmObject(cls.name, cls)
+    private fun createInstance(
+        cls: VmClass,
+        args: List<Any?>,
+        outerThis: VmObject? = null,
+        outerScope: VmScope? = null,
+    ): VmObject {
+        val obj = VmObject(cls.name, cls).apply {
+            this.outerThis = outerThis
+            this.outerScope = outerScope
+        }
         if (resolveNativeWidgetType(cls.name, cls) in setOf("LinearLayout", "FrameLayout", "ScrollView", "GridLayout", "RelativeLayout")) {
             obj.nativeTag = mutableListOf<VmObject>()
         }
-        initializeFields(obj, cls)
-        val ctors = cls.constructors
-        val ctor = ctors.firstOrNull { it.params.size == args.size } ?: ctors.firstOrNull()
-        if (ctor != null) {
-            val env = VmScope(null)
-            env.define("this", obj)
-            ctor.params.forEachIndexed { i, p -> env.define(p.second, args.getOrNull(i)) }
-            try {
-                execBlock(ctor.body, env, obj, cls)
-            } catch (_: ReturnSignal) {
+        if (callDepth >= maxCallDepth) return obj
+        callDepth++
+        try {
+            initializeFields(obj, cls, mutableSetOf())
+            val ctors = cls.constructors
+            val ctor = ctors.firstOrNull { it.params.size == args.size } ?: ctors.firstOrNull()
+            if (ctor != null) {
+                val env = VmScope(outerScope)
+                env.define("this", obj)
+                ctor.params.forEachIndexed { i, p -> env.define(p.second, args.getOrNull(i)) }
+                try {
+                    execBlock(ctor.body, env, obj, cls)
+                } catch (_: ReturnSignal) {
+                }
             }
+        } finally {
+            callDepth--
         }
         return obj
     }
 
-    private fun initializeFields(obj: VmObject, cls: VmClass) {
-        cls.superName?.let { classes[it] }?.let { sup -> initializeFields(obj, sup) }
+    private fun initializeFields(
+        obj: VmObject,
+        cls: VmClass,
+        visited: MutableSet<String> = mutableSetOf(),
+    ) {
+        if (!visited.add(cls.name)) return
+        cls.superName?.let { classes[it] }?.let { sup -> initializeFields(obj, sup, visited) }
         val env = VmScope(null).apply { define("this", obj) }
         cls.fields.forEach { f ->
             val value = if (f.initExpr != null) {
@@ -567,48 +665,62 @@ class LiveVmSession internal constructor(
     }
 
     private fun invokeCallback(target: Any?, args: List<Any?> = emptyList()) {
-        when (target) {
-            is VmLambda -> {
-                val env = VmScope(target.closure)
-                target.params.forEachIndexed { idx, pName -> env.define(pName, args.getOrNull(idx)) }
-                try {
-                    execStmt(target.body, env, target.thisObj, target.ownerClass)
-                } catch (_: ReturnSignal) {
+        if (callDepth >= maxCallDepth) return
+        callDepth++
+        try {
+            when (target) {
+                is VmLambda -> {
+                    val env = VmScope(target.closure)
+                    target.params.forEachIndexed { idx, pName -> env.define(pName, args.getOrNull(idx)) }
+                    try {
+                        execStmt(target.body, env, target.thisObj, target.ownerClass)
+                    } catch (_: ReturnSignal) {
+                    }
+                }
+                is VmObject -> {
+                    val cls = target.classDecl ?: return
+                    val m = cls.methods.firstOrNull { it.name == "onClick" || it.name == "run" } ?: return
+                    callMethod(target, m.name, args)
                 }
             }
-            is VmObject -> {
-                val cls = target.classDecl ?: return
-                val m = cls.methods.firstOrNull { it.name == "onClick" || it.name == "run" } ?: return
-                callMethod(target, m.name, args)
-            }
+        } finally {
+            callDepth--
         }
     }
 
     private fun callMethod(receiver: VmObject, name: String, args: List<Any?>): Any? {
+        if (callDepth >= maxCallDepth) return null
         val cls = receiver.classDecl ?: return null
         val m = findMethod(cls, name, args.size) ?: return null
-        val env = VmScope(null)
+        val env = VmScope(receiver.outerScope)
         env.define("this", receiver)
         m.params.forEachIndexed { idx, (_, pName) ->
             env.define(pName, args.getOrNull(idx))
         }
+        callDepth++
         return try {
             execBlock(m.body, env, receiver, cls)
             null
         } catch (r: ReturnSignal) {
             r.value
+        } finally {
+            callDepth--
         }
     }
 
     private fun callStaticMethod(cls: VmClass, name: String, args: List<Any?>): Any? {
+        if (callDepth >= maxCallDepth) return null
         val m = findMethod(cls, name, args.size) ?: return null
         val env = VmScope(null)
         m.params.forEachIndexed { idx, (_, pName) -> env.define(pName, args.getOrNull(idx)) }
+        callDepth++
         return try {
             execBlock(m.body, env, null, cls)
             null
         } catch (r: ReturnSignal) {
             r.value
+        } finally {
+            callDepth--
         }
     }
 
@@ -797,6 +909,16 @@ class LiveVmSession internal constructor(
                 assignTarget(expr.lhs, expr.op, rhs, env, thisObj, cls)
             }
             is VmExpr.FieldAccess -> {
+                if (expr.field == "this" && expr.target is VmExpr.Ident) {
+                    val want = expr.target.name
+                    var cur = thisObj
+                    var guard = 0
+                    while (cur != null && guard++ < 8) {
+                        if (cur.typeName == want) return cur
+                        cur = cur.outerThis
+                    }
+                    return thisObj ?: mainActivityObj
+                }
                 if (expr.target is VmExpr.Ident && expr.target.name !in env && (thisObj == null || !thisObj.fields.containsKey(expr.target.name))) {
                     val staticRes = resolveStaticField(expr.target.name, expr.field)
                     if (staticRes !== UNRESOLVED) return staticRes
@@ -818,8 +940,9 @@ class LiveVmSession internal constructor(
     }
 
     private fun isSubclassOf(decl: VmClass?, targetName: String): Boolean {
+        val visited = mutableSetOf<String>()
         var cur = decl
-        while (cur != null) {
+        while (cur != null && visited.add(cur.name)) {
             if (cur.name == targetName) return true
             cur = cur.superName?.let { classes[it] }
         }
@@ -828,7 +951,13 @@ class LiveVmSession internal constructor(
 
     private fun resolveIdent(name: String, env: VmScope, thisObj: VmObject?, cls: VmClass?): Any? {
         if (env.contains(name)) return env.get(name)
-        if (thisObj != null && thisObj.fields.containsKey(name)) return thisObj.fields[name]
+        var curObj = thisObj
+        var guard = 0
+        while (curObj != null && guard++ < 8) {
+            if (curObj.fields.containsKey(name)) return curObj.fields[name]
+            curObj.classDecl?.staticFields?.get(name)?.let { return it }
+            curObj = curObj.outerThis
+        }
         if (cls != null) {
             cls.staticFields[name]?.let { return it }
             if (name == "R") return VmNamespace("R")
@@ -1025,11 +1154,24 @@ class LiveVmSession internal constructor(
         }
         when (lhs) {
             is VmExpr.Ident -> {
-                if (env.contains(lhs.name)) env.set(lhs.name, finalVal)
-                else if (thisObj != null && (thisObj.fields.containsKey(lhs.name) || cls?.fields?.any { it.name == lhs.name } == true)) {
-                    thisObj.fields[lhs.name] = finalVal
+                if (env.contains(lhs.name)) {
+                    env.set(lhs.name, finalVal)
                 } else {
-                    env.define(lhs.name, finalVal)
+                    var targetObj: VmObject? = null
+                    var cur = thisObj
+                    var guard = 0
+                    while (cur != null && guard++ < 8) {
+                        if (cur.fields.containsKey(lhs.name) || cur.classDecl?.fields?.any { it.name == lhs.name } == true) {
+                            targetObj = cur
+                            break
+                        }
+                        cur = cur.outerThis
+                    }
+                    if (targetObj != null) {
+                        targetObj.fields[lhs.name] = finalVal
+                    } else {
+                        env.define(lhs.name, finalVal)
+                    }
                 }
             }
             is VmExpr.FieldAccess -> {
@@ -1120,6 +1262,15 @@ class LiveVmSession internal constructor(
             }
             if (thisObj != null && cls != null && findMethod(cls, expr.name, evalArgs.size) != null) {
                 return callMethod(thisObj, expr.name, evalArgs)
+            }
+            var outer = thisObj?.outerThis
+            var outerGuard = 0
+            while (outer != null && outerGuard++ < 8) {
+                val outerCls = outer.classDecl
+                if (outerCls != null && findMethod(outerCls, expr.name, evalArgs.size) != null) {
+                    return callMethod(outer, expr.name, evalArgs)
+                }
+                outer = outer.outerThis
             }
             if (cls != null && findMethod(cls, expr.name, evalArgs.size) != null) {
                 return callStaticMethod(cls, expr.name, evalArgs)
@@ -1315,7 +1466,11 @@ class LiveVmSession internal constructor(
                 }
                 "charAt" -> recv.getOrNull(toInt(args.getOrNull(0))) ?: '\u0000'
                 "replace" -> recv.replace(args.getOrNull(0)?.toString().orEmpty(), args.getOrNull(1)?.toString().orEmpty())
-                "split" -> recv.split(Regex(args.getOrNull(0)?.toString() ?: ",")).toTypedArray()
+                "split" -> {
+                    val sep = args.getOrNull(0)?.toString() ?: ","
+                    runCatching { recv.split(Regex(sep)).toTypedArray() }
+                        .getOrElse { recv.split(sep).toTypedArray() }
+                }
                 else -> null
             }
             is StringBuilder -> when (name) {
@@ -1596,27 +1751,39 @@ class LiveVmSession internal constructor(
                 when (name) {
                     "post" -> {
                         val r = args.firstOrNull()
-                        pendingTimers.add(ScheduledTask(nextTaskId++, r, System.currentTimeMillis() + 16L))
+                        synchronized(stateLock) {
+                            pendingTimers.add(ScheduledTask(nextTaskId++, r, System.currentTimeMillis() + 16L))
+                        }
                         return true
                     }
                     "postDelayed" -> {
                         val r = args.getOrNull(0)
                         val delayMs = toLong(args.getOrNull(1)).coerceAtLeast(16L)
-                        pendingTimers.add(ScheduledTask(nextTaskId++, r, System.currentTimeMillis() + delayMs))
+                        synchronized(stateLock) {
+                            pendingTimers.add(ScheduledTask(nextTaskId++, r, System.currentTimeMillis() + delayMs))
+                        }
                         return true
                     }
                     "removeCallbacks" -> {
                         val r = args.firstOrNull()
-                        if (r != null) pendingTimers.removeAll { it.runnable === r }
+                        if (r != null) {
+                            synchronized(stateLock) {
+                                pendingTimers.removeAll { it.runnable === r }
+                            }
+                        }
                     }
-                    "removeCallbacksAndMessages" -> pendingTimers.clear()
+                    "removeCallbacksAndMessages" -> synchronized(stateLock) { pendingTimers.clear() }
                 }
                 return null
             }
             "Toast" -> {
                 if (name == "show") {
                     val txt = recv.fields["__text"]?.toString().orEmpty()
-                    if (txt.isNotBlank()) toastQueue.add(txt)
+                    if (txt.isNotBlank()) {
+                        synchronized(stateLock) {
+                            toastQueue.add(txt)
+                        }
+                    }
                 }
                 return null
             }
@@ -1660,13 +1827,20 @@ class LiveVmSession internal constructor(
         when (name) {
             "addView" -> {
                 val child = args.firstOrNull() as? VmObject ?: return null
-                val lp = args.getOrNull(1) as? VmObject
+                if (child === recv) return null
+                val second = args.getOrNull(1)
+                val lp = second as? VmObject
                 if (lp != null) {
                     (lp.fields["__weight"] as? Number)?.let { child.fields["__layoutWeight"] = it.toFloat() }
                 }
                 @Suppress("UNCHECKED_CAST")
                 val list = recv.nativeTag as? MutableList<VmObject> ?: mutableListOf<VmObject>().also { recv.nativeTag = it }
-                list.add(child)
+                if (second is Number && lp == null) {
+                    val idx = second.toInt().coerceIn(0, list.size)
+                    list.add(idx, child)
+                } else {
+                    list.add(child)
+                }
             }
             "removeAllViews" -> (recv.nativeTag as? MutableList<*>)?.clear()
             "setLayoutParams" -> {
@@ -1755,7 +1929,7 @@ class LiveVmSession internal constructor(
                 constructors = mutableListOf(),
                 methods = expr.anonymousBody.toMutableList(),
             )
-            return createInstance(anonCls, evalArgs)
+            return createInstance(anonCls, evalArgs, outerThis = thisObj, outerScope = env)
         }
         // User-defined class?
         classes[expr.typeName]?.let { return createInstance(it, evalArgs) }
@@ -1802,7 +1976,7 @@ class LiveVmSession internal constructor(
         val firstDim = dims.firstOrNull() ?: 0
         if (dims.size >= 2) {
             val secondDim = dims[1]
-            return Array(firstDim) {
+            return Array<Any?>(firstDim) {
                 when (expr.elemType) {
                     "int" -> IntArray(secondDim)
                     "float" -> FloatArray(secondDim)
@@ -1894,10 +2068,18 @@ class LiveVmSession internal constructor(
     }
 
     private fun inflateLayoutXml(xml: String): VmObject {
+        val doc = runCatching {
+            DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+                .newDocumentBuilder()
+                .parse(InputSource(StringReader(xml.trim())))
+        }.getOrElse { err ->
+            appendLog("W/DroidForgeVM: Layout XML parse fallback: ${err.message ?: err.javaClass.simpleName}")
+            return VmObject("LinearLayout", null).apply {
+                nativeTag = mutableListOf<VmObject>()
+                fields["__orientation"] = 1
+            }
+        }
         val androidNs = "http://schemas.android.com/apk/res/android"
-        val doc = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
-            .newDocumentBuilder()
-            .parse(InputSource(StringReader(xml.trim())))
 
         fun buildEl(el: Element): VmObject {
             val fullTag = el.tagName
@@ -1963,6 +2145,7 @@ class LiveVmSession internal constructor(
                 "visible" -> obj.fields["__visibility"] = 0
             }
 
+            @Suppress("UNCHECKED_CAST")
             val childrenList = obj.nativeTag as? MutableList<VmObject>
             if (childrenList != null) {
                 val nodes = el.childNodes
@@ -2086,6 +2269,8 @@ internal class VmObject(
 ) {
     val fields = linkedMapOf<String, Any?>()
     var nativeTag: Any? = null
+    var outerThis: VmObject? = null
+    var outerScope: VmScope? = null
 }
 
 private class VmLambda(
@@ -2241,6 +2426,8 @@ private data class Tok(val kind: TokKind, val text: String)
 private class JavaVmParser(src: String) {
     private val tokens: List<Tok> = tokenize(src)
     private var pos = 0
+    private var parseDepth = 0
+    private val maxParseDepth = 128
     private val parsedClasses = mutableListOf<VmClass>()
 
     fun parseFile(): List<VmClass> {
@@ -2451,14 +2638,31 @@ private class JavaVmParser(src: String) {
     private fun parseBlock(): List<VmStmt> {
         val out = mutableListOf<VmStmt>()
         match("{")
-        while (!at(TokKind.EOF) && peek().text != "}") {
-            out.add(parseStmt())
+        if (parseDepth >= maxParseDepth) {
+            skipBalancedFallback("}")
+            return out
         }
-        match("}")
+        parseDepth++
+        try {
+            while (!at(TokKind.EOF) && peek().text != "}") {
+                val before = pos
+                out.add(parseStmt())
+                if (pos == before) advance()
+            }
+            match("}")
+        } finally {
+            parseDepth--
+        }
         return out
     }
 
     private fun parseStmt(): VmStmt {
+        if (parseDepth >= maxParseDepth) {
+            if (!at(TokKind.EOF) && peek().text != "}") advance()
+            return VmStmt.Empty
+        }
+        parseDepth++
+        try {
         return when (peek().text) {
             "{" -> VmStmt.Block(parseBlock())
             ";" -> { advance(); VmStmt.Empty }
@@ -2528,6 +2732,9 @@ private class JavaVmParser(src: String) {
                     VmStmt.ExprStmt(e)
                 }
             }
+        }
+        } finally {
+            parseDepth--
         }
     }
 
@@ -2662,7 +2869,18 @@ private class JavaVmParser(src: String) {
         return VmStmt.VarDecl(type, decls)
     }
 
-    private fun parseExpr(): VmExpr = parseAssignment()
+    private fun parseExpr(): VmExpr {
+        if (parseDepth >= maxParseDepth) {
+            if (!at(TokKind.EOF)) advance()
+            return VmExpr.Literal(null)
+        }
+        parseDepth++
+        return try {
+            parseAssignment()
+        } finally {
+            parseDepth--
+        }
+    }
 
     private fun parseAssignment(): VmExpr {
         val lhs = parseTernary()
@@ -3015,6 +3233,15 @@ private class JavaVmParser(src: String) {
                 depth--
                 if (depth == 0) break
             }
+        }
+    }
+
+    private fun skipBalancedFallback(close: String) {
+        var depth = 1
+        while (!at(TokKind.EOF) && depth > 0) {
+            val t = advance().text
+            if (t == "{") depth++
+            else if (t == close) depth--
         }
     }
 
