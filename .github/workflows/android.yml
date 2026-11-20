@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build:
-    name: Build & Test Android Studio: For Android
+    name: "Build & Test Android Studio: For Android"
     runs-on: ubuntu-latest
 
     steps:

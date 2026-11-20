@@ -447,7 +447,10 @@ object GitHubClient {
             written.add(relPath)
         }
 
-        val cleanName = meta.name.replace("\"", "").ifBlank { "DroidForgeApp" }
+        val cleanName = meta.name.replace(Regex("""[/\\:<>"?*|]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .ifBlank { "DroidForgeApp" }
         writeText(
             "settings.gradle.kts",
             buildString {
