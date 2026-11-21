@@ -358,7 +358,7 @@ class GeminiCodeAssistant {
                 )
                 AiProvider.OPENAI, AiProvider.OPENROUTER -> {
                     val effectiveLiveModels = if (provider == AiProvider.OPENROUTER && liveModelOptions.none { it.provider == AiProvider.OPENROUTER }) {
-                        withTimeoutOrNull(6_000L) {
+                        withTimeoutOrNull(8_000L) {
                             AiModelsCatalog.fetchOpenRouterPublicModels(resolvedKey).getOrDefault(emptyList())
                         }.orEmpty()
                     } else {
@@ -380,6 +380,7 @@ class GeminiCodeAssistant {
                         steps = steps,
                         accumulatedVisibleText = accumulatedVisibleText,
                         addOrUpdateStep = ::addOrUpdateStep,
+                        onModelAutoCorrected = onModelAutoCorrected,
                         onStreamText = { text, usedModel ->
                             effectiveModelInUse = usedModel
                             updateRunAssistantMessage(
@@ -523,9 +524,27 @@ class GeminiCodeAssistant {
             Log.e(TAG, "${provider.shortName} API HTTP ${e.httpCode}: ${e.message}", e)
             onUsageRecorded(provider, effectiveModelInUse, TokenUsageDelta(), 0, true)
             val overloaded = e.httpCode == 503 || e.httpCode == 429 || e.httpCode == 529
+            val errLower = e.message.orEmpty().lowercase()
+            val isOpenRouterDataPolicy = provider == AiProvider.OPENROUTER &&
+                (errLower.contains("data policy") ||
+                    errLower.contains("free model publication") ||
+                    errLower.contains("openrouter.ai/settings/privacy") ||
+                    (e.httpCode == 404 && errLower.contains("privacy")))
             val friendly = when (e.httpCode) {
                 400, 401, 403 -> "${provider.shortName} API error (${e.httpCode}): ${e.message}"
-                404 -> "Model '$effectiveModelInUse' was not found for this ${provider.shortName} key (404): ${e.message}."
+                402 -> if (provider == AiProvider.OPENROUTER) {
+                    "OpenRouter credits or token limit reached (402): ${e.message}. Select a ':free' model or add OpenRouter credits."
+                } else {
+                    "${provider.shortName} billing error (402): ${e.message}"
+                }
+                404 -> when {
+                    isOpenRouterDataPolicy ->
+                        "OpenRouter Privacy Policy blocked free endpoints (404): Your account privacy settings reject free model prompt logging/publication. Enable \"Free model publication\" in https://openrouter.ai/settings/privacy or tap OpenRouter Privacy below, then retry."
+                    provider == AiProvider.OPENROUTER ->
+                        "No live OpenRouter endpoints were available for '$effectiveModelInUse' (404): ${e.message}. Tap Refresh Models or Switch Model."
+                    else ->
+                        "Model '$effectiveModelInUse' was not found for this ${provider.shortName} key (404): ${e.message}."
+                }
                 429 -> "${provider.shortName} rate limit or quota exceeded (429): ${e.message}"
                 503, 529 -> "All tried ${provider.shortName} models are overloaded right now (${e.httpCode}): ${e.message}"
                 else -> "${provider.shortName} API error (${e.httpCode}): ${e.message}"
@@ -534,8 +553,8 @@ class GeminiCodeAssistant {
                 "API error ${e.httpCode}",
                 AiUiState.Error(
                     message = friendly,
-                    isRetryable = e.httpCode !in listOf(400, 401, 403),
-                    isModelOverloaded = overloaded || e.httpCode == 404,
+                    isRetryable = e.httpCode !in listOf(401, 403),
+                    isModelOverloaded = (overloaded || e.httpCode == 404) && !isOpenRouterDataPolicy,
                 ),
             )
         } catch (e: UnknownHostException) {
@@ -1043,12 +1062,21 @@ class GeminiCodeAssistant {
         steps: MutableList<AgentStep>,
         accumulatedVisibleText: StringBuilder,
         addOrUpdateStep: (AgentStep) -> Unit,
+        onModelAutoCorrected: (failedModel: String, workingModel: String) -> Unit = { _, _ -> },
         onStreamText: (String, String) -> Unit,
         onFinalizeSuccess: (String, List<AgentStep>, Long, String) -> Unit,
         toolExecutor: ProjectToolExecutor,
         onUsage: (String, TokenUsageDelta, Int) -> Unit,
     ) {
-        var activeModel = initialModel
+        var activeModel = if (provider == AiProvider.OPENROUTER && liveModelOptions.isNotEmpty()) {
+            val resolved = AiModelsCatalog.resolveOpenRouterModelId(initialModel, liveModelOptions)
+            if (!resolved.equals(initialModel, ignoreCase = true)) {
+                onModelAutoCorrected(initialModel, resolved)
+            }
+            resolved
+        } else {
+            initialModel
+        }
         val openAiMessages = JSONArray().apply {
             put(
                 JSONObject()
@@ -1078,8 +1106,9 @@ class GeminiCodeAssistant {
             }
         }
 
-        val knownModels = (liveModelOptions + AiModelsCatalog.builtInOpenRouterModels)
+        val knownModels = (AiModelsCatalog.builtInOpenRouterModels + liveModelOptions)
             .associateBy { it.id.lowercase() }
+        val learnedCapabilities = mutableMapOf<String, OpenAiModelCapabilities>()
 
         suspend fun invokeOpenAiCompatibleCandidate(
             candidate: String,
@@ -1090,20 +1119,15 @@ class GeminiCodeAssistant {
             turnText: StringBuilder,
         ): ExternalTurnOutcome {
             val meta = knownModels[candidate.lowercase()]
-            var useNativeTools = if (!allowToolsThisCall) {
-                false
-            } else if (provider == AiProvider.OPENROUTER) {
-                meta?.supportsTools ?: true
-            } else {
-                true
-            }
-            var foldSystem = if (provider == AiProvider.OPENROUTER) {
-                meta?.supportsSystemPrompt == false || candidate.lowercase().contains("gemma")
-            } else {
-                false
-            }
-            var includeStreamOptions = true
-            var stripImages = false
+            val baseline = learnedCapabilities[candidate.lowercase()] ?: OpenAiModelCapabilities(
+                useNativeTools = if (provider == AiProvider.OPENROUTER) meta?.supportsTools ?: true else true,
+                foldSystem = if (provider == AiProvider.OPENROUTER) {
+                    meta?.supportsSystemPrompt == false || candidate.lowercase().contains("gemma")
+                } else {
+                    false
+                },
+            )
+            var cap = if (!allowToolsThisCall) baseline.copy(useNativeTools = false) else baseline
 
             var adaptAttempt = 0
             while (true) {
@@ -1115,6 +1139,7 @@ class GeminiCodeAssistant {
 
                 val onConnected = {
                     activeModel = candidate
+                    learnedCapabilities[candidate.lowercase()] = cap
                     addOrUpdateStep(
                         AgentStep(
                             id = thinkStepId,
@@ -1143,18 +1168,20 @@ class GeminiCodeAssistant {
                 }
 
                 try {
-                    return if (provider == AiProvider.OPENROUTER) {
+                    val outcome = if (provider == AiProvider.OPENROUTER) {
                         ProviderApiClient.streamOpenRouter(
                             apiKey = apiKey,
                             modelId = candidate,
                             messages = openAiMessages,
                             thinkingMode = thinkingMode,
-                            includeTools = useNativeTools,
+                            includeTools = cap.useNativeTools,
                             includeGitHubTools = includeGitHubTools,
                             allowTextToolCalls = allowTextToolFallback,
-                            includeStreamOptions = includeStreamOptions,
-                            foldSystemIntoUser = foldSystem,
-                            stripImages = stripImages,
+                            includeStreamOptions = cap.includeStreamOptions,
+                            includeTemperature = cap.includeTemperature,
+                            allowOpenRouterDataCollectionFallback = cap.allowDataCollectionFallback,
+                            foldSystemIntoUser = cap.foldSystem,
+                            stripImages = cap.stripImages,
                             onConnected = onConnected,
                             onReasoningDelta = onReasoning,
                             onTextDelta = onDelta,
@@ -1166,57 +1193,41 @@ class GeminiCodeAssistant {
                             messages = openAiMessages,
                             thinkingMode = thinkingMode,
                             includeGitHubTools = includeGitHubTools,
-                            includeTools = useNativeTools,
+                            includeTools = cap.useNativeTools,
+                            includeTemperature = cap.includeTemperature,
                             onConnected = onConnected,
                             onTextDelta = onDelta,
                         )
                     }
+                    learnedCapabilities[candidate.lowercase()] = cap
+                    return outcome
                 } catch (e: GeminiApiException) {
-                    val lowerMsg = e.message.orEmpty().lowercase()
-                    val canAdapt = provider == AiProvider.OPENROUTER && adaptAttempt < 4
-                    if (canAdapt) {
-                        if (useNativeTools &&
-                            (e.httpCode == 400 || e.httpCode == 404 || e.httpCode == 422) &&
-                            (lowerMsg.contains("tool") || lowerMsg.contains("function"))
-                        ) {
-                            useNativeTools = false
+                    if (provider == AiProvider.OPENROUTER && adaptAttempt < 7) {
+                        val nextCap = nextOpenRouterAdaptation(
+                            current = cap,
+                            httpCode = e.httpCode,
+                            errorMessage = e.message.orEmpty(),
+                            hasImages = imageAttachments.isNotEmpty(),
+                        )
+                        if (nextCap != null) {
+                            cap = nextCap
+                            learnedCapabilities[candidate.lowercase()] = cap
+                            val adaptDetail = when {
+                                !nextCap.useNativeTools && baseline.useNativeTools -> "Switching $candidate to text-mode tool calls..."
+                                nextCap.allowDataCollectionFallback -> "Retrying $candidate with OpenRouter provider routing..."
+                                nextCap.foldSystem -> "Folding system prompt for $candidate..."
+                                !nextCap.includeStreamOptions -> "Retrying $candidate without stream_options..."
+                                !nextCap.includeTemperature -> "Retrying $candidate with default sampling..."
+                                else -> "Adapting request parameters for $candidate..."
+                            }
                             addOrUpdateStep(
                                 AgentStep(
                                     id = thinkStepId,
-                                    title = "Adapting tools for $candidate",
-                                    detail = "Using text-mode tool calling on $candidate...",
+                                    title = "Adapting $candidate (${e.httpCode})",
+                                    detail = adaptDetail,
                                     status = AgentStepStatus.RUNNING,
                                 ),
                             )
-                            continue
-                        }
-                        if (!foldSystem &&
-                            (e.httpCode == 400 || e.httpCode == 422) &&
-                            (lowerMsg.contains("developer instruction") || lowerMsg.contains("system"))
-                        ) {
-                            foldSystem = true
-                            addOrUpdateStep(
-                                AgentStep(
-                                    id = thinkStepId,
-                                    title = "Adapting prompt for $candidate",
-                                    detail = "Folding system instructions for model compatibility...",
-                                    status = AgentStepStatus.RUNNING,
-                                ),
-                            )
-                            continue
-                        }
-                        if (includeStreamOptions &&
-                            (e.httpCode == 400 || e.httpCode == 422) &&
-                            (lowerMsg.contains("stream_options") || lowerMsg.contains("include_usage"))
-                        ) {
-                            includeStreamOptions = false
-                            continue
-                        }
-                        if (!stripImages &&
-                            (e.httpCode == 400 || e.httpCode == 404 || e.httpCode == 422) &&
-                            (lowerMsg.contains("image") || lowerMsg.contains("vision") || lowerMsg.contains("multimodal"))
-                        ) {
-                            stripImages = true
                             continue
                         }
                     }
@@ -1257,6 +1268,7 @@ class GeminiCodeAssistant {
                     provider = provider,
                     primaryModelId = activeModel,
                     liveModels = liveModelOptions,
+                    onModelAutoCorrected = onModelAutoCorrected,
                     onStatusUpdate = { title, detail ->
                         addOrUpdateStep(AgentStep(id = thinkStepId, title = title, detail = detail, status = AgentStepStatus.RUNNING))
                     },
@@ -1608,11 +1620,24 @@ class GeminiCodeAssistant {
         provider: AiProvider,
         primaryModelId: String,
         liveModels: List<AiModelOption> = emptyList(),
+        onModelAutoCorrected: (failedModel: String, workingModel: String) -> Unit = { _, _ -> },
         onStatusUpdate: (String, String) -> Unit,
         invoke: suspend (String) -> ExternalTurnOutcome,
     ): Pair<String, ExternalTurnOutcome> {
         val candidates = AiModelsCatalog.fallbackChain(provider, primaryModelId, liveModels)
+        var primaryError: Throwable? = null
+        var primaryGot404 = false
         var lastError: Throwable? = null
+
+        fun recordFailure(candidate: String, err: Throwable) {
+            if (primaryError == null && candidate == candidates.firstOrNull()) {
+                primaryError = err
+                if (err is GeminiApiException && err.httpCode == 404) {
+                    primaryGot404 = true
+                }
+            }
+            lastError = err
+        }
 
         for ((index, candidate) in candidates.withIndex()) {
             val hasNextCandidate = index < candidates.lastIndex
@@ -1622,9 +1647,15 @@ class GeminiCodeAssistant {
                 attemptsOnCandidate++
                 try {
                     val outcome = invoke(candidate)
+                    if (primaryGot404 && !candidate.equals(primaryModelId, ignoreCase = true)) {
+                        onModelAutoCorrected(primaryModelId, candidate)
+                    }
                     return candidate to outcome
                 } catch (e: GeminiApiException) {
-                    lastError = e
+                    recordFailure(candidate, e)
+                    if (e.httpCode == 401 || e.httpCode == 403) {
+                        throw e
+                    }
                     val canRetrySame = isTransientHttpStatus(e.httpCode) && attemptsOnCandidate == 1
                     if (canRetrySame) {
                         val waitMs = if (e.httpCode == 429) (e.retryAfterMs ?: 1000L) else 450L
@@ -1636,18 +1667,18 @@ class GeminiCodeAssistant {
                         continue
                     }
                     val canFailover = shouldFailoverHttpStatus(e.httpCode) ||
-                        (provider == AiProvider.OPENROUTER && (e.httpCode == 402 || e.httpCode == 400))
+                        (provider == AiProvider.OPENROUTER && e.httpCode in listOf(400, 402, 404, 422))
                     if (canFailover && hasNextCandidate) {
                         val nextModel = candidates[index + 1]
                         onStatusUpdate(
                             "Switching model (${e.httpCode})",
-                            "$candidate returned ${e.httpCode} — failing over to $nextModel...",
+                            "$candidate returned ${e.httpCode} — trying $nextModel...",
                         )
                         break
                     }
                     throw e
                 } catch (e: SocketTimeoutException) {
-                    lastError = e
+                    recordFailure(candidate, e)
                     if (hasNextCandidate) {
                         val nextModel = candidates[index + 1]
                         onStatusUpdate(
@@ -1660,7 +1691,16 @@ class GeminiCodeAssistant {
                 }
             }
         }
-        throw lastError ?: GeminiApiException(503, "All ${provider.shortName} fallback models are currently unavailable.")
+        val firstErr = primaryError
+        val finalErr = lastError
+        if (firstErr != null && finalErr != null && firstErr !== finalErr) {
+            val code = (firstErr as? GeminiApiException)?.httpCode
+                ?: (finalErr as? GeminiApiException)?.httpCode
+                ?: 503
+            val combinedMsg = "$primaryModelId failed (${firstErr.message}); fallback also failed (${finalErr.message})"
+            throw GeminiApiException(code, combinedMsg)
+        }
+        throw firstErr ?: finalErr ?: GeminiApiException(503, "All ${provider.shortName} fallback models are currently unavailable.")
     }
 
     private suspend fun callGeminiWithRetryAndFailover(
@@ -2644,6 +2684,15 @@ class GeminiCodeAssistant {
         val usage: TokenUsageDelta = TokenUsageDelta(),
     )
 
+    internal data class OpenAiModelCapabilities(
+        val useNativeTools: Boolean = true,
+        val includeStreamOptions: Boolean = true,
+        val includeTemperature: Boolean = true,
+        val allowDataCollectionFallback: Boolean = false,
+        val foldSystem: Boolean = false,
+        val stripImages: Boolean = false,
+    )
+
     internal companion object {
         fun resolveApiKey(customApiKey: String): String {
             val custom = customApiKey.trim()
@@ -2766,10 +2815,82 @@ class GeminiCodeAssistant {
             target.add(copy)
         }
 
+        internal fun nextOpenRouterAdaptation(
+            current: OpenAiModelCapabilities,
+            httpCode: Int,
+            errorMessage: String,
+            hasImages: Boolean,
+        ): OpenAiModelCapabilities? {
+            if (httpCode !in listOf(400, 404, 422)) return null
+            val lower = errorMessage.lowercase()
+
+            val isDataPolicy = lower.contains("data policy") ||
+                lower.contains("privacy") ||
+                lower.contains("free model publication") ||
+                lower.contains("zdr")
+            if (isDataPolicy) {
+                return if (!current.allowDataCollectionFallback) {
+                    current.copy(allowDataCollectionFallback = true)
+                } else {
+                    null
+                }
+            }
+
+            if (hasImages && !current.stripImages &&
+                (lower.contains("image") || lower.contains("vision") || lower.contains("multimodal") || lower.contains("image_url"))
+            ) {
+                return current.copy(stripImages = true)
+            }
+            if (current.useNativeTools &&
+                (lower.contains("tool") || lower.contains("function"))
+            ) {
+                return current.copy(useNativeTools = false)
+            }
+            if (!current.foldSystem &&
+                (lower.contains("developer instruction") || lower.contains("system"))
+            ) {
+                return current.copy(foldSystem = true)
+            }
+            if (current.includeStreamOptions &&
+                (lower.contains("stream_options") || lower.contains("include_usage"))
+            ) {
+                return current.copy(includeStreamOptions = false)
+            }
+            if (current.includeTemperature &&
+                (lower.contains("temperature") || lower.contains("sampling"))
+            ) {
+                return current.copy(includeTemperature = false)
+            }
+
+            if (httpCode == 404 || lower.contains("no endpoints") || lower.contains("unsupported parameter") || lower.contains("invalid parameter")) {
+                if (current.useNativeTools) return current.copy(useNativeTools = false)
+                if (current.includeStreamOptions) return current.copy(includeStreamOptions = false)
+                if (current.includeTemperature) return current.copy(includeTemperature = false)
+                if (!current.allowDataCollectionFallback) return current.copy(allowDataCollectionFallback = true)
+                if (!current.foldSystem) return current.copy(foldSystem = true)
+                if (hasImages && !current.stripImages) return current.copy(stripImages = true)
+            }
+            return null
+        }
+
         internal fun extractApiErrorMessage(rawBody: String): String {
             return runCatching {
                 val obj = JSONObject(rawBody)
-                obj.optJSONObject("error")?.optString("message").orEmpty()
+                val err = obj.optJSONObject("error") ?: return@runCatching ""
+                val msg = err.optString("message").trim()
+                val metaObj = err.optJSONObject("metadata")
+                val metaRaw = metaObj?.optString("raw").orEmpty().trim()
+                val providerName = metaObj?.optString("provider_name").orEmpty().trim()
+                buildString {
+                    append(msg)
+                    if (metaRaw.isNotBlank() && !msg.contains(metaRaw, ignoreCase = true)) {
+                        if (isNotEmpty()) append(" — ")
+                        append(metaRaw)
+                    }
+                    if (providerName.isNotBlank() && !msg.contains(providerName, ignoreCase = true)) {
+                        append(" [").append(providerName).append(']')
+                    }
+                }
             }.getOrDefault("").ifBlank { rawBody.take(240) }
         }
 

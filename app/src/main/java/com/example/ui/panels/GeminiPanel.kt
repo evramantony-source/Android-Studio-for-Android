@@ -1,5 +1,7 @@
 package com.example.ui.panels
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -22,6 +24,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.Analytics
@@ -66,6 +69,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -133,6 +137,7 @@ fun GeminiPanel(
     var renameThreadTarget by remember { mutableStateOf<ProjectChatThread?>(null) }
     var isPanelReady by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    val context = LocalContext.current
 
     LaunchedEffect(Unit) {
         kotlinx.coroutines.yield()
@@ -577,7 +582,9 @@ fun GeminiPanel(
                                     aiState.message.contains("App Check", ignoreCase = true) ||
                                     aiState.message.contains("401") ||
                                     aiState.message.contains("403")
-                                if (aiState.isRetryable || aiState.isModelOverloaded || needsKeyAction) {
+                                val needsOpenRouterPrivacyAction = aiState.message.contains("openrouter.ai/settings/privacy", ignoreCase = true) ||
+                                    aiState.message.contains("data policy", ignoreCase = true)
+                                if (aiState.isRetryable || aiState.isModelOverloaded || needsKeyAction || needsOpenRouterPrivacyAction) {
                                     Row(
                                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -591,6 +598,22 @@ fun GeminiPanel(
                                                     Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                                                 },
                                                 modifier = Modifier.testTag("retry_gemini_button"),
+                                            )
+                                        }
+                                        if (needsOpenRouterPrivacyAction) {
+                                            AssistChip(
+                                                onClick = {
+                                                    runCatching {
+                                                        context.startActivity(
+                                                            Intent(Intent.ACTION_VIEW, Uri.parse("https://openrouter.ai/settings/privacy")),
+                                                        )
+                                                    }
+                                                },
+                                                label = { Text("OpenRouter Privacy") },
+                                                leadingIcon = {
+                                                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
+                                                },
+                                                modifier = Modifier.testTag("openrouter_privacy_button"),
                                             )
                                         }
                                         if (aiState.isModelOverloaded) {

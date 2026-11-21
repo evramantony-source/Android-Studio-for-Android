@@ -258,6 +258,7 @@ internal object ProviderApiClient {
         thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
         includeGitHubTools: Boolean = true,
         includeTools: Boolean = true,
+        includeTemperature: Boolean = true,
         onConnected: () -> Unit,
         onTextDelta: (String) -> Unit,
     ): ExternalTurnOutcome = streamOpenAiCompatible(
@@ -272,6 +273,8 @@ internal object ProviderApiClient {
         includeGitHubTools = includeGitHubTools,
         allowTextToolCalls = false,
         includeStreamOptions = true,
+        includeTemperature = includeTemperature,
+        allowOpenRouterDataCollectionFallback = false,
         foldSystemIntoUser = false,
         stripImages = false,
         onConnected = onConnected,
@@ -288,6 +291,8 @@ internal object ProviderApiClient {
         includeGitHubTools: Boolean = false,
         allowTextToolCalls: Boolean = true,
         includeStreamOptions: Boolean = true,
+        includeTemperature: Boolean = true,
+        allowOpenRouterDataCollectionFallback: Boolean = false,
         foldSystemIntoUser: Boolean = false,
         stripImages: Boolean = false,
         onConnected: () -> Unit,
@@ -308,6 +313,8 @@ internal object ProviderApiClient {
         includeGitHubTools = includeGitHubTools,
         allowTextToolCalls = allowTextToolCalls,
         includeStreamOptions = includeStreamOptions,
+        includeTemperature = includeTemperature,
+        allowOpenRouterDataCollectionFallback = allowOpenRouterDataCollectionFallback,
         foldSystemIntoUser = foldSystemIntoUser,
         stripImages = stripImages,
         onConnected = onConnected,
@@ -517,6 +524,57 @@ internal object ProviderApiClient {
         return text
     }
 
+    internal fun buildOpenAiCompatibleRequestBody(
+        modelId: String,
+        adaptedMessages: JSONArray,
+        tools: JSONArray,
+        thinkingMode: AiThinkingMode,
+        isOpenRouter: Boolean,
+        includeTools: Boolean = true,
+        includeStreamOptions: Boolean = true,
+        includeTemperature: Boolean = true,
+        allowOpenRouterDataCollectionFallback: Boolean = false,
+    ): JSONObject {
+        val bodyObj = JSONObject()
+            .put("model", modelId)
+            .put("messages", adaptedMessages)
+            .put("stream", true)
+
+        if (includeTools && tools.length() > 0) {
+            bodyObj.put("tools", tools)
+        }
+        if (includeStreamOptions) {
+            bodyObj.put("stream_options", JSONObject().put("include_usage", true))
+        }
+
+        val lowerModel = modelId.lowercase()
+        val tailModel = lowerModel.substringAfter('/')
+        val isFixedTempReasoning = tailModel.startsWith("o1") ||
+            tailModel.startsWith("o3") ||
+            tailModel.startsWith("o4") ||
+            (!isOpenRouter && (tailModel.startsWith("gpt-5") || tailModel.startsWith("gpt-6")))
+        if (includeTemperature && !isFixedTempReasoning) {
+            bodyObj.put("temperature", 0.3)
+        } else if (!isOpenRouter && isFixedTempReasoning && !tailModel.startsWith("o1")) {
+            val effort = when (thinkingMode) {
+                AiThinkingMode.FAST -> "low"
+                AiThinkingMode.BALANCED -> "medium"
+                AiThinkingMode.DEEP -> "high"
+            }
+            bodyObj.put("reasoning_effort", effort)
+        }
+
+        if (isOpenRouter && allowOpenRouterDataCollectionFallback) {
+            bodyObj.put(
+                "provider",
+                JSONObject()
+                    .put("data_collection", "allow")
+                    .put("allow_fallbacks", true),
+            )
+        }
+        return bodyObj
+    }
+
     private suspend fun streamOpenAiCompatible(
         endpointUrl: String,
         apiKey: String,
@@ -529,6 +587,8 @@ internal object ProviderApiClient {
         includeGitHubTools: Boolean,
         allowTextToolCalls: Boolean,
         includeStreamOptions: Boolean,
+        includeTemperature: Boolean,
+        allowOpenRouterDataCollectionFallback: Boolean,
         foldSystemIntoUser: Boolean,
         stripImages: Boolean,
         onConnected: () -> Unit,
@@ -568,36 +628,17 @@ internal object ProviderApiClient {
             textToolPromptSuffix = textToolSuffix,
         )
 
-        val bodyObj = JSONObject()
-            .put("model", modelId)
-            .put("messages", adaptedMessages)
-            .put("stream", true)
-
-        if (includeTools) {
-            bodyObj.put("tools", tools)
-        }
-        if (includeStreamOptions) {
-            bodyObj.put("stream_options", JSONObject().put("include_usage", true))
-        }
-
-        val lowerModel = modelId.lowercase()
-        val isOpenAiFixedTempReasoning = !isOpenRouter && (
-            lowerModel.startsWith("o1") ||
-                lowerModel.startsWith("o3") ||
-                lowerModel.startsWith("o4") ||
-                lowerModel.startsWith("gpt-5") ||
-                lowerModel.startsWith("gpt-6")
-            )
-        if (!isOpenAiFixedTempReasoning) {
-            bodyObj.put("temperature", 0.3)
-        } else if (!lowerModel.startsWith("o1")) {
-            val effort = when (thinkingMode) {
-                AiThinkingMode.FAST -> "low"
-                AiThinkingMode.BALANCED -> "medium"
-                AiThinkingMode.DEEP -> "high"
-            }
-            bodyObj.put("reasoning_effort", effort)
-        }
+        val bodyObj = buildOpenAiCompatibleRequestBody(
+            modelId = modelId,
+            adaptedMessages = adaptedMessages,
+            tools = tools,
+            thinkingMode = thinkingMode,
+            isOpenRouter = isOpenRouter,
+            includeTools = includeTools,
+            includeStreamOptions = includeStreamOptions,
+            includeTemperature = includeTemperature,
+            allowOpenRouterDataCollectionFallback = allowOpenRouterDataCollectionFallback,
+        )
 
         val bodyBytes = bodyObj.toString().toByteArray(Charsets.UTF_8)
         val conn = (URL(endpointUrl).openConnection() as HttpURLConnection).apply {
@@ -736,7 +777,9 @@ internal object ProviderApiClient {
                 if (root != null) {
                     root.optJSONObject("error")?.let { err ->
                         val parsedCode = err.optInt("code", 502).let { if (it in 400..599) it else 502 }
-                        throw GeminiApiException(parsedCode, err.optString("message", "Provider error"))
+                        val parsedMsg = GeminiCodeAssistant.extractApiErrorMessage(rawJson)
+                            .ifBlank { err.optString("message", "Provider error") }
+                        throw GeminiApiException(parsedCode, parsedMsg)
                     }
                     root.optJSONObject("usage")?.let { u ->
                         inputTokens = u.optLong("prompt_tokens", inputTokens)

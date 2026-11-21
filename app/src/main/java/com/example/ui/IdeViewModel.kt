@@ -279,6 +279,18 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                         autoHealUnavailableGeminiModel(fetched, explicitApiKey = savedGeminiKey)
                     }
                 }
+
+                val savedOrKey = savedKeys[AiProvider.OPENROUTER].orEmpty()
+                val resolvedOrKey = GeminiCodeAssistant.resolveOpenRouterApiKey(savedOrKey)
+                val activeProv = runCatching { repository.activeProvider.first() }.getOrDefault(AiProvider.GEMINI)
+                if (resolvedOrKey.isNotBlank() || activeProv == AiProvider.OPENROUTER) {
+                    val fetchedOr = AiModelsCatalog.fetchOpenRouterPublicModels(resolvedOrKey).getOrNull().orEmpty()
+                    if (fetchedOr.isNotEmpty()) {
+                        val otherProviders = _liveModels.value.filter { it.provider != AiProvider.OPENROUTER }
+                        _liveModels.value = otherProviders + fetchedOr
+                        autoHealUnavailableOpenRouterModel(fetchedOr, explicitApiKey = savedOrKey)
+                    }
+                }
             }
         }
     }
@@ -301,6 +313,23 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
             }
             val keyToSave = explicitApiKey ?: repository.providerApiKeys.first()[AiProvider.GEMINI].orEmpty()
             repository.saveProviderConfig(AiProvider.GEMINI, keyToSave, replacement)
+        }
+    }
+
+    private suspend fun autoHealUnavailableOpenRouterModel(
+        fetched: List<AiModelOption>,
+        explicitApiKey: String? = null,
+    ) {
+        if (fetched.size < 4) return
+        val savedModel = AiModelsCatalog.normalizeModelId(
+            AiProvider.OPENROUTER,
+            repository.providerModels.first()[AiProvider.OPENROUTER],
+        )
+        if (AiModelsCatalog.isOpenRouterMetaRouter(savedModel)) return
+        val resolved = AiModelsCatalog.resolveOpenRouterModelId(savedModel, fetched)
+        if (!resolved.equals(savedModel, ignoreCase = true)) {
+            val keyToSave = explicitApiKey ?: repository.providerApiKeys.first()[AiProvider.OPENROUTER].orEmpty()
+            repository.saveProviderConfig(AiProvider.OPENROUTER, keyToSave, resolved)
         }
     }
 
@@ -776,8 +805,8 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             _isFetchingModels.value = true
-            val res = if (provider == AiProvider.OPENROUTER && key.isBlank()) {
-                AiModelsCatalog.fetchOpenRouterPublicModels()
+            val res = if (provider == AiProvider.OPENROUTER) {
+                AiModelsCatalog.fetchOpenRouterPublicModels(key)
             } else {
                 AiModelsCatalog.fetchLiveModels(provider, key)
             }
@@ -787,6 +816,8 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 _liveModels.value = otherProviders + fetched
                 if (provider == AiProvider.GEMINI && fetched.isNotEmpty()) {
                     autoHealUnavailableGeminiModel(fetched, explicitApiKey = explicitApiKey)
+                } else if (provider == AiProvider.OPENROUTER && fetched.isNotEmpty()) {
+                    autoHealUnavailableOpenRouterModel(fetched, explicitApiKey = explicitApiKey)
                 }
                 if (!silentOnEmptyKey) {
                     _statusBanner.value = "Loaded ${fetched.size} ${provider.shortName} model(s)."

@@ -696,4 +696,159 @@ class GeminiCodeAssistantTest {
             ),
         )
     }
+
+    @Test
+    fun openRouterLiveCatalogParsingDetectsToolSupportPricingAndPrunesStaleSlugs() {
+        val rawJson = """
+            {
+              "data": [
+                {
+                  "id": "openrouter/free",
+                  "name": "Free Models Router",
+                  "pricing": {"prompt": "0", "completion": "0"},
+                  "context_length": 200000,
+                  "supported_parameters": ["tools", "temperature"]
+                },
+                {
+                  "id": "openrouter/auto",
+                  "name": "Auto Router",
+                  "pricing": {"prompt": "-1", "completion": "-1"},
+                  "context_length": 2000000,
+                  "supported_parameters": ["tools"]
+                },
+                {
+                  "id": "arcee-ai/trinity-mini:free",
+                  "name": "Trinity Mini (Free)",
+                  "pricing": {"prompt": "0.00", "completion": "0.00"},
+                  "context_length": 131072,
+                  "supported_parameters": []
+                },
+                {
+                  "id": "qwen/qwen3-next-80b-a3b-instruct:free",
+                  "name": "Qwen3 Next 80B (Free)",
+                  "pricing": {"prompt": "0", "completion": "0"},
+                  "context_length": 262144,
+                  "supported_parameters": ["tools", "temperature", "stream_options"]
+                },
+                {
+                  "id": "nvidia/nemotron-3-super-120b-a12b:free",
+                  "name": "Nemotron 3 Super 120B (Free)",
+                  "pricing": {"prompt": "0", "completion": "0"},
+                  "context_length": 262144,
+                  "supported_parameters": ["tools", "reasoning"]
+                },
+                {
+                  "id": "anthropic/claude-sonnet-4",
+                  "name": "Claude Sonnet 4",
+                  "pricing": {"prompt": "0.000003", "completion": "0.000015"},
+                  "context_length": 200000,
+                  "supported_parameters": ["tools"]
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val parsed = AiModelsCatalog.parseOpenRouterModelsJson(rawJson)
+        val byId = parsed.associateBy { it.id }
+
+        // Empty supported_parameters array means tools are NOT supported (do not treat empty array as true!)
+        assertFalse(byId["arcee-ai/trinity-mini:free"]!!.supportsTools)
+        assertTrue(byId["qwen/qwen3-next-80b-a3b-instruct:free"]!!.supportsTools)
+        assertFalse(AiModelsCatalog.isFreeOpenRouterModel("openrouter/auto"))
+        assertEquals("Auto", byId["openrouter/auto"]!!.badge)
+        assertEquals("Free", byId["arcee-ai/trinity-mini:free"]!!.badge)
+
+        // When live catalog is loaded, retired built-in slugs must be pruned from modelsFor(...)
+        val merged = AiModelsCatalog.modelsFor(AiProvider.OPENROUTER, parsed)
+        assertFalse(merged.any { it.id == "deepseek/deepseek-chat-v3-0324:free" })
+        assertTrue(merged.any { it.id == "openrouter/auto" })
+        assertTrue(merged.any { it.id == "openrouter/free" })
+        assertTrue(merged.any { it.id == "qwen/qwen3-next-80b-a3b-instruct:free" })
+
+        // Retired free slug resolves to active live free model in same family or top coding model, never paid!
+        val resolvedQwen = AiModelsCatalog.resolveOpenRouterModelId("qwen/qwen3-coder:free", parsed)
+        assertEquals("qwen/qwen3-next-80b-a3b-instruct:free", resolvedQwen)
+        val resolvedDeepSeek = AiModelsCatalog.resolveOpenRouterModelId("deepseek/deepseek-r1-0528:free", parsed)
+        assertTrue(AiModelsCatalog.isFreeOpenRouterModel(resolvedDeepSeek))
+        assertTrue(resolvedDeepSeek != "openrouter/free")
+
+        // Fallback chain tries capable live named free models BEFORE openrouter/free router
+        val chain = AiModelsCatalog.fallbackChain(
+            provider = AiProvider.OPENROUTER,
+            primaryModelId = "nvidia/nemotron-3-super-120b-a12b:free",
+            liveModels = parsed,
+        )
+        val qwenIdx = chain.indexOf("qwen/qwen3-next-80b-a3b-instruct:free")
+        val routerIdx = chain.indexOf("openrouter/free")
+        assertTrue(qwenIdx in 1 until routerIdx)
+        assertTrue(chain.all { AiModelsCatalog.isFreeOpenRouterModel(it) })
+    }
+
+    @Test
+    fun openRouterAdaptationHandlesAll404CausesAndErrorMetadata() {
+        val initial = GeminiCodeAssistant.OpenAiModelCapabilities()
+
+        // 1. Policy 404 triggers data_collection fallback override
+        val policyNext = GeminiCodeAssistant.nextOpenRouterAdaptation(
+            current = initial,
+            httpCode = 404,
+            errorMessage = "No endpoints found matching your data policy (Free model publication).",
+            hasImages = false,
+        )
+        assertTrue(policyNext?.allowDataCollectionFallback == true)
+        assertNull(
+            GeminiCodeAssistant.nextOpenRouterAdaptation(
+                current = policyNext!!,
+                httpCode = 404,
+                errorMessage = "No endpoints found matching your data policy (Free model publication).",
+                hasImages = false,
+            ),
+        )
+
+        // 2. Generic 404 "No endpoints found" without "tool" still adapts step-by-step and terminates cleanly
+        var state: GeminiCodeAssistant.OpenAiModelCapabilities? = initial
+        val history = mutableListOf<GeminiCodeAssistant.OpenAiModelCapabilities>()
+        var guard = 0
+        while (state != null && guard < 10) {
+            guard++
+            state = GeminiCodeAssistant.nextOpenRouterAdaptation(
+                current = state,
+                httpCode = 404,
+                errorMessage = "No endpoints found for model.",
+                hasImages = true,
+            )
+            if (state != null) history.add(state)
+        }
+        assertEquals(6, history.size)
+        assertFalse(history[0].useNativeTools)
+        assertFalse(history[1].includeStreamOptions)
+        assertFalse(history[2].includeTemperature)
+        assertTrue(history[3].allowDataCollectionFallback)
+        assertTrue(history[4].foldSystem)
+        assertTrue(history[5].stripImages)
+
+        // 3. Request builder honors data_collection override and omits temperature when adapted off
+        val reqBody = com.example.ai.ProviderApiClient.buildOpenAiCompatibleRequestBody(
+            modelId = "qwen/qwen3-next-80b-a3b-instruct:free",
+            adaptedMessages = org.json.JSONArray().put(JSONObject().put("role", "user").put("content", "Hi")),
+            tools = org.json.JSONArray(),
+            thinkingMode = AiThinkingMode.FAST,
+            isOpenRouter = true,
+            includeTools = false,
+            includeStreamOptions = false,
+            includeTemperature = false,
+            allowOpenRouterDataCollectionFallback = true,
+        )
+        assertFalse(reqBody.has("tools"))
+        assertFalse(reqBody.has("stream_options"))
+        assertFalse(reqBody.has("temperature"))
+        assertEquals("allow", reqBody.getJSONObject("provider").getString("data_collection"))
+
+        // 4. Error extractor preserves metadata.raw details
+        val extracted = GeminiCodeAssistant.extractApiErrorMessage(
+            """{"error":{"message":"Provider returned error","code":404,"metadata":{"raw":"No endpoints found matching ZDR"}}}""",
+        )
+        assertTrue(extracted.contains("Provider returned error"))
+        assertTrue(extracted.contains("No endpoints found matching ZDR"))
+    }
 }
