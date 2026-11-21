@@ -5,6 +5,9 @@ import com.example.model.GitHubRepoLink
 import com.example.model.ProjectLanguage
 import com.example.model.ProjectMetadata
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -13,6 +16,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.security.MessageDigest
+import java.util.zip.ZipInputStream
 
 data class GitHubUser(
     val login: String,
@@ -336,26 +340,112 @@ object GitHubClient {
         targetDir: File,
     ): Result<Map<String, String>> = withContext(Dispatchers.IO) {
         runCatching {
-            val entries = listRepoFiles(token, link.owner, link.repo, link.branch).getOrThrow()
-            val pulledHashes = linkedMapOf<String, String>()
-            val blobs = entries.filter { it.type == "blob" && !it.path.startsWith(".git/") }
-            for (entry in blobs.take(200)) {
-                if (entry.size > 4_000_000L) continue
-                val encodedBranch = URLEncoder.encode(link.branch, "UTF-8")
-                val resp = requestJson(
-                    "GET",
-                    "/repos/${link.owner}/${link.repo}/contents/${entry.path}?ref=$encodedBranch",
-                    token,
+            val cleanToken = token.trim()
+            val branch = link.branch.ifBlank { "main" }
+            val canonicalTarget = targetDir.canonicalFile.apply { mkdirs() }
+
+            // 1. Primary path: download the full branch zipball in a single request (no 200-file cap)
+            val archiveResult = runCatching {
+                val encodedBranch = URLEncoder.encode(branch, "UTF-8")
+                val zipBytes = downloadGitHubRedirectedBytes(
+                    apiPath = "/repos/${link.owner}/${link.repo}/zipball/$encodedBranch",
+                    token = cleanToken,
+                    readTimeoutMs = 120_000,
                 )
-                val b64 = resp.optString("content").replace("\n", "").replace("\r", "")
-                val rawBytes = if (b64.isNotEmpty()) decodeBase64(b64) else ByteArray(0)
-                val dest = File(targetDir, entry.path)
-                dest.parentFile?.mkdirs()
-                dest.writeBytes(rawBytes)
-                pulledHashes[entry.path] = sha256Hex(rawBytes)
+                val pulledHashes = linkedMapOf<String, String>()
+                ZipInputStream(zipBytes.inputStream()).use { zis ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        if (!entry.isDirectory) {
+                            val rawName = entry.name.replace('\\', '/').trimStart('/')
+                            // GitHub zipball entries start with "<owner>-<repo>-<sha>/..."
+                            val relPath = rawName.substringAfter('/', rawName).trimStart('/')
+                            if (relPath.isNotEmpty() && !shouldSkipPulledPath(relPath)) {
+                                val outFile = File(canonicalTarget, relPath).canonicalFile
+                                require(outFile.path.startsWith(canonicalTarget.path + File.separator)) {
+                                    "Invalid archive entry path: $relPath"
+                                }
+                                val bytes = zis.readBytes()
+                                if (bytes.size <= 25_000_000) {
+                                    outFile.parentFile?.mkdirs()
+                                    outFile.writeBytes(bytes)
+                                    pulledHashes[relPath] = sha256Hex(bytes)
+                                }
+                            }
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                }
+                pulledHashes
+            }.getOrNull()
+
+            if (archiveResult != null && archiveResult.isNotEmpty()) {
+                return@runCatching archiveResult
+            }
+
+            // 2. Fallback path: recursive Git tree + concurrent Git Blob fetches for ALL repository files
+            val entries = listRepoFiles(cleanToken, link.owner, link.repo, branch).getOrThrow()
+            val pulledHashes = linkedMapOf<String, String>()
+            val blobs = entries.filter {
+                it.type == "blob" && !shouldSkipPulledPath(it.path) && it.size <= 20_000_000L
+            }
+            for (chunk in blobs.chunked(12)) {
+                val downloaded = coroutineScope {
+                    chunk.map { entry ->
+                        async(Dispatchers.IO) {
+                            val blobBytes = if (entry.sha.isNotBlank()) {
+                                runCatching {
+                                    val blobJson = requestJson(
+                                        "GET",
+                                        "/repos/${link.owner}/${link.repo}/git/blobs/${entry.sha}",
+                                        cleanToken,
+                                    )
+                                    val b64 = blobJson.optString("content").replace("\n", "").replace("\r", "")
+                                    if (b64.isNotEmpty()) decodeBase64(b64) else null
+                                }.getOrNull()
+                            } else null
+                            val rawBytes = blobBytes ?: run {
+                                val encodedPath = entry.path.split('/').joinToString("/") {
+                                    URLEncoder.encode(it, "UTF-8").replace("+", "%20")
+                                }
+                                val encodedBranch = URLEncoder.encode(branch, "UTF-8")
+                                val resp = requestJson(
+                                    "GET",
+                                    "/repos/${link.owner}/${link.repo}/contents/$encodedPath?ref=$encodedBranch",
+                                    cleanToken,
+                                )
+                                val b64 = resp.optString("content").replace("\n", "").replace("\r", "")
+                                if (b64.isNotEmpty()) decodeBase64(b64)
+                                else {
+                                    val dl = resp.optString("download_url")
+                                    if (dl.isNotBlank()) downloadSignedUrlBytes(dl) else ByteArray(0)
+                                }
+                            }
+                            entry.path to rawBytes
+                        }
+                    }.awaitAll()
+                }
+                for ((relPath, rawBytes) in downloaded) {
+                    val dest = File(canonicalTarget, relPath).canonicalFile
+                    if (dest.path.startsWith(canonicalTarget.path + File.separator)) {
+                        dest.parentFile?.mkdirs()
+                        dest.writeBytes(rawBytes)
+                        pulledHashes[relPath] = sha256Hex(rawBytes)
+                    }
+                }
             }
             pulledHashes
         }
+    }
+
+    private fun shouldSkipPulledPath(relPath: String): Boolean {
+        val norm = relPath.trimStart('/')
+        return norm.startsWith(".git/") ||
+            norm == ".git" ||
+            norm.startsWith(".gradle/") ||
+            norm.startsWith("build/") ||
+            norm.startsWith("app/build/")
     }
 
     suspend fun pushProject(
@@ -761,15 +851,19 @@ object GitHubClient {
         return result.sortedBy { it.first }
     }
 
-    private fun downloadGitHubRedirectedBytes(apiPath: String, token: String): ByteArray {
+    private fun downloadGitHubRedirectedBytes(
+        apiPath: String,
+        token: String,
+        readTimeoutMs: Int = 45_000,
+    ): ByteArray {
         val conn = (URL("$API_ROOT$apiPath").openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = TIMEOUT_MS
-            readTimeout = 45_000
+            readTimeout = readTimeoutMs
             instanceFollowRedirects = false
             setRequestProperty("Accept", "application/vnd.github+json")
             setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
-            setRequestProperty("User-Agent", "DroidForgeStudio/1.0")
+            setRequestProperty("User-Agent", "AndroidStudioMobile/1.0")
             if (token.isNotBlank()) {
                 setRequestProperty("Authorization", "Bearer $token")
             }
@@ -779,7 +873,7 @@ object GitHubClient {
             if (code in 300..399) {
                 val location = conn.getHeaderField("Location").orEmpty()
                 require(location.isNotBlank()) { "Missing redirect Location from GitHub ($code)." }
-                downloadSignedUrlBytes(location)
+                downloadSignedUrlBytes(location, readTimeoutMs)
             } else if (code in 200..299) {
                 conn.inputStream.readBytes()
             } else {
@@ -793,13 +887,16 @@ object GitHubClient {
         }
     }
 
-    private fun downloadSignedUrlBytes(targetUrl: String): ByteArray {
+    private fun downloadSignedUrlBytes(
+        targetUrl: String,
+        readTimeoutMs: Int = 60_000,
+    ): ByteArray {
         val conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = TIMEOUT_MS
-            readTimeout = 60_000
+            readTimeout = readTimeoutMs
             instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "DroidForgeStudio/1.0")
+            setRequestProperty("User-Agent", "AndroidStudioMobile/1.0")
         }
         return try {
             val code = conn.responseCode

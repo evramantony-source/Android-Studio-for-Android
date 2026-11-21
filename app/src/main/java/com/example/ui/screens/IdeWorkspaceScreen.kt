@@ -95,6 +95,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.activity.result.PickVisualMediaRequest
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -102,8 +104,23 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.AccountTree
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.Palette
+import androidx.compose.material.icons.filled.Splitscreen
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import com.example.ai.AgentRole
 import com.example.ai.AiModelOption
 import com.example.ai.AiProvider
 import com.example.ai.AiThinkingMode
@@ -125,6 +142,7 @@ import com.example.model.AndroidMinSdk
 import com.example.model.BuildDiagnostic
 import com.example.model.BuildResult
 import com.example.model.BuildVariant
+import com.example.model.DiagnosticSeverity
 import com.example.model.EditorSettings
 import com.example.model.FileLanguage
 import com.example.model.JavaVersionOption
@@ -134,6 +152,8 @@ import com.example.model.ProjectMetadata
 import com.example.model.ProjectSearchHit
 import com.example.model.ReleaseSigningConfig
 import com.example.ui.editor.CodeEditor
+import com.example.ui.editor.CodeStructureExtractor
+import com.example.ui.editor.SymbolKind
 import com.example.ui.panels.AiUsageDialog
 import com.example.ui.panels.BuildPanel
 import com.example.ui.panels.GeminiPanel
@@ -143,6 +163,7 @@ import com.example.ui.panels.ProjectSearchDialog
 import com.example.ui.panels.ProviderKeysDialog
 import com.example.ui.panels.ReleaseKeystoreDialog
 import com.example.ui.panels.SideChatSplitPane
+import com.example.ui.panels.UiCustomizationDialog
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import kotlinx.coroutines.launch
 import java.io.File
@@ -250,17 +271,39 @@ fun IdeWorkspaceScreen(
     onUpdateSettings: ((EditorSettings) -> EditorSettings) -> Unit,
     onBackToProjects: () -> Unit,
     modifier: Modifier = Modifier,
+    threadMessagesMap: Map<String, List<ChatMessage>> = emptyMap(),
+    threadUiStates: Map<String, AiUiState> = emptyMap(),
+    runningThreadIds: Set<String> = emptySet(),
+    terminalLines: List<String> = emptyList(),
+    onLaunchRoleAgent: (AgentRole, String?) -> Unit = { _, _ -> },
+    onAskGeminiInThread: (String, String) -> Unit = { _, prompt -> onAskGemini(prompt) },
+    onUpdateThreadProviderModel: (String, AiProvider, String) -> Unit = { _, _, _ -> },
+    onUpdateThreadSystemAndTemp: (String, String, Float) -> Unit = { _, _, _ -> },
+    onStopThread: (String) -> Unit = { onStopGemini() },
+    onRetryThread: (String) -> Unit = { onRetryGemini() },
+    onClearThreadChat: (String) -> Unit = { onClearAiChat() },
+    onRunTerminalCommand: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val snackbarHostState = remember { SnackbarHostState() }
+    val density = LocalDensity.current
 
     var showBuildPanel by remember { mutableStateOf(false) }
     var showGeminiPanel by remember { mutableStateOf(false) }
     var showEmulatorPanel by remember { mutableStateOf(false) }
     var showSplitSideChat by remember { mutableStateOf(false) }
+    var phoneSplitMode by remember { mutableStateOf(true) }
     var showMoreMenu by remember { mutableStateOf(false) }
+
+    // Draggable Window Dimensions (Tablets + Phones)
+    var explorerWidthDp by remember { mutableFloatStateOf(230f) }
+    var buildPanelHeightDp by remember { mutableFloatStateOf(260f) }
+    var emulatorWidthDp by remember { mutableFloatStateOf(325f) }
+    var aiPanelWidthDp by remember { mutableFloatStateOf(360f) }
+    var splitChatWidthDp by remember { mutableFloatStateOf(300f) }
+    var phoneEditorFraction by remember { mutableFloatStateOf(0.42f) }
 
     var showNewFileDialog by remember { mutableStateOf(false) }
     var showSettingsDialog by remember { mutableStateOf(false) }
@@ -589,8 +632,8 @@ fun IdeWorkspaceScreen(
                                         },
                                     )
                                     DropdownMenuItem(
-                                        text = { Text("Editor Settings") },
-                                        leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                        text = { Text("Customize UI & AI Studio") },
+                                        leadingIcon = { Icon(Icons.Default.Palette, contentDescription = null) },
                                         onClick = {
                                             showMoreMenu = false
                                             showSettingsDialog = true
@@ -610,23 +653,31 @@ fun IdeWorkspaceScreen(
                         .fillMaxSize()
                         .padding(innerPadding),
                 ) {
-                    // Persistent Explorer Sidebar on Expanded Screens
+                    // Persistent Explorer Sidebar on Expanded Screens (Resizable)
                     if (isExpanded) {
                         ProjectExplorerPane(
                             files = files,
+                            activeFile = activeFile,
                             activeFilePath = activeFilePath,
                             onSelectFile = onSelectFile,
+                            onJumpToSymbolLine = { line ->
+                                if (activeFile != null) {
+                                    onJumpToFileAndLine(activeFile.relativePath, line)
+                                }
+                            },
                             onCreateFile = { showNewFileDialog = true },
                             onImportFile = { importProjectFileLauncher.launch(arrayOf("*/*")) },
                             onDeleteFile = onDeleteFile,
                             modifier = Modifier
-                                .width(225.dp)
+                                .width(explorerWidthDp.dp)
                                 .fillMaxHeight(),
                         )
-                        VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalResizableDivider(
+                            onDragDp = { delta -> explorerWidthDp = (explorerWidthDp + delta).coerceIn(175f, 360f) },
+                        )
                     }
 
-                    // Center Editor + Bottom Console Column
+                    // Center Editor + Bottom Console (+ Phone Split Dock)
                     Column(
                         modifier = Modifier
                             .weight(1f)
@@ -656,7 +707,11 @@ fun IdeWorkspaceScreen(
                                 }
                                 WorkspaceStripChip(
                                     icon = Icons.Default.AutoAwesome,
-                                    label = "AI Agent",
+                                    label = if (runningThreadIds.isNotEmpty()) {
+                                        "AI (${runningThreadIds.size})"
+                                    } else {
+                                        "AI Agent"
+                                    },
                                     selected = showGeminiPanel,
                                     onClick = {
                                         val next = !showGeminiPanel
@@ -664,6 +719,28 @@ fun IdeWorkspaceScreen(
                                         if (!isExpanded && next) showEmulatorPanel = false
                                     },
                                     tag = "toggle_gemini_button",
+                                )
+                                WorkspaceStripChip(
+                                    icon = Icons.Default.Build,
+                                    label = "Features",
+                                    selected = showGeminiPanel && chatThreads.find { it.agentRole == AgentRole.FEATURE_BUILDER }?.id == activeThreadId,
+                                    onClick = {
+                                        showGeminiPanel = true
+                                        if (!isExpanded) showEmulatorPanel = false
+                                        onLaunchRoleAgent(AgentRole.FEATURE_BUILDER, null)
+                                    },
+                                    tag = "workspace_role_feature_chip",
+                                )
+                                WorkspaceStripChip(
+                                    icon = Icons.Default.BugReport,
+                                    label = "Fix Errors",
+                                    selected = showGeminiPanel && chatThreads.find { it.agentRole == AgentRole.ERROR_FIXER }?.id == activeThreadId,
+                                    onClick = {
+                                        showGeminiPanel = true
+                                        if (!isExpanded) showEmulatorPanel = false
+                                        onLaunchRoleAgent(AgentRole.ERROR_FIXER, null)
+                                    },
+                                    tag = "workspace_role_fixer_chip",
                                 )
                                 WorkspaceStripChip(
                                     icon = Icons.Default.PhoneAndroid,
@@ -676,6 +753,15 @@ fun IdeWorkspaceScreen(
                                     },
                                     tag = "toggle_emulator_button",
                                 )
+                                if (!isExpanded) {
+                                    WorkspaceStripChip(
+                                        icon = Icons.Default.Splitscreen,
+                                        label = if (phoneSplitMode) "Split" else "Sheet",
+                                        selected = phoneSplitMode,
+                                        onClick = { phoneSplitMode = !phoneSplitMode },
+                                        tag = "toggle_phone_split_mode_button",
+                                    )
+                                }
                                 val pushLabel = when {
                                     project.githubLink != null && githubPendingChanges.isNotEmpty() ->
                                         "Push (${githubPendingChanges.size})"
@@ -702,6 +788,13 @@ fun IdeWorkspaceScreen(
                                     selected = showSearchDialog,
                                     onClick = { showSearchDialog = true },
                                     tag = "workspace_search_button",
+                                )
+                                WorkspaceStripChip(
+                                    icon = Icons.Default.Palette,
+                                    label = "Theme",
+                                    selected = showSettingsDialog,
+                                    onClick = { showSettingsDialog = true },
+                                    tag = "workspace_theme_chip",
                                 )
                                 WorkspaceStripChip(
                                     icon = Icons.Default.UploadFile,
@@ -792,10 +885,27 @@ fun IdeWorkspaceScreen(
 
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
+                        // Breadcrumbs Bar (Android Studio New UI)
+                        if (activeFile != null && editorSettings.showBreadcrumbs) {
+                            val symbols = remember(activeFile.relativePath, activeFile.content) {
+                                CodeStructureExtractor.extract(activeFile.content, activeFile.language)
+                            }
+                            EditorBreadcrumbBar(
+                                projectName = project.name,
+                                relativePath = activeFile.relativePath,
+                                firstSymbol = symbols.firstOrNull()?.name,
+                                onOpenSearch = { showSearchDialog = true },
+                            )
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        }
+
+                        val phoneBottomActive = !isExpanded && phoneSplitMode && (showEmulatorPanel || showGeminiPanel)
+                        val editorWeight = if (phoneBottomActive) phoneEditorFraction else 1f
+
                         // Code Editor Area
                         Box(
                             modifier = Modifier
-                                .weight(1f)
+                                .weight(editorWeight)
                                 .fillMaxWidth(),
                         ) {
                             if (activeFile != null && activeFile.isBinary) {
@@ -831,6 +941,14 @@ fun IdeWorkspaceScreen(
                                     jumpToLineRequest = jumpToLine,
                                     onJumpHandled = onClearJump,
                                     onContentChange = onUpdateContent,
+                                    onRequestFixWithAi = {
+                                        showGeminiPanel = true
+                                        if (!isExpanded) showEmulatorPanel = false
+                                        onLaunchRoleAgent(
+                                            AgentRole.ERROR_FIXER,
+                                            "Fix the compiler errors in ${activeFile.relativePath} and verify via build_apk.",
+                                        )
+                                    },
                                 )
                             } else {
                                 Column(
@@ -857,10 +975,139 @@ fun IdeWorkspaceScreen(
                             }
                         }
 
-                        // Collapsible Bottom Build Console & Package Inspector
+                        // Phone Resizable Split Bottom Dock (Emulator OR Concurrent AI Agent while editing code above!)
+                        if (phoneBottomActive) {
+                            BoxWithConstraints(
+                                modifier = Modifier
+                                    .weight(1f - phoneEditorFraction)
+                                    .fillMaxWidth()
+                                    .imePadding(),
+                            ) {
+                                val totalHalfHeightPx = with(density) { (maxHeight / (1f - phoneEditorFraction)).toPx() }
+                                    .coerceAtLeast(300f)
+                                Column(modifier = Modifier.fillMaxSize()) {
+                                    VerticalResizableDivider(
+                                        onDragDp = { deltaDp ->
+                                            val deltaPx = with(density) { deltaDp.dp.toPx() }
+                                            phoneEditorFraction = (phoneEditorFraction + deltaPx / totalHalfHeightPx)
+                                                .coerceIn(0.24f, 0.74f)
+                                        },
+                                    )
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxWidth(),
+                                    ) {
+                                        if (showEmulatorPanel) {
+                                            EmulatorPanel(
+                                                appName = project.name,
+                                                packageName = project.packageName,
+                                                files = files,
+                                                builtApkPath = lastBuildResult?.apkPath,
+                                                onInstallApk = { apkPath -> shareBuiltArtifact(apkPath) },
+                                                onClose = { showEmulatorPanel = false },
+                                            )
+                                        } else if (showGeminiPanel) {
+                                            if (showSplitSideChat && splitThread != null) {
+                                                SideChatSplitPane(
+                                                    threads = chatThreads,
+                                                    activeThreadId = activeThreadId,
+                                                    splitThread = splitThread,
+                                                    activeFileName = activeFile?.relativePath,
+                                                    onSelectSplitThread = onSetSplitSideThread,
+                                                    onCreateSideChat = {
+                                                        onCreateSideChat("")
+                                                        showSplitSideChat = true
+                                                    },
+                                                    onSwitchToMainInput = { targetId ->
+                                                        onSelectChatThread(targetId)
+                                                        showSplitSideChat = false
+                                                    },
+                                                    onApplyCode = onApplyGeminiCode,
+                                                    onClose = { showSplitSideChat = false },
+                                                    threadMessagesMap = threadMessagesMap,
+                                                    threadUiStates = threadUiStates,
+                                                    runningThreadIds = runningThreadIds,
+                                                    activeProvider = activeProvider,
+                                                    providerModels = providerModels,
+                                                    liveModels = liveModels,
+                                                    isFetchingModels = isFetchingModels,
+                                                    onSelectSplitProviderModel = onUpdateThreadProviderModel,
+                                                    onRefreshLiveModels = onRefreshLiveModels,
+                                                    onSendPromptToThread = onAskGeminiInThread,
+                                                    onStopThread = onStopThread,
+                                                    onRetryThread = onRetryThread,
+                                                )
+                                            } else {
+                                                GeminiPanel(
+                                                    activeFileName = activeFile?.relativePath,
+                                                    activeProvider = activeProvider,
+                                                    thinkingMode = aiThinkingMode,
+                                                    providerApiKeys = providerApiKeys,
+                                                    providerModels = providerModels,
+                                                    liveModels = liveModels,
+                                                    isFetchingModels = isFetchingModels,
+                                                    aiUsageSummary = aiUsageSummary,
+                                                    chatThreads = chatThreads,
+                                                    activeThreadId = activeThreadId,
+                                                    diagnostics = lastBuildResult?.diagnostics.orEmpty(),
+                                                    messages = aiMessages,
+                                                    pendingAttachments = pendingAiAttachments,
+                                                    aiState = aiState,
+                                                    editorSettings = editorSettings,
+                                                    threadMessagesMap = threadMessagesMap,
+                                                    threadUiStates = threadUiStates,
+                                                    runningThreadIds = runningThreadIds,
+                                                    showSplitSideChat = showSplitSideChat,
+                                                    onToggleSplitSideChat = { showSplitSideChat = !showSplitSideChat },
+                                                    onSelectProvider = onSelectProvider,
+                                                    onSelectThinkingMode = onSelectThinkingMode,
+                                                    onSelectModel = onSelectModel,
+                                                    onSaveProviderConfig = onSaveProviderConfig,
+                                                    onRefreshLiveModels = onRefreshLiveModels,
+                                                    onResetAiUsage = onResetAiUsage,
+                                                    onSelectChatThread = onSelectChatThread,
+                                                    onCreateSideChat = onCreateSideChat,
+                                                    onRenameChatThread = onRenameChatThread,
+                                                    onDeleteChatThread = onDeleteChatThread,
+                                                    onLaunchRoleAgent = onLaunchRoleAgent,
+                                                    onUpdateThreadProviderModel = onUpdateThreadProviderModel,
+                                                    onUpdateThreadSystemAndTemp = onUpdateThreadSystemAndTemp,
+                                                    onSendPromptToThread = onAskGeminiInThread,
+                                                    onStopThread = onStopThread,
+                                                    onRetryThread = onRetryThread,
+                                                    onClearThreadChat = onClearThreadChat,
+                                                    onOpenCustomization = { showSettingsDialog = true },
+                                                    onPickPhoto = {
+                                                        pickPhotoLauncher.launch(
+                                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                                        )
+                                                    },
+                                                    onCaptureCamera = { launchCameraCapture() },
+                                                    onPickFile = { pickAiFileLauncher.launch(arrayOf("*/*")) },
+                                                    onRemoveAttachment = onRemoveAiAttachment,
+                                                    onSendPrompt = onAskGemini,
+                                                    onRetryGemini = onRetryGemini,
+                                                    onStopGemini = onStopGemini,
+                                                    onApplyCode = onApplyGeminiCode,
+                                                    onClearChat = onClearAiChat,
+                                                    onClose = { showGeminiPanel = false },
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Collapsible Resizable Bottom Build Console, Package Inspector & Interactive Terminal
                         AnimatedVisibility(visible = showBuildPanel) {
                             Column {
-                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                                VerticalResizableDivider(
+                                    onDragDp = { delta ->
+                                        buildPanelHeightDp = (buildPanelHeightDp - delta).coerceIn(150f, 460f)
+                                    },
+                                )
                                 BuildPanel(
                                     isBuilding = isBuilding,
                                     selectedVariant = selectedBuildVariant,
@@ -878,21 +1125,28 @@ fun IdeWorkspaceScreen(
                                     onAskGeminiToFix = {
                                         showGeminiPanel = true
                                         if (!isExpanded) showEmulatorPanel = false
-                                        onAskGemini("Inspect the build errors, edit the affected files directly, and re-run build_apk until the build succeeds.")
+                                        onLaunchRoleAgent(
+                                            AgentRole.ERROR_FIXER,
+                                            "Inspect the build errors, edit the affected files directly, and re-run build_apk until the build succeeds.",
+                                        )
                                     },
                                     onExportArtifact = { launchExportArtifact() },
                                     onShareArtifact = { path -> shareBuiltArtifact(path) },
                                     onOpenGitHubCloudBuild = { showGitHubDialog = true },
+                                    terminalLines = terminalLines,
+                                    onRunTerminalCommand = onRunTerminalCommand,
                                     onClose = { showBuildPanel = false },
-                                    modifier = Modifier.height(280.dp),
+                                    modifier = Modifier.height(buildPanelHeightDp.dp),
                                 )
                             }
                         }
                     }
 
-                    // Persistent Live Android Emulator Pane on Expanded Screens
+                    // Persistent Live Android Emulator Pane on Expanded Screens (Resizable)
                     if (isExpanded && showEmulatorPanel) {
-                        VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalResizableDivider(
+                            onDragDp = { delta -> emulatorWidthDp = (emulatorWidthDp - delta).coerceIn(240f, 460f) },
+                        )
                         EmulatorPanel(
                             appName = project.name,
                             packageName = project.packageName,
@@ -901,14 +1155,16 @@ fun IdeWorkspaceScreen(
                             onInstallApk = { apkPath -> shareBuiltArtifact(apkPath) },
                             onClose = { showEmulatorPanel = false },
                             modifier = Modifier
-                                .width(320.dp)
+                                .width(emulatorWidthDp.dp)
                                 .fillMaxHeight(),
                         )
                     }
 
-                    // Persistent Multi-Provider AI Pane on Expanded Screens
+                    // Persistent Multi-Provider AI Pane on Expanded Screens (Resizable)
                     if (isExpanded && showGeminiPanel) {
-                        VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalResizableDivider(
+                            onDragDp = { delta -> aiPanelWidthDp = (aiPanelWidthDp - delta).coerceIn(280f, 520f) },
+                        )
                         GeminiPanel(
                             activeFileName = activeFile?.relativePath,
                             activeProvider = activeProvider,
@@ -924,6 +1180,10 @@ fun IdeWorkspaceScreen(
                             messages = aiMessages,
                             pendingAttachments = pendingAiAttachments,
                             aiState = aiState,
+                            editorSettings = editorSettings,
+                            threadMessagesMap = threadMessagesMap,
+                            threadUiStates = threadUiStates,
+                            runningThreadIds = runningThreadIds,
                             showSplitSideChat = showSplitSideChat,
                             onToggleSplitSideChat = { showSplitSideChat = !showSplitSideChat },
                             onSelectProvider = onSelectProvider,
@@ -936,6 +1196,14 @@ fun IdeWorkspaceScreen(
                             onCreateSideChat = onCreateSideChat,
                             onRenameChatThread = onRenameChatThread,
                             onDeleteChatThread = onDeleteChatThread,
+                            onLaunchRoleAgent = onLaunchRoleAgent,
+                            onUpdateThreadProviderModel = onUpdateThreadProviderModel,
+                            onUpdateThreadSystemAndTemp = onUpdateThreadSystemAndTemp,
+                            onSendPromptToThread = onAskGeminiInThread,
+                            onStopThread = onStopThread,
+                            onRetryThread = onRetryThread,
+                            onClearThreadChat = onClearThreadChat,
+                            onOpenCustomization = { showSettingsDialog = true },
                             onPickPhoto = {
                                 pickPhotoLauncher.launch(
                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
@@ -951,14 +1219,16 @@ fun IdeWorkspaceScreen(
                             onClearChat = onClearAiChat,
                             onClose = { showGeminiPanel = false },
                             modifier = Modifier
-                                .width(350.dp)
+                                .width(aiPanelWidthDp.dp)
                                 .fillMaxHeight(),
                         )
                     }
 
-                    // Optional Side-by-Side Split Side Chat on Expanded Screens
+                    // Optional Side-by-Side Split Side Chat on Expanded Screens (Resizable & Independent!)
                     if (isExpanded && showGeminiPanel && showSplitSideChat) {
-                        VerticalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        HorizontalResizableDivider(
+                            onDragDp = { delta -> splitChatWidthDp = (splitChatWidthDp - delta).coerceIn(240f, 440f) },
+                        )
                         SideChatSplitPane(
                             threads = chatThreads,
                             activeThreadId = activeThreadId,
@@ -974,8 +1244,20 @@ fun IdeWorkspaceScreen(
                             },
                             onApplyCode = onApplyGeminiCode,
                             onClose = { showSplitSideChat = false },
+                            threadMessagesMap = threadMessagesMap,
+                            threadUiStates = threadUiStates,
+                            runningThreadIds = runningThreadIds,
+                            activeProvider = activeProvider,
+                            providerModels = providerModels,
+                            liveModels = liveModels,
+                            isFetchingModels = isFetchingModels,
+                            onSelectSplitProviderModel = onUpdateThreadProviderModel,
+                            onRefreshLiveModels = onRefreshLiveModels,
+                            onSendPromptToThread = onAskGeminiInThread,
+                            onStopThread = onStopThread,
+                            onRetryThread = onRetryThread,
                             modifier = Modifier
-                                .width(300.dp)
+                                .width(splitChatWidthDp.dp)
                                 .fillMaxHeight(),
                         )
                     }
@@ -992,10 +1274,17 @@ fun IdeWorkspaceScreen(
                     ModalDrawerSheet(modifier = Modifier.width(280.dp)) {
                         ProjectExplorerPane(
                             files = files,
+                            activeFile = activeFile,
                             activeFilePath = activeFilePath,
                             onSelectFile = { path ->
                                 onSelectFile(path)
                                 scope.launch { drawerState.close() }
+                            },
+                            onJumpToSymbolLine = { line ->
+                                if (activeFile != null) {
+                                    onJumpToFileAndLine(activeFile.relativePath, line)
+                                    scope.launch { drawerState.close() }
+                                }
                             },
                             onCreateFile = {
                                 scope.launch { drawerState.close() }
@@ -1013,7 +1302,7 @@ fun IdeWorkspaceScreen(
                 content = mainScaffold,
             )
 
-            if (showEmulatorPanel) {
+            if (!phoneSplitMode && showEmulatorPanel) {
                 val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
                 ModalBottomSheet(
                     onDismissRequest = { showEmulatorPanel = false },
@@ -1037,7 +1326,7 @@ fun IdeWorkspaceScreen(
                         )
                     }
                 }
-            } else if (showGeminiPanel) {
+            } else if (!phoneSplitMode && showGeminiPanel) {
                 val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
                 ModalBottomSheet(
                     onDismissRequest = { showGeminiPanel = false },
@@ -1066,6 +1355,12 @@ fun IdeWorkspaceScreen(
                             messages = aiMessages,
                             pendingAttachments = pendingAiAttachments,
                             aiState = aiState,
+                            editorSettings = editorSettings,
+                            threadMessagesMap = threadMessagesMap,
+                            threadUiStates = threadUiStates,
+                            runningThreadIds = runningThreadIds,
+                            showSplitSideChat = showSplitSideChat,
+                            onToggleSplitSideChat = { showSplitSideChat = !showSplitSideChat },
                             onSelectProvider = onSelectProvider,
                             onSelectThinkingMode = onSelectThinkingMode,
                             onSelectModel = onSelectModel,
@@ -1076,6 +1371,14 @@ fun IdeWorkspaceScreen(
                             onCreateSideChat = onCreateSideChat,
                             onRenameChatThread = onRenameChatThread,
                             onDeleteChatThread = onDeleteChatThread,
+                            onLaunchRoleAgent = onLaunchRoleAgent,
+                            onUpdateThreadProviderModel = onUpdateThreadProviderModel,
+                            onUpdateThreadSystemAndTemp = onUpdateThreadSystemAndTemp,
+                            onSendPromptToThread = onAskGeminiInThread,
+                            onStopThread = onStopThread,
+                            onRetryThread = onRetryThread,
+                            onClearThreadChat = onClearThreadChat,
+                            onOpenCustomization = { showSettingsDialog = true },
                             onPickPhoto = {
                                 pickPhotoLauncher.launch(
                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
@@ -1123,7 +1426,7 @@ fun IdeWorkspaceScreen(
     }
 
     if (showSettingsDialog) {
-        EditorSettingsDialog(
+        UiCustomizationDialog(
             settings = editorSettings,
             onUpdateSettings = onUpdateSettings,
             onDismiss = { showSettingsDialog = false },
@@ -1263,15 +1566,149 @@ private fun WorkspaceStripChip(
 }
 
 @Composable
+private fun HorizontalResizableDivider(
+    onDragDp: (Float) -> Unit,
+) {
+    val density = LocalDensity.current
+    Box(
+        modifier = Modifier
+            .width(10.dp)
+            .fillMaxHeight()
+            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures { change, dragAmount ->
+                    change.consume()
+                    val deltaDp = with(density) { dragAmount.toDp().value }
+                    onDragDp(deltaDp)
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .height(36.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.outline),
+        )
+    }
+}
+
+@Composable
+private fun VerticalResizableDivider(
+    onDragDp: (Float) -> Unit,
+) {
+    val density = LocalDensity.current
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(14.dp)
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .pointerInput(Unit) {
+                detectVerticalDragGestures { change, dragAmount ->
+                    change.consume()
+                    val deltaDp = with(density) { dragAmount.toDp().value }
+                    onDragDp(deltaDp)
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .width(42.dp)
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.outline),
+        )
+    }
+}
+
+@Composable
+private fun EditorBreadcrumbBar(
+    projectName: String,
+    relativePath: String,
+    firstSymbol: String?,
+    onOpenSearch: () -> Unit,
+) {
+    val segments = remember(relativePath) { relativePath.split('/').filter { it.isNotBlank() } }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("editor_breadcrumb_bar"),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .clickable(onClick = onOpenSearch)
+                .padding(horizontal = 10.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = projectName,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            segments.forEachIndexed { idx, seg ->
+                Icon(
+                    Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    modifier = Modifier.size(13.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = seg,
+                    fontFamily = JetBrainsMonoFontFamily,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = if (idx == segments.lastIndex) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (idx == segments.lastIndex) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+            }
+            if (!firstSymbol.isNullOrBlank()) {
+                Icon(
+                    Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    modifier = Modifier.size(13.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    text = firstSymbol,
+                    fontFamily = JetBrainsMonoFontFamily,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun ProjectExplorerPane(
     files: List<ProjectFile>,
+    activeFile: ProjectFile?,
     activeFilePath: String?,
     onSelectFile: (String) -> Unit,
+    onJumpToSymbolLine: (Int) -> Unit,
     onCreateFile: () -> Unit,
     onImportFile: () -> Unit,
     onDeleteFile: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var selectedTab by remember { mutableIntStateOf(0) }
+    val symbols = remember(activeFile?.relativePath, activeFile?.content) {
+        if (activeFile != null && !activeFile.isBinary) {
+            CodeStructureExtractor.extract(activeFile.content, activeFile.language)
+        } else {
+            emptyList()
+        }
+    }
+
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = modifier,
@@ -1280,11 +1717,11 @@ private fun ProjectExplorerPane(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text("Project Files", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                Text("Project", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 IconButton(onClick = onImportFile, modifier = Modifier.testTag("explorer_import_file_button")) {
                     Icon(Icons.Default.UploadFile, contentDescription = "Upload or import file")
                 }
@@ -1292,71 +1729,168 @@ private fun ProjectExplorerPane(
                     Icon(Icons.Default.CreateNewFolder, contentDescription = "New file")
                 }
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-            LazyColumn(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(8.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+            TabRow(
+                selectedTabIndex = selectedTab,
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
             ) {
-                items(files, key = { it.relativePath }) { file ->
-                    val isSelected = file.relativePath == activeFilePath
-                    val isProtected = file.relativePath == "AndroidManifest.xml"
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(
-                                color = if (isSelected) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surfaceContainerLow
+                Tab(
+                    selected = selectedTab == 0,
+                    onClick = { selectedTab = 0 },
+                    text = { Text("Files (${files.size})", style = MaterialTheme.typography.labelSmall) },
+                )
+                Tab(
+                    selected = selectedTab == 1,
+                    onClick = { selectedTab = 1 },
+                    text = { Text("Structure (${symbols.size})", style = MaterialTheme.typography.labelSmall) },
+                    modifier = Modifier.testTag("explorer_structure_tab"),
+                )
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            if (selectedTab == 0) {
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    items(files, key = { it.relativePath }) { file ->
+                        val isSelected = file.relativePath == activeFilePath
+                        val isProtected = file.relativePath == "AndroidManifest.xml" || file.relativePath == "app/src/main/AndroidManifest.xml"
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    color = if (isSelected) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceContainerLow
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                )
+                                .clickable { onSelectFile(file.relativePath) }
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = when (file.language) {
+                                    FileLanguage.JAVA, FileLanguage.KOTLIN -> Icons.Default.Code
+                                    else -> Icons.Default.Description
                                 },
-                                shape = RoundedCornerShape(8.dp),
+                                contentDescription = null,
+                                tint = when (file.language) {
+                                    FileLanguage.JAVA, FileLanguage.KOTLIN -> MaterialTheme.colorScheme.primary
+                                    else -> MaterialTheme.colorScheme.secondary
+                                },
+                                modifier = Modifier.size(18.dp),
                             )
-                            .clickable { onSelectFile(file.relativePath) }
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = file.fileName,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = file.relativePath,
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            if (!isProtected) {
+                                IconButton(
+                                    onClick = { onDeleteFile(file.relativePath) },
+                                    modifier = Modifier.size(28.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Default.DeleteOutline,
+                                        contentDescription = "Delete ${file.fileName}",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (symbols.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Icon(
-                            imageVector = when (file.language) {
-                                FileLanguage.JAVA, FileLanguage.KOTLIN -> Icons.Default.Code
-                                else -> Icons.Default.Description
-                            },
-                            contentDescription = null,
-                            tint = when (file.language) {
-                                FileLanguage.JAVA, FileLanguage.KOTLIN -> MaterialTheme.colorScheme.primary
-                                else -> MaterialTheme.colorScheme.secondary
-                            },
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = file.fileName,
-                                style = MaterialTheme.typography.labelLarge,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(
+                                Icons.Default.AccountTree,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Text(
-                                text = file.relativePath,
-                                fontFamily = JetBrainsMonoFontFamily,
-                                style = MaterialTheme.typography.labelSmall,
+                                text = "Open a Kotlin, Java, XML, or JSON file to browse its symbols.",
+                                style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        if (!isProtected) {
-                            IconButton(
-                                onClick = { onDeleteFile(file.relativePath) },
-                                modifier = Modifier.size(28.dp),
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        items(symbols, key = { "${it.line}_${it.name}" }) { sym ->
+                            Surface(
+                                onClick = { onJumpToSymbolLine(sym.line) },
+                                color = MaterialTheme.colorScheme.surfaceContainer,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth(),
                             ) {
-                                Icon(
-                                    Icons.Default.DeleteOutline,
-                                    contentDescription = "Delete ${file.fileName}",
-                                    modifier = Modifier.size(16.dp),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Surface(
+                                        color = when (sym.kind) {
+                                            SymbolKind.CLASS, SymbolKind.INTERFACE, SymbolKind.ENUM -> MaterialTheme.colorScheme.primaryContainer
+                                            SymbolKind.METHOD -> MaterialTheme.colorScheme.secondaryContainer
+                                            else -> MaterialTheme.colorScheme.surfaceContainerHigh
+                                        },
+                                        shape = RoundedCornerShape(6.dp),
+                                    ) {
+                                        Text(
+                                            text = sym.kind.badge,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                        )
+                                    }
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = sym.name,
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        Text(
+                                            text = "${sym.detail} • Ln ${sym.line}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

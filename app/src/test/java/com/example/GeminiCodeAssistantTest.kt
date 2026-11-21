@@ -851,4 +851,91 @@ class GeminiCodeAssistantTest {
         assertTrue(extracted.contains("Provider returned error"))
         assertTrue(extracted.contains("No endpoints found matching ZDR"))
     }
+
+    @Test
+    fun openAiAndClaudeModelResolutionResponsesRoutingAndAdaptationWorkCleanly() {
+        assertTrue(com.example.ai.ProviderApiClient.isResponsesOnlyOpenAiModel("o3-pro"))
+        assertTrue(com.example.ai.ProviderApiClient.isResponsesOnlyOpenAiModel("openai/codex-mini-latest"))
+        assertTrue(com.example.ai.ProviderApiClient.isResponsesOnlyOpenAiModel("gpt-5-codex"))
+        assertFalse(com.example.ai.ProviderApiClient.isResponsesOnlyOpenAiModel("gpt-4o"))
+        assertFalse(com.example.ai.ProviderApiClient.isResponsesOnlyOpenAiModel("gpt-5-mini"))
+
+        val liveOpenAi = listOf(
+            com.example.ai.AiModelOption("gpt-4o", AiProvider.OPENAI, "GPT-4o", "Live", "", isLiveFetched = true),
+            com.example.ai.AiModelOption("gpt-5-mini", AiProvider.OPENAI, "GPT-5 Mini", "Live", "", isLiveFetched = true),
+        )
+        assertEquals("gpt-4o", AiModelsCatalog.resolveOpenAiModelId("gpt-4o", liveOpenAi))
+        assertEquals("gpt-5-mini", AiModelsCatalog.resolveOpenAiModelId("gpt-6-astra", liveOpenAi))
+
+        val liveClaude = listOf(
+            com.example.ai.AiModelOption("claude-sonnet-4-20250514", AiProvider.CLAUDE, "Claude Sonnet 4", "Live", "", isLiveFetched = true),
+            com.example.ai.AiModelOption("claude-3-7-sonnet-20250219", AiProvider.CLAUDE, "Claude 3.7 Sonnet", "Live", "", isLiveFetched = true),
+        )
+        assertEquals("claude-sonnet-4-20250514", AiModelsCatalog.resolveClaudeModelId("claude-sonnet-4", liveClaude))
+        assertEquals("claude-sonnet-4-20250514", AiModelsCatalog.resolveClaudeModelId("claude-opus-5-5", liveClaude))
+        val liveWithOpus = liveClaude + com.example.ai.AiModelOption(
+            "claude-opus-4-20250514", AiProvider.CLAUDE, "Claude Opus 4", "Live", "", isLiveFetched = true,
+        )
+        assertEquals("claude-opus-4-20250514", AiModelsCatalog.resolveClaudeModelId("claude-opus-4", liveWithOpus))
+
+        val reasoningReq = com.example.ai.ProviderApiClient.buildOpenAiCompatibleRequestBody(
+            modelId = "o4-mini",
+            adaptedMessages = org.json.JSONArray().put(JSONObject().put("role", "user").put("content", "Hi")),
+            tools = org.json.JSONArray(),
+            thinkingMode = AiThinkingMode.FAST,
+            isOpenRouter = false,
+            temperature = 0.9f,
+        )
+        assertFalse(reasoningReq.has("temperature"))
+        assertEquals("low", reasoningReq.getString("reasoning_effort"))
+
+        val claudeInitial = GeminiCodeAssistant.ClaudeModelCapabilities(maxTokens = 8192)
+        val claudeMaxCap = GeminiCodeAssistant.nextClaudeAdaptation(
+            current = claudeInitial,
+            httpCode = 400,
+            errorMessage = "max_tokens: 8192 > maximum of 4096",
+            hasImages = false,
+        )
+        assertEquals(4096, claudeMaxCap?.maxTokens)
+
+        val claudeNoTools = GeminiCodeAssistant.nextClaudeAdaptation(
+            current = claudeInitial,
+            httpCode = 400,
+            errorMessage = "tools input_schema invalid for legacy model",
+            hasImages = false,
+        )
+        assertFalse(claudeNoTools?.useNativeTools ?: true)
+    }
+
+    @Test
+    fun roleAgentThreadsAndCustomSystemTempPersistRoundTrip() = kotlinx.coroutines.runBlocking {
+        val dir = java.nio.file.Files.createTempDirectory("role_agent_store_test").toFile()
+        try {
+            val fixer = com.example.ai.ProjectChatStore.createRoleAgentThread(
+                role = com.example.ai.AgentRole.ERROR_FIXER,
+                providerName = AiProvider.CLAUDE.name,
+                modelId = "claude-sonnet-4-5",
+            ).copy(
+                customSystemInstruction = "Fix all lint and javac errors.",
+                temperature = 0.2f,
+            )
+            val watcher = com.example.ai.ProjectChatStore.createRoleAgentThread(
+                role = com.example.ai.AgentRole.GITHUB_WATCHER,
+                providerName = AiProvider.OPENAI.name,
+                modelId = "gpt-5-mini",
+            )
+            com.example.ai.ProjectChatStore.saveThreads(dir, listOf(fixer, watcher))
+            val loaded = com.example.ai.ProjectChatStore.loadThreads(dir)
+            assertEquals(2, loaded.size)
+            assertEquals(com.example.ai.AgentRole.ERROR_FIXER, loaded[0].agentRole)
+            assertEquals(AiProvider.CLAUDE.name, loaded[0].providerName)
+            assertEquals("claude-sonnet-4-5", loaded[0].modelId)
+            assertEquals("Fix all lint and javac errors.", loaded[0].customSystemInstruction)
+            assertEquals(0.2f, loaded[0].temperature ?: -1f, 0.01f)
+            assertTrue(loaded[0].isPinnedAgent)
+            assertEquals(com.example.ai.AgentRole.GITHUB_WATCHER, loaded[1].agentRole)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
 }

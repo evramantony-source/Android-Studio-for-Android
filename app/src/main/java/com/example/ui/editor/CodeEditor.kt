@@ -25,8 +25,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.FormatIndentIncrease
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -71,6 +73,7 @@ fun CodeEditor(
     onJumpHandled: () -> Unit,
     onContentChange: (String) -> Unit,
     modifier: Modifier = Modifier,
+    onRequestFixWithAi: (() -> Unit)? = null,
 ) {
     val syntaxColors = LocalSyntaxColors.current
     var textValue by remember(filePath) {
@@ -79,7 +82,7 @@ fun CodeEditor(
     val undoStack = remember(filePath) { mutableListOf<TextFieldValue>() }
     val redoStack = remember(filePath) { mutableListOf<TextFieldValue>() }
 
-    // Keep editor synchronized when external actions (e.g. Gemini Apply Code) modify the file
+    // Keep editor synchronized when external actions modify the file
     LaunchedEffect(content) {
         if (content != textValue.text) {
             undoStack.add(textValue)
@@ -95,6 +98,9 @@ fun CodeEditor(
     var showFindBar by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
     var replaceQuery by remember { mutableStateOf("") }
+    var useRegexFind by remember { mutableStateOf(false) }
+    var showGoToLineBar by remember { mutableStateOf(false) }
+    var goToLineInput by remember { mutableStateOf("") }
 
     val verticalScroll = rememberScrollState()
     val horizontalScroll = rememberScrollState()
@@ -154,7 +160,7 @@ fun CodeEditor(
             .fillMaxSize()
             .background(syntaxColors.editorBackground),
     ) {
-        // Collapsible Find & Replace bar
+        // Collapsible Find & Replace bar (supports Plain Text & Regex)
         AnimatedVisibility(visible = showFindBar) {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceContainer,
@@ -173,16 +179,30 @@ fun CodeEditor(
                         OutlinedTextField(
                             value = findQuery,
                             onValueChange = { findQuery = it },
-                            placeholder = { Text("Find...", style = MaterialTheme.typography.bodyMedium) },
+                            placeholder = {
+                                Text(
+                                    if (useRegexFind) "Regex pattern..." else "Find...",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.labelMedium,
                             modifier = Modifier
                                 .weight(1f)
                                 .testTag("editor_find_input"),
                         )
-                        val matchCount = remember(findQuery, textValue.text) {
+                        FilterChip(
+                            selected = useRegexFind,
+                            onClick = { useRegexFind = !useRegexFind },
+                            label = { Text(".*", style = MaterialTheme.typography.labelSmall) },
+                            modifier = Modifier.testTag("editor_regex_toggle"),
+                        )
+                        val matchCount = remember(findQuery, useRegexFind, textValue.text) {
                             if (findQuery.isEmpty()) 0
-                            else Regex(Regex.escape(findQuery)).findAll(textValue.text).count()
+                            else runCatching {
+                                val rx = if (useRegexFind) Regex(findQuery) else Regex(Regex.escape(findQuery))
+                                rx.findAll(textValue.text).count()
+                            }.getOrDefault(0)
                         }
                         Text(
                             text = "$matchCount",
@@ -193,12 +213,13 @@ fun CodeEditor(
                             onClick = {
                                 if (findQuery.isNotEmpty()) {
                                     val from = textValue.selection.max.coerceIn(0, textValue.text.length)
-                                    val idx = textValue.text.indexOf(findQuery, from)
-                                        .takeIf { it >= 0 }
-                                        ?: textValue.text.indexOf(findQuery)
-                                    if (idx >= 0) {
+                                    val rx = runCatching {
+                                        if (useRegexFind) Regex(findQuery) else Regex(Regex.escape(findQuery))
+                                    }.getOrNull()
+                                    val hit = rx?.find(textValue.text, from) ?: rx?.find(textValue.text, 0)
+                                    if (hit != null) {
                                         textValue = textValue.copy(
-                                            selection = TextRange(idx, idx + findQuery.length),
+                                            selection = TextRange(hit.range.first, hit.range.last + 1),
                                         )
                                     }
                                 }
@@ -225,13 +246,62 @@ fun CodeEditor(
                         TextButton(
                             onClick = {
                                 if (findQuery.isNotEmpty()) {
-                                    val replaced = textValue.text.replace(findQuery, replaceQuery)
-                                    applyEdit(TextFieldValue(replaced, TextRange(0)))
+                                    val replaced = runCatching {
+                                        if (useRegexFind) {
+                                            Regex(findQuery).replace(textValue.text, replaceQuery)
+                                        } else {
+                                            textValue.text.replace(findQuery, replaceQuery)
+                                        }
+                                    }.getOrNull()
+                                    if (replaced != null) {
+                                        applyEdit(TextFieldValue(replaced, TextRange(0)))
+                                    }
                                 }
                             },
                         ) {
                             Text("Replace All")
                         }
+                    }
+                }
+            }
+        }
+
+        // Collapsible Go-to-Line bar
+        AnimatedVisibility(visible = showGoToLineBar) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                tonalElevation = 2.dp,
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedTextField(
+                        value = goToLineInput,
+                        onValueChange = { goToLineInput = it.filter { ch -> ch.isDigit() } },
+                        placeholder = { Text("Line (1-${lines.size})", style = MaterialTheme.typography.bodyMedium) },
+                        singleLine = true,
+                        textStyle = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("editor_goto_line_input"),
+                    )
+                    TextButton(
+                        onClick = {
+                            val target = goToLineInput.toIntOrNull()?.coerceIn(1, lines.size) ?: return@TextButton
+                            val offset = lineStartOffset(textValue.text, target)
+                            textValue = textValue.copy(selection = TextRange(offset))
+                            showGoToLineBar = false
+                        },
+                        modifier = Modifier.testTag("editor_goto_line_confirm"),
+                    ) {
+                        Text("Jump")
+                    }
+                    IconButton(onClick = { showGoToLineBar = false }) {
+                        Icon(Icons.Default.Close, contentDescription = "Close go-to-line bar")
                     }
                 }
             }
@@ -245,8 +315,8 @@ fun CodeEditor(
             color = syntaxColors.plainText,
         )
 
-        val visualTransformation = remember(language, syntaxColors) {
-            CodeSyntaxVisualTransformation(language, syntaxColors)
+        val visualTransformation = remember(language, syntaxColors, filePath) {
+            CodeSyntaxVisualTransformation(language, syntaxColors, filePath)
         }
 
         Box(
@@ -256,55 +326,57 @@ fun CodeEditor(
                 .verticalScroll(verticalScroll),
         ) {
             Row(modifier = Modifier.fillMaxWidth()) {
-                // Line Number Gutter
-                Column(
-                    modifier = Modifier
-                        .width(48.dp)
-                        .background(syntaxColors.gutterBackground)
-                        .padding(vertical = 12.dp),
-                    horizontalAlignment = Alignment.End,
-                ) {
-                    lines.forEachIndexed { index, _ ->
-                        val lineNum = index + 1
-                        val isError = lineNum in errorLineNumbers
-                        val isActive = lineNum == currentLine
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(lineHeightDp)
-                                .background(
-                                    when {
-                                        isError -> syntaxColors.errorLineBackground
-                                        isActive -> syntaxColors.activeLineBackground
-                                        else -> syntaxColors.gutterBackground
-                                    },
-                                )
-                                .padding(horizontal = 6.dp),
-                            contentAlignment = Alignment.CenterEnd,
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(3.dp),
+                // Line Number Gutter (optional via settings.showLineNumbers)
+                if (settings.showLineNumbers) {
+                    Column(
+                        modifier = Modifier
+                            .width(48.dp)
+                            .background(syntaxColors.gutterBackground)
+                            .padding(vertical = 12.dp),
+                        horizontalAlignment = Alignment.End,
+                    ) {
+                        lines.forEachIndexed { index, _ ->
+                            val lineNum = index + 1
+                            val isError = lineNum in errorLineNumbers
+                            val isActive = lineNum == currentLine
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(lineHeightDp)
+                                    .background(
+                                        when {
+                                            isError -> syntaxColors.errorLineBackground
+                                            isActive -> syntaxColors.activeLineBackground
+                                            else -> syntaxColors.gutterBackground
+                                        },
+                                    )
+                                    .padding(horizontal = 6.dp),
+                                contentAlignment = Alignment.CenterEnd,
                             ) {
-                                if (isError) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(6.dp)
-                                            .clip(CircleShape)
-                                            .background(MaterialTheme.colorScheme.error),
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                                ) {
+                                    if (isError) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(6.dp)
+                                                .clip(CircleShape)
+                                                .background(MaterialTheme.colorScheme.error),
+                                        )
+                                    }
+                                    Text(
+                                        text = "$lineNum",
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        fontSize = (settings.fontSizeSp - 2).coerceAtLeast(9).sp,
+                                        color = when {
+                                            isError -> MaterialTheme.colorScheme.error
+                                            isActive -> MaterialTheme.colorScheme.primary
+                                            else -> syntaxColors.gutterText
+                                        },
+                                        fontWeight = if (isActive || isError) FontWeight.SemiBold else FontWeight.Normal,
                                     )
                                 }
-                                Text(
-                                    text = "$lineNum",
-                                    fontFamily = JetBrainsMonoFontFamily,
-                                    fontSize = (settings.fontSizeSp - 2).coerceAtLeast(9).sp,
-                                    color = when {
-                                        isError -> MaterialTheme.colorScheme.error
-                                        isActive -> MaterialTheme.colorScheme.primary
-                                        else -> syntaxColors.gutterText
-                                    },
-                                    fontWeight = if (isActive || isError) FontWeight.SemiBold else FontWeight.Normal,
-                                )
                             }
                         }
                     }
@@ -347,36 +419,70 @@ fun CodeEditor(
         }
 
         // Compact Editor Status Strip
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceContainer,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 3.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+        if (settings.showStatusBar) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(
-                    text = "${language.name} • ${lines.size} lines",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                val cursorOffset = textValue.selection.start.coerceIn(0, textValue.text.length)
-                val lineStart = textValue.text.lastIndexOf('\n', (cursorOffset - 1).coerceAtLeast(0))
-                val colNum = if (lineStart < 0) cursorOffset + 1 else cursorOffset - lineStart
-                Text(
-                    text = "Ln $currentLine, Col $colNum",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (currentLine in errorLineNumbers) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.primary
-                    },
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 3.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = "${language.name} • ${lines.size} lines",
+                            fontFamily = JetBrainsMonoFontFamily,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (errorLineNumbers.isNotEmpty() && onRequestFixWithAi != null) {
+                            Surface(
+                                onClick = onRequestFixWithAi,
+                                color = MaterialTheme.colorScheme.errorContainer,
+                                shape = RoundedCornerShape(6.dp),
+                                modifier = Modifier.testTag("editor_fix_with_ai_chip"),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Default.AutoFixHigh,
+                                        contentDescription = "Fix file errors with Error Agent",
+                                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.size(13.dp),
+                                    )
+                                    Text(
+                                        text = "Fix ${errorLineNumbers.size} error(s)",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    val cursorOffset = textValue.selection.start.coerceIn(0, textValue.text.length)
+                    val lineStart = textValue.text.lastIndexOf('\n', (cursorOffset - 1).coerceAtLeast(0))
+                    val colNum = if (lineStart < 0) cursorOffset + 1 else cursorOffset - lineStart
+                    Text(
+                        text = "Ln $currentLine, Col $colNum",
+                        fontFamily = JetBrainsMonoFontFamily,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (currentLine in errorLineNumbers) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        },
+                    )
+                }
             }
         }
 
@@ -427,6 +533,12 @@ fun CodeEditor(
                     modifier = Modifier.testTag("editor_find_button"),
                 ) {
                     Icon(Icons.Default.Search, contentDescription = "Find and replace")
+                }
+                TextButton(
+                    onClick = { showGoToLineBar = !showGoToLineBar },
+                    modifier = Modifier.testTag("editor_goto_line_button"),
+                ) {
+                    Text(":Ln", fontFamily = JetBrainsMonoFontFamily, style = MaterialTheme.typography.labelMedium)
                 }
                 IconButton(
                     onClick = {

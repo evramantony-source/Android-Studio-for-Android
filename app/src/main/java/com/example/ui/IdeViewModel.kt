@@ -8,6 +8,7 @@ import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ai.AgentRole
 import com.example.ai.AgentToolResult
 import com.example.ai.AiModelOption
 import com.example.ai.AiModelsCatalog
@@ -48,6 +49,7 @@ import com.example.model.ProjectTemplate
 import com.example.model.ReleaseSigningConfig
 import java.io.ByteArrayOutputStream
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -59,6 +61,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -68,7 +72,10 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = ProjectRepository(application)
     private val apkBuilder = OfflineApkBuilder(application)
-    private val geminiAssistant = GeminiCodeAssistant()
+    private val assistants = ConcurrentHashMap<String, GeminiCodeAssistant>()
+    private val aiJobs = ConcurrentHashMap<String, Job>()
+    private val assistantCollectors = ConcurrentHashMap<String, Pair<Job, Job>>()
+    private val fileWriteMutex = Mutex()
 
     private val _projects = MutableStateFlow<List<ProjectMetadata>>(emptyList())
     val projects: StateFlow<List<ProjectMetadata>> = _projects.asStateFlow()
@@ -237,13 +244,63 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         initialValue = GEMINI_MODEL_ID,
     )
 
-    val aiMessages: StateFlow<List<ChatMessage>> = geminiAssistant.messages
-    val aiState: StateFlow<AiUiState> = geminiAssistant.uiState
+    private val _aiMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
+    val aiMessages: StateFlow<List<ChatMessage>> = _aiMessages.asStateFlow()
+
+    private val _aiState = MutableStateFlow<AiUiState>(AiUiState.Idle)
+    val aiState: StateFlow<AiUiState> = _aiState.asStateFlow()
+
+    private val _threadMessagesMap = MutableStateFlow<Map<String, List<ChatMessage>>>(emptyMap())
+    val threadMessagesMap: StateFlow<Map<String, List<ChatMessage>>> = _threadMessagesMap.asStateFlow()
+
+    private val _threadUiStates = MutableStateFlow<Map<String, AiUiState>>(emptyMap())
+    val threadUiStates: StateFlow<Map<String, AiUiState>> = _threadUiStates.asStateFlow()
+
+    private val _runningThreadIds = MutableStateFlow<Set<String>>(emptySet())
+    val runningThreadIds: StateFlow<Set<String>> = _runningThreadIds.asStateFlow()
+
+    private val _terminalLines = MutableStateFlow(
+        listOf(
+            "Android Studio Workspace Console — type `help` for commands (build, ls, grep, git status, cat).",
+        ),
+    )
+    val terminalLines: StateFlow<List<String>> = _terminalLines.asStateFlow()
 
     private var saveJob: Job? = null
-    private var aiJob: Job? = null
+
+    private fun assistantFor(threadId: String): GeminiCodeAssistant {
+        return assistants.getOrPut(threadId) {
+            GeminiCodeAssistant().also { inst ->
+                val initialMsgs = _chatThreads.value.find { it.id == threadId }?.messages.orEmpty()
+                if (initialMsgs.isNotEmpty()) inst.setMessages(initialMsgs)
+                val msgJob = viewModelScope.launch {
+                    inst.messages.collect { msgs ->
+                        _threadMessagesMap.value = _threadMessagesMap.value + (threadId to msgs)
+                        if (_activeThreadId.value == threadId) {
+                            _aiMessages.value = msgs
+                        }
+                    }
+                }
+                val stateJob = viewModelScope.launch {
+                    inst.uiState.collect { st ->
+                        _threadUiStates.value = _threadUiStates.value + (threadId to st)
+                        if (st is AiUiState.Streaming) {
+                            _runningThreadIds.value = _runningThreadIds.value + threadId
+                        } else {
+                            _runningThreadIds.value = _runningThreadIds.value - threadId
+                        }
+                        if (_activeThreadId.value == threadId) {
+                            _aiState.value = st
+                        }
+                    }
+                }
+                assistantCollectors[threadId] = msgJob to stateJob
+            }
+        }
+    }
 
     init {
+        assistantFor("main")
         viewModelScope.launch {
             val startMs = System.currentTimeMillis()
             try {
@@ -289,6 +346,24 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                         val otherProviders = _liveModels.value.filter { it.provider != AiProvider.OPENROUTER }
                         _liveModels.value = otherProviders + fetchedOr
                         autoHealUnavailableOpenRouterModel(fetchedOr, explicitApiKey = savedOrKey)
+                    }
+                }
+
+                val savedOpenAiKey = savedKeys[AiProvider.OPENAI].orEmpty()
+                if (savedOpenAiKey.isNotBlank()) {
+                    val fetchedOpenAi = AiModelsCatalog.fetchLiveModels(AiProvider.OPENAI, savedOpenAiKey).getOrNull().orEmpty()
+                    if (fetchedOpenAi.isNotEmpty()) {
+                        val otherProviders = _liveModels.value.filter { it.provider != AiProvider.OPENAI }
+                        _liveModels.value = otherProviders + fetchedOpenAi
+                    }
+                }
+
+                val savedClaudeKey = savedKeys[AiProvider.CLAUDE].orEmpty()
+                if (savedClaudeKey.isNotBlank()) {
+                    val fetchedClaude = AiModelsCatalog.fetchLiveModels(AiProvider.CLAUDE, savedClaudeKey).getOrNull().orEmpty()
+                    if (fetchedClaude.isNotEmpty()) {
+                        val otherProviders = _liveModels.value.filter { it.provider != AiProvider.CLAUDE }
+                        _liveModels.value = otherProviders + fetchedClaude
                     }
                 }
             }
@@ -395,8 +470,22 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun clearAllThreadRuntimeState() {
+        aiJobs.values.forEach { it.cancel() }
+        aiJobs.clear()
+        assistantCollectors.values.forEach { (mJob, sJob) ->
+            mJob.cancel()
+            sJob.cancel()
+        }
+        assistantCollectors.clear()
+        assistants.clear()
+        _runningThreadIds.value = emptySet()
+        _threadMessagesMap.value = emptyMap()
+        _threadUiStates.value = emptyMap()
+    }
+
     fun openProject(meta: ProjectMetadata) {
-        aiJob?.cancel()
+        clearAllThreadRuntimeState()
         viewModelScope.launch {
             _openingProjectName.value = meta.name
             try {
@@ -422,12 +511,20 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         _activeFilePath.value = initialTabs.firstOrNull()
         _lastBuildResult.value = null
         _liveLogs.value = emptyList()
+        _terminalLines.value = listOf(
+            "Android Studio Workspace [${meta.name}] — ${files.size} file(s) loaded. Type `help` for commands.",
+        )
         clearGitHubWorkspaceCaches()
 
         _chatThreads.value = threads
         _activeThreadId.value = firstThread.id
         _splitSideThreadId.value = threads.firstOrNull { !it.isMain }?.id
-        geminiAssistant.setMessages(firstThread.messages)
+        threads.forEach { t ->
+            assistantFor(t.id).setMessages(t.messages)
+            _threadMessagesMap.value = _threadMessagesMap.value + (t.id to t.messages)
+        }
+        _aiMessages.value = firstThread.messages
+        _aiState.value = AiUiState.Idle
         _activeProject.value = meta
 
         // Defer SHA-256 diffing so the IDE workspace opens immediately
@@ -839,24 +936,118 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectChatThread(threadId: String) {
         if (_activeThreadId.value == threadId) return
-        persistActiveThreadMessages()
+        persistThreadMessages(_activeThreadId.value)
         val target = _chatThreads.value.find { it.id == threadId } ?: return
         _activeThreadId.value = target.id
-        geminiAssistant.setMessages(target.messages)
+        val inst = assistantFor(target.id)
+        if (target.id !in _runningThreadIds.value && inst.messages.value.isEmpty() && target.messages.isNotEmpty()) {
+            inst.setMessages(target.messages)
+        }
+        _aiMessages.value = inst.messages.value
+        _aiState.value = inst.uiState.value
     }
 
-    fun createSideChat(title: String = "") {
-        persistActiveThreadMessages()
+    fun createSideChat(
+        title: String = "",
+        provider: AiProvider = activeProvider.value,
+        modelId: String = providerModels.value[provider] ?: provider.defaultModelId,
+        switchToThread: Boolean = true,
+    ): String {
+        persistThreadMessages(_activeThreadId.value)
         val sideCount = _chatThreads.value.count { !it.isMain } + 1
-        val thread = ProjectChatStore.createSideThread(sideCount, title)
+        val thread = ProjectChatStore.createSideThread(
+            index = sideCount,
+            customTitle = title,
+            providerName = provider.name,
+            modelId = modelId,
+        )
         val updated = _chatThreads.value + thread
         _chatThreads.value = updated
-        _activeThreadId.value = thread.id
+        assistantFor(thread.id)
+        if (switchToThread) {
+            _activeThreadId.value = thread.id
+            _aiMessages.value = emptyList()
+            _aiState.value = AiUiState.Idle
+        }
         if (_splitSideThreadId.value == null) {
             _splitSideThreadId.value = thread.id
         }
-        geminiAssistant.setMessages(emptyList())
         saveThreadsToDisk(updated)
+        return thread.id
+    }
+
+    fun ensureRoleAgentThread(
+        role: AgentRole,
+        provider: AiProvider? = null,
+        modelId: String? = null,
+    ): String {
+        val existing = _chatThreads.value.find { it.agentRole == role }
+        if (existing != null) return existing.id
+        val resolvedProv = provider ?: activeProvider.value
+        val resolvedModel = modelId ?: (providerModels.value[resolvedProv] ?: resolvedProv.defaultModelId)
+        val created = ProjectChatStore.createRoleAgentThread(
+            role = role,
+            providerName = resolvedProv.name,
+            modelId = resolvedModel,
+        )
+        val updated = _chatThreads.value + created
+        _chatThreads.value = updated
+        assistantFor(created.id)
+        saveThreadsToDisk(updated)
+        return created.id
+    }
+
+    fun updateThreadProviderAndModel(
+        threadId: String,
+        provider: AiProvider,
+        modelId: String,
+    ) {
+        val cleanModel = AiModelsCatalog.normalizeModelId(provider, modelId)
+        val updated = _chatThreads.value.map { t ->
+            if (t.id == threadId) {
+                t.copy(
+                    providerName = provider.name,
+                    modelId = cleanModel,
+                    updatedAtMillis = System.currentTimeMillis(),
+                )
+            } else {
+                t
+            }
+        }
+        _chatThreads.value = updated
+        saveThreadsToDisk(updated)
+    }
+
+    fun updateThreadSystemAndTemperature(
+        threadId: String,
+        systemInstruction: String,
+        temperature: Float,
+    ) {
+        val updated = _chatThreads.value.map { t ->
+            if (t.id == threadId) {
+                t.copy(
+                    customSystemInstruction = systemInstruction.trim(),
+                    temperature = temperature.coerceIn(0f, 1.5f),
+                    updatedAtMillis = System.currentTimeMillis(),
+                )
+            } else {
+                t
+            }
+        }
+        _chatThreads.value = updated
+        saveThreadsToDisk(updated)
+    }
+
+    fun resolveProviderAndModelForThread(thread: ProjectChatThread?): Pair<AiProvider, String> {
+        val prov = thread?.providerName
+            ?.takeIf { it.isNotBlank() }
+            ?.let { runCatching { AiProvider.valueOf(it) }.getOrNull() }
+            ?: activeProvider.value
+        val mdl = thread?.modelId
+            ?.takeIf { it.isNotBlank() }
+            ?.let { AiModelsCatalog.normalizeModelId(prov, it) }
+            ?: AiModelsCatalog.normalizeModelId(prov, providerModels.value[prov])
+        return prov to mdl
     }
 
     fun renameChatThread(threadId: String, newTitle: String) {
@@ -872,12 +1063,17 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteChatThread(threadId: String) {
         val target = _chatThreads.value.find { it.id == threadId } ?: return
         if (target.isMain) return
+        cancelThread(threadId)
+        assistantCollectors.remove(threadId)?.let { (m, s) -> m.cancel(); s.cancel() }
+        assistants.remove(threadId)
         val updated = _chatThreads.value.filterNot { it.id == threadId }
         _chatThreads.value = updated
         if (_activeThreadId.value == threadId) {
             val fallback = updated.first()
             _activeThreadId.value = fallback.id
-            geminiAssistant.setMessages(fallback.messages)
+            val inst = assistantFor(fallback.id)
+            _aiMessages.value = inst.messages.value
+            _aiState.value = inst.uiState.value
         }
         if (_splitSideThreadId.value == threadId) {
             _splitSideThreadId.value = updated.firstOrNull { !it.isMain }?.id
@@ -1609,40 +1805,64 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun askGemini(prompt: String) {
+        askGeminiInThread(_activeThreadId.value, prompt)
+    }
+
+    fun askGeminiInThread(
+        threadId: String,
+        prompt: String,
+        attachmentsOverride: List<AiAttachment>? = null,
+    ) {
         val project = _activeProject.value ?: return
         val active = _projectFiles.value.find { it.relativePath == _activeFilePath.value }
         val diagnostics = _lastBuildResult.value?.diagnostics.orEmpty()
-        val provider = activeProvider.value
+        val threadMeta = _chatThreads.value.find { it.id == threadId }
+        val (provider, modelId) = resolveProviderAndModelForThread(threadMeta)
         val thinkingMode = aiThinkingMode.value
         val apiKey = providerApiKeys.value[provider].orEmpty()
-        val modelId = AiModelsCatalog.normalizeModelId(provider, providerModels.value[provider])
-        val attachmentsSnapshot = _pendingAiAttachments.value
-        _pendingAiAttachments.value = emptyList()
+        val attachmentsSnapshot = attachmentsOverride ?: if (threadId == _activeThreadId.value) {
+            val snap = _pendingAiAttachments.value
+            _pendingAiAttachments.value = emptyList()
+            snap
+        } else {
+            emptyList()
+        }
         val githubConnected = githubToken.value.isNotBlank() || project.githubLink != null
         val verifiedIds = _liveModels.value
             .filter { it.provider == provider }
             .map { it.id }
             .toSet()
-        val threadIdAtStart = _activeThreadId.value
-        val previousJob = aiJob
+        val assistant = assistantFor(threadId)
+        val settingsSnap = editorSettings.value
+        val systemInstructionToUse = threadMeta?.customSystemInstruction?.takeIf { it.isNotBlank() }
+            ?: settingsSnap.customSystemInstruction
+        val tempToUse = threadMeta?.temperature ?: settingsSnap.aiTemperature
+        val agentRole = threadMeta?.agentRole ?: AgentRole.GENERAL
 
-        aiJob = viewModelScope.launch {
+        // Cancel only any prior run on THIS specific thread; other side/role agents continue running concurrently!
+        val previousJob = aiJobs[threadId]
+        val newJob = viewModelScope.launch {
             previousJob?.cancelAndJoin()
             val freshKey = runCatching { repository.providerApiKeys.first()[provider].orEmpty() }
                 .getOrDefault("")
                 .ifBlank { apiKey }
-            val freshModel = AiModelsCatalog.normalizeModelId(
+            val freshModel = threadMeta?.modelId?.takeIf { it.isNotBlank() }?.let {
+                AiModelsCatalog.normalizeModelId(provider, it)
+            } ?: AiModelsCatalog.normalizeModelId(
                 provider,
                 runCatching { repository.providerModels.first()[provider] }.getOrNull() ?: modelId,
             )
             val executor = createToolExecutor(project.id, project.packageName)
             val providerLiveModels = _liveModels.value.filter { it.provider == provider }
-            geminiAssistant.askGemini(
+            assistant.askGemini(
                 userPrompt = prompt,
                 apiKey = freshKey,
                 modelId = freshModel,
                 provider = provider,
                 thinkingMode = thinkingMode,
+                agentRole = agentRole,
+                customSystemInstruction = systemInstructionToUse,
+                temperature = tempToUse,
                 projectName = project.name,
                 packageName = project.packageName,
                 projectLanguage = project.language,
@@ -1656,11 +1876,15 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 githubConnected = githubConnected,
                 verifiedLiveModelIds = verifiedIds,
                 liveModelOptions = providerLiveModels,
-                shouldPublishToUi = { _activeThreadId.value == threadIdAtStart },
+                shouldPublishToUi = { true },
                 onModelAutoCorrected = { failedModel, workingModel ->
                     viewModelScope.launch {
-                        repository.saveProviderConfig(provider, freshKey, workingModel)
-                        _statusBanner.value = "Switched from unavailable '$failedModel' to working '$workingModel'."
+                        if (threadMeta?.modelId?.isNotBlank() == true) {
+                            updateThreadProviderAndModel(threadId, provider, workingModel)
+                        } else {
+                            repository.saveProviderConfig(provider, freshKey, workingModel)
+                        }
+                        _statusBanner.value = "Switched ${threadMeta?.title ?: "Agent"} from unavailable '$failedModel' to '$workingModel'."
                     }
                 },
                 onUsageRecorded = { usedProvider, usedModel, delta, tools, failed ->
@@ -1670,7 +1894,7 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 },
                 onMessagesChanged = { latestMsgs ->
                     val updated = _chatThreads.value.map { t ->
-                        if (t.id == threadIdAtStart) {
+                        if (t.id == threadId) {
                             t.copy(messages = latestMsgs, updatedAtMillis = System.currentTimeMillis())
                         } else {
                             t
@@ -1681,28 +1905,95 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 },
             )
         }
+        aiJobs[threadId] = newJob
+        newJob.invokeOnCompletion {
+            if (aiJobs[threadId] === newJob) {
+                aiJobs.remove(threadId)
+            }
+        }
+    }
+
+    fun launchRoleAgent(
+        role: AgentRole,
+        customPrompt: String? = null,
+        selectAsActive: Boolean = false,
+    ) {
+        val project = _activeProject.value ?: return
+        val threadId = ensureRoleAgentThread(role)
+        if (selectAsActive) {
+            selectChatThread(threadId)
+            _openAiPanelRequest.value = System.currentTimeMillis()
+        } else if (_splitSideThreadId.value == null) {
+            _splitSideThreadId.value = threadId
+        }
+        val diagnostics = _lastBuildResult.value?.diagnostics.orEmpty()
+        val prompt = customPrompt?.trim()?.takeIf { it.isNotEmpty() } ?: when (role) {
+            AgentRole.FEATURE_BUILDER -> buildString {
+                appendLine("Add an impressive interactive improvement or next feature to ${project.name}.")
+                _activeFilePath.value?.let { appendLine("Currently focused file: $it") }
+                appendLine("Implement cleanly and call build_apk to verify.")
+            }
+            AgentRole.ERROR_FIXER -> buildString {
+                if (diagnostics.isNotEmpty()) {
+                    appendLine("Fix ALL ${diagnostics.size} build diagnostic(s) immediately:")
+                    diagnostics.take(15).forEach { d ->
+                        appendLine("- ${d.severity.name} ${d.filePath}:${d.line}: ${d.message}")
+                    }
+                } else {
+                    appendLine("Inspect ${project.name}, run build_apk, verify there are zero errors or broken references, and fix anything found.")
+                }
+            }
+            AgentRole.GITHUB_WATCHER -> buildString {
+                val link = project.githubLink
+                if (link != null) {
+                    appendLine("Check GitHub repository ${link.fullName} (branch ${link.branch}):")
+                    appendLine("1. Call github_status to check local/remote sync and pending changes.")
+                    appendLine("2. Call github_list_workflow_runs to check latest CI push/build progress.")
+                    appendLine("3. If the latest run failed, call github_get_workflow_logs, summarize the root cause, and prepare/fix it.")
+                } else {
+                    appendLine("Inspect local workspace status via github_status and advise/assist linking or creating a GitHub repository.")
+                }
+            }
+            AgentRole.GENERAL -> "Inspect the workspace and summarize what we should work on next."
+        }
+        askGeminiInThread(threadId, prompt)
     }
 
     fun cancelGemini() {
-        geminiAssistant.cancelByUser()
-        aiJob?.cancel()
-        aiJob = null
-        persistActiveThreadMessages()
+        cancelThread(_activeThreadId.value)
+    }
+
+    fun cancelThread(threadId: String) {
+        assistants[threadId]?.cancelByUser()
+        aiJobs.remove(threadId)?.cancel()
+        persistThreadMessages(threadId)
     }
 
     fun retryLastGeminiPrompt() {
-        val lastPrompt = geminiAssistant.popLastPromptForRetry() ?: return
-        askGemini(lastPrompt)
+        retryThreadPrompt(_activeThreadId.value)
+    }
+
+    fun retryThreadPrompt(threadId: String) {
+        val lastPrompt = assistants[threadId]?.popLastPromptForRetry() ?: return
+        askGeminiInThread(threadId, lastPrompt)
     }
 
     fun clearAiChat() {
-        geminiAssistant.clearConversation()
-        persistActiveThreadMessages()
+        clearThreadChat(_activeThreadId.value)
+    }
+
+    fun clearThreadChat(threadId: String) {
+        assistants[threadId]?.clearConversation()
+        persistThreadMessages(threadId)
     }
 
     private fun persistActiveThreadMessages() {
-        val threadId = _activeThreadId.value
-        val currentMsgs = geminiAssistant.messages.value.map { it.copy(isStreaming = false) }
+        persistThreadMessages(_activeThreadId.value)
+    }
+
+    private fun persistThreadMessages(threadId: String) {
+        val inst = assistants[threadId] ?: return
+        val currentMsgs = inst.messages.value.map { it.copy(isStreaming = false) }
         val updated = _chatThreads.value.map { t ->
             if (t.id == threadId) {
                 t.copy(messages = currentMsgs, updatedAtMillis = System.currentTimeMillis())
@@ -1722,6 +2013,130 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun runTerminalCommand(rawCommand: String) {
+        val project = _activeProject.value
+        val cmd = rawCommand.trim()
+        if (cmd.isEmpty()) return
+        val appendLine: (String) -> Unit = { line ->
+            _terminalLines.value = (_terminalLines.value + line).takeLast(300)
+        }
+        appendLine("$ $cmd")
+        if (cmd == "clear") {
+            _terminalLines.value = listOf("Terminal cleared.")
+            return
+        }
+        if (cmd == "help") {
+            appendLine(
+                """
+                Available commands:
+                  ls [prefix]          - List project files
+                  cat <path>           - Print file contents (first 60 lines)
+                  grep <text>          - Search across project files
+                  touch <path>         - Create an empty/starter file
+                  rm <path>            - Delete a file
+                  build [debug|release|aab] - Run offline APK/AAB compiler
+                  git status           - Show linked GitHub repo & pending changes
+                  git pull             - Pull latest files from GitHub
+                  git push [msg]       - Commit & push project to GitHub
+                  ci                   - List recent GitHub Actions runs
+                  clear                - Clear console
+                """.trimIndent(),
+            )
+            return
+        }
+        if (project == null) {
+            appendLine("error: no active project open")
+            return
+        }
+
+        viewModelScope.launch {
+            val parts = cmd.split(Regex("""\s+"""), limit = 2)
+            val root = parts[0].lowercase()
+            val arg = parts.getOrNull(1)?.trim().orEmpty()
+            when (root) {
+                "ls" -> {
+                    val paths = repository.listAllProjectPaths(project.id, includeBuild = true)
+                        .filter { arg.isEmpty() || it.contains(arg, ignoreCase = true) }
+                    if (paths.isEmpty()) appendLine("(no matching files)")
+                    else paths.take(80).forEach { appendLine("  $it") }
+                    if (paths.size > 80) appendLine("... (${paths.size - 80} more)")
+                }
+                "cat" -> {
+                    val file = _projectFiles.value.find { it.relativePath == arg }
+                    if (file == null) appendLine("cat: $arg: No such file")
+                    else file.content.lines().take(60).forEachIndexed { i, l ->
+                        appendLine("${(i + 1).toString().padStart(3)} | $l")
+                    }
+                }
+                "grep" -> {
+                    if (arg.isEmpty()) appendLine("usage: grep <pattern>")
+                    else {
+                        val hits = searchWorkspace(arg)
+                        if (hits.isEmpty()) appendLine("no matches for '$arg'")
+                        else hits.take(30).forEach { h -> appendLine("${h.relativePath}:${h.lineNumber}: ${h.previewLine}") }
+                    }
+                }
+                "touch" -> {
+                    if (arg.isEmpty()) appendLine("usage: touch <relativePath>")
+                    else {
+                        createNewFile(arg)
+                        appendLine("created $arg")
+                    }
+                }
+                "rm" -> {
+                    if (arg.isEmpty()) appendLine("usage: rm <relativePath>")
+                    else {
+                        deleteFile(arg)
+                        appendLine("removed $arg")
+                    }
+                }
+                "build" -> {
+                    val variant = when (arg.lowercase()) {
+                        "release" -> BuildVariant.RELEASE_APK
+                        "aab", "bundle" -> BuildVariant.RELEASE_AAB
+                        else -> BuildVariant.DEBUG_APK
+                    }
+                    appendLine("Triggering ${variant.label}...")
+                    buildApk(variant)
+                }
+                "git" -> {
+                    val subParts = arg.split(Regex("""\s+"""), limit = 2)
+                    when (subParts.getOrNull(0)?.lowercase().orEmpty()) {
+                        "status" -> {
+                            val link = project.githubLink
+                            if (link == null) appendLine("Not linked to a GitHub repository.")
+                            else {
+                                appendLine("Repo: ${link.fullName} (branch ${link.branch})")
+                                val changes = repository.computeGitHubPendingChanges(project.id, link)
+                                if (changes.isEmpty()) appendLine("Working tree clean.")
+                                else changes.forEach { appendLine("  [${it.status}] ${it.path}") }
+                            }
+                        }
+                        "pull" -> {
+                            pullProjectFromGitHub()
+                            appendLine("Started GitHub pull...")
+                        }
+                        "push" -> {
+                            val msg = subParts.getOrNull(1)?.takeIf { it.isNotBlank() } ?: "Update via Android Studio Console"
+                            pushProjectToGitHub(msg)
+                            appendLine("Started GitHub push: \"$msg\"")
+                        }
+                        else -> appendLine("usage: git [status|pull|push <msg>]")
+                    }
+                }
+                "ci" -> {
+                    refreshGitHubWorkflowRuns()
+                    val runs = _githubWorkflowRuns.value
+                    if (runs.isEmpty()) appendLine("No workflow runs cached (refreshing...)")
+                    else runs.take(8).forEach { r ->
+                        appendLine("#${r.runNumber} ${r.name} — ${r.status} / ${r.conclusion} (${r.headBranch})")
+                    }
+                }
+                else -> appendLine("unknown command '$root' — type `help` for available workspace commands")
+            }
+        }
+    }
+
     private fun createToolExecutor(
         projectId: String,
         packageName: String,
@@ -1729,8 +2144,11 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
 
         private suspend fun flushInMemoryFiles() {
             saveJob?.cancel()
-            _projectFiles.value.filterNot { it.isBinary }.forEach { file ->
-                repository.saveFile(projectId, file.relativePath, file.content)
+            val activeSnap = _projectFiles.value.filterNot { it.isBinary }
+            fileWriteMutex.withLock {
+                activeSnap.forEach { file ->
+                    repository.saveFile(projectId, file.relativePath, file.content)
+                }
             }
         }
 
@@ -1786,13 +2204,13 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                     stepDetail = "Invalid path: $path",
                     payload = JSONObject().put("error", "Path is outside project directory or empty: $path"),
                 )
-            val existed = target.exists()
-            repository.saveFile(projectId, cleanPath, content)
-            _projectFiles.value = repository.loadProjectFiles(projectId)
-            refreshGitHubPendingChangesInternal(_activeProject.value)
-            if (!cleanPath.startsWith("build/") && !cleanPath.startsWith(".droidforge/") && cleanPath != "project.json") {
-                openFile(cleanPath)
+            val existed = fileWriteMutex.withLock {
+                val ex = target.exists()
+                repository.saveFile(projectId, cleanPath, content)
+                _projectFiles.value = repository.loadProjectFiles(projectId)
+                ex
             }
+            refreshGitHubPendingChangesInternal(_activeProject.value)
             val verb = if (existed) "Updated" else "Created"
             val lineCount = content.lines().size
             return AgentToolResult(
@@ -1816,62 +2234,61 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                     stepDetail = "Invalid path: $path",
                     payload = JSONObject().put("error", "Path is outside project directory or empty: $path"),
                 )
-            if (!target.exists() || !target.isFile) {
-                return AgentToolResult(
-                    success = false,
-                    stepDetail = "File not found: $cleanPath",
-                    payload = JSONObject().put("error", "File does not exist: $cleanPath"),
-                )
-            }
-            val current = withContext(Dispatchers.IO) { target.readText() }
-            val normalizedCurrent = current.replace("\r\n", "\n")
-            val normalizedOld = oldText.replace("\r\n", "\n")
-            val normalizedNew = newText.replace("\r\n", "\n")
+            return fileWriteMutex.withLock {
+                if (!target.exists() || !target.isFile) {
+                    return@withLock AgentToolResult(
+                        success = false,
+                        stepDetail = "File not found: $cleanPath",
+                        payload = JSONObject().put("error", "File does not exist: $cleanPath"),
+                    )
+                }
+                val current = withContext(Dispatchers.IO) { target.readText() }
+                val normalizedCurrent = current.replace("\r\n", "\n")
+                val normalizedOld = oldText.replace("\r\n", "\n")
+                val normalizedNew = newText.replace("\r\n", "\n")
 
-            if (normalizedOld.isEmpty()) {
-                return AgentToolResult(
-                    success = false,
-                    stepDetail = "Empty old_text",
-                    payload = JSONObject().put("error", "old_text must not be empty. Use write_file instead."),
-                )
-            }
-            val firstIdx = normalizedCurrent.indexOf(normalizedOld)
-            if (firstIdx < 0) {
-                return AgentToolResult(
-                    success = false,
-                    stepDetail = "Snippet not found in $cleanPath",
-                    payload = JSONObject().put("error", "old_text was not found in $cleanPath. Call read_file first."),
-                )
-            }
-            val secondIdx = normalizedCurrent.indexOf(normalizedOld, startIndex = firstIdx + normalizedOld.length)
-            if (secondIdx >= 0) {
-                return AgentToolResult(
-                    success = false,
-                    stepDetail = "Multiple matches in $cleanPath",
-                    payload = JSONObject().put("error", "old_text matched multiple locations in $cleanPath."),
-                )
-            }
+                if (normalizedOld.isEmpty()) {
+                    return@withLock AgentToolResult(
+                        success = false,
+                        stepDetail = "Empty old_text",
+                        payload = JSONObject().put("error", "old_text must not be empty. Use write_file instead."),
+                    )
+                }
+                val firstIdx = normalizedCurrent.indexOf(normalizedOld)
+                if (firstIdx < 0) {
+                    return@withLock AgentToolResult(
+                        success = false,
+                        stepDetail = "Snippet not found in $cleanPath",
+                        payload = JSONObject().put("error", "old_text was not found in $cleanPath. Call read_file first."),
+                    )
+                }
+                val secondIdx = normalizedCurrent.indexOf(normalizedOld, startIndex = firstIdx + normalizedOld.length)
+                if (secondIdx >= 0) {
+                    return@withLock AgentToolResult(
+                        success = false,
+                        stepDetail = "Multiple matches in $cleanPath",
+                        payload = JSONObject().put("error", "old_text matched multiple locations in $cleanPath."),
+                    )
+                }
 
-            val updated = normalizedCurrent.replaceFirst(normalizedOld, normalizedNew)
-            repository.saveFile(projectId, cleanPath, updated)
-            _projectFiles.value = repository.loadProjectFiles(projectId)
-            refreshGitHubPendingChangesInternal(_activeProject.value)
-            if (!cleanPath.startsWith("build/") && !cleanPath.startsWith(".droidforge/") && cleanPath != "project.json") {
-                openFile(cleanPath)
-            }
-            val oldLines = normalizedOld.lines().size
-            val newLines = normalizedNew.lines().size
-            val diffPreview = buildString {
-                normalizedOld.lines().take(6).forEach { appendLine("- $it") }
-                normalizedNew.lines().take(8).forEach { appendLine("+ $it") }
-            }.trim()
+                val updated = normalizedCurrent.replaceFirst(normalizedOld, normalizedNew)
+                repository.saveFile(projectId, cleanPath, updated)
+                _projectFiles.value = repository.loadProjectFiles(projectId)
+                refreshGitHubPendingChangesInternal(_activeProject.value)
+                val oldLines = normalizedOld.lines().size
+                val newLines = normalizedNew.lines().size
+                val diffPreview = buildString {
+                    normalizedOld.lines().take(6).forEach { appendLine("- $it") }
+                    normalizedNew.lines().take(8).forEach { appendLine("+ $it") }
+                }.trim()
 
-            return AgentToolResult(
-                success = true,
-                stepDetail = "Edited (-$oldLines / +$newLines lines)",
-                payload = JSONObject().put("status", "edited").put("path", cleanPath),
-                detailedOutput = diffPreview,
-            )
+                AgentToolResult(
+                    success = true,
+                    stepDetail = "Edited (-$oldLines / +$newLines lines)",
+                    payload = JSONObject().put("status", "edited").put("path", cleanPath),
+                    detailedOutput = diffPreview,
+                )
+            }
         }
 
         override suspend fun deleteFile(path: String): AgentToolResult {

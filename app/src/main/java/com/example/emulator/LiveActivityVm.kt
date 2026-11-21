@@ -2347,14 +2347,35 @@ object LiveActivityVm {
         packageName: String,
         files: List<ProjectFile>,
     ): LiveVmSession? {
-        val strings = parseStrings(files.find { it.relativePath == "res/values/strings.xml" }?.content.orEmpty())
-        val colors = parseColors(files.find { it.relativePath == "res/values/colors.xml" }?.content.orEmpty())
-        val layouts = files.filter { it.relativePath.startsWith("res/layout/") && it.relativePath.endsWith(".xml") }
-            .associate { it.relativePath.removePrefix("res/layout/") to it.content }
+        val strings = parseStrings(
+            files.firstOrNull {
+                it.relativePath == "res/values/strings.xml" ||
+                    it.relativePath == "app/src/main/res/values/strings.xml" ||
+                    it.relativePath == "src/main/res/values/strings.xml"
+            }?.content.orEmpty(),
+        )
+        val colors = parseColors(
+            files.firstOrNull {
+                it.relativePath == "res/values/colors.xml" ||
+                    it.relativePath == "app/src/main/res/values/colors.xml" ||
+                    it.relativePath == "src/main/res/values/colors.xml"
+            }?.content.orEmpty(),
+        )
+        val layouts = files.filter {
+            (it.relativePath.startsWith("res/layout/") ||
+                it.relativePath.startsWith("app/src/main/res/layout/") ||
+                it.relativePath.startsWith("src/main/res/layout/")) &&
+                it.relativePath.endsWith(".xml")
+        }.associate { it.relativePath.substringAfterLast('/') to it.content }
 
         val javaSources = mutableListOf<String>()
-        files.filter { !it.isBinary && (it.relativePath.endsWith(".kt") || it.relativePath.endsWith(".java")) }
-            .forEach { file ->
+        files.filter {
+            !it.isBinary &&
+                (it.relativePath.endsWith(".kt") || it.relativePath.endsWith(".java")) &&
+                !it.relativePath.contains("/test/") &&
+                !it.relativePath.contains("/androidTest/") &&
+                !it.relativePath.endsWith(".gradle.kts")
+        }.forEach { file ->
                 if (file.relativePath.endsWith(".kt")) {
                     val res = runCatching {
                         KotlinToJavaTranspiler.transpile(file.content, packageName, file.fileName)

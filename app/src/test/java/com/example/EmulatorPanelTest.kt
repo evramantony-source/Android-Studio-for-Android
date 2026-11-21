@@ -347,4 +347,52 @@ class EmulatorPanelTest {
         }
         assertEquals(1500, firedCount)
     }
+
+    @Test
+    fun emulatorResetsAppStateFreshOnReEntryLikeColdBoot() {
+        val files = toProjectFiles(
+            TemplateProvider.generateFiles(
+                template = ProjectTemplate.COUNTER_APP,
+                appName = "Counter App",
+                packageName = "com.example.counter",
+                language = ProjectLanguage.JAVA,
+            ),
+        )
+        val showEmulator = androidx.compose.runtime.mutableStateOf(true)
+
+        composeTestRule.setContent {
+            DroidForgeTheme(darkTheme = true) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    if (showEmulator.value) {
+                        EmulatorPanel(
+                            appName = "Counter App",
+                            packageName = "com.example.counter",
+                            files = files,
+                            builtApkPath = null,
+                            onInstallApk = {},
+                            onClose = { showEmulator.value = false },
+                        )
+                    }
+                }
+            }
+        }
+
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.onAllNodes(androidx.compose.ui.test.hasText("+1")).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("+1").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("1").assertIsDisplayed()
+
+        // Leave emulator and re-enter: counter must reset from 0 cleanly.
+        showEmulator.value = false
+        composeTestRule.waitForIdle()
+        showEmulator.value = true
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.onAllNodes(androidx.compose.ui.test.hasText("0")).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("0").assertIsDisplayed()
+    }
 }

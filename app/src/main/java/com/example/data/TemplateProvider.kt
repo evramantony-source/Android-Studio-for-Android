@@ -1244,6 +1244,835 @@ object TemplateProvider {
                     }
                 """.trimIndent() + "\n"
             }
+
+            ProjectTemplate.SNAKE_ARCADE -> {
+                files["src/$pkgPath/MainActivity.java"] = """
+                    package $packageName;
+
+                    import android.app.Activity;
+                    import android.graphics.Color;
+                    import android.os.Bundle;
+                    import android.view.View;
+                    import android.widget.Button;
+                    import android.widget.LinearLayout;
+
+                    public class MainActivity extends Activity {
+                        @Override
+                        protected void onCreate(Bundle savedInstanceState) {
+                            super.onCreate(savedInstanceState);
+                            LinearLayout root = new LinearLayout(this);
+                            root.setOrientation(LinearLayout.VERTICAL);
+                            root.setBackgroundColor(Color.parseColor("#0B0F17"));
+
+                            final SnakeGameView game = new SnakeGameView(this);
+                            root.addView(game, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                            LinearLayout pad = new LinearLayout(this);
+                            pad.setOrientation(LinearLayout.HORIZONTAL);
+                            pad.setBackgroundColor(Color.parseColor("#111827"));
+                            pad.setPadding(16, 12, 16, 12);
+
+                            String[] labels = {"LEFT", "UP", "DOWN", "RIGHT", "RESET"};
+                            for (int i = 0; i < labels.length; i++) {
+                                final int idx = i;
+                                Button b = new Button(this);
+                                b.setText(labels[i]);
+                                b.setTextColor(Color.WHITE);
+                                b.setBackgroundColor(idx == 4 ? Color.parseColor("#DC2626") : Color.parseColor("#1E293B"));
+                                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                                lp.setMargins(4, 0, 4, 0);
+                                b.setLayoutParams(lp);
+                                b.setOnClickListener(new View.OnClickListener() {
+                                    @Override
+                                    public void onClick(View v) {
+                                        if (idx == 0) game.setDirection(-1, 0);
+                                        else if (idx == 1) game.setDirection(0, -1);
+                                        else if (idx == 2) game.setDirection(0, 1);
+                                        else if (idx == 3) game.setDirection(1, 0);
+                                        else game.resetGame();
+                                    }
+                                });
+                                pad.addView(b);
+                            }
+                            root.addView(pad);
+                            setContentView(root);
+                        }
+                    }
+                """.trimIndent() + "\n"
+
+                files["src/$pkgPath/SnakeGameView.java"] = """
+                    package $packageName;
+
+                    import android.content.Context;
+                    import android.graphics.Canvas;
+                    import android.graphics.Color;
+                    import android.graphics.Paint;
+                    import android.os.Handler;
+                    import android.os.Looper;
+                    import android.view.MotionEvent;
+                    import android.view.View;
+                    import java.util.ArrayList;
+                    import java.util.Random;
+
+                    public class SnakeGameView extends View {
+                        private static final int GRID = 16;
+                        private final ArrayList<Integer> bodyX = new ArrayList<Integer>();
+                        private final ArrayList<Integer> bodyY = new ArrayList<Integer>();
+                        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                        private final Handler handler = new Handler(Looper.getMainLooper());
+                        private final Random rng = new Random();
+                        private int dirX = 1;
+                        private int dirY = 0;
+                        private int foodX = 10;
+                        private int foodY = 8;
+                        private int score = 0;
+                        private int best = 0;
+                        private boolean gameOver = false;
+                        private float downX = 0f;
+                        private float downY = 0f;
+
+                        private final Runnable ticker = new Runnable() {
+                            @Override
+                            public void run() {
+                                stepGame();
+                                invalidate();
+                                handler.postDelayed(this, 160);
+                            }
+                        };
+
+                        public SnakeGameView(Context context) {
+                            super(context);
+                            resetGame();
+                            handler.postDelayed(ticker, 160);
+                        }
+
+                        public void setDirection(int dx, int dy) {
+                            if (dx == -dirX && dy == -dirY) return;
+                            dirX = dx;
+                            dirY = dy;
+                        }
+
+                        public void resetGame() {
+                            bodyX.clear();
+                            bodyY.clear();
+                            bodyX.add(6); bodyY.add(8);
+                            bodyX.add(5); bodyY.add(8);
+                            bodyX.add(4); bodyY.add(8);
+                            dirX = 1;
+                            dirY = 0;
+                            score = 0;
+                            gameOver = false;
+                            spawnFood();
+                            invalidate();
+                        }
+
+                        private void spawnFood() {
+                            foodX = rng.nextInt(GRID);
+                            foodY = rng.nextInt(GRID);
+                        }
+
+                        private void stepGame() {
+                            if (gameOver) return;
+                            int nx = bodyX.get(0) + dirX;
+                            int ny = bodyY.get(0) + dirY;
+                            if (nx < 0 || ny < 0 || nx >= GRID || ny >= GRID) {
+                                gameOver = true;
+                                return;
+                            }
+                            for (int i = 0; i < bodyX.size(); i++) {
+                                if (bodyX.get(i) == nx && bodyY.get(i) == ny) {
+                                    gameOver = true;
+                                    return;
+                                }
+                            }
+                            bodyX.add(0, nx);
+                            bodyY.add(0, ny);
+                            if (nx == foodX && ny == foodY) {
+                                score += 10;
+                                if (score > best) best = score;
+                                spawnFood();
+                            } else {
+                                bodyX.remove(bodyX.size() - 1);
+                                bodyY.remove(bodyY.size() - 1);
+                            }
+                        }
+
+                        @Override
+                        protected void onDraw(Canvas canvas) {
+                            super.onDraw(canvas);
+                            int w = Math.max(1, getWidth());
+                            int h = Math.max(1, getHeight());
+                            canvas.drawColor(Color.parseColor("#0B0F17"));
+
+                            float board = Math.min(w - 32f, h - 100f);
+                            float cell = board / GRID;
+                            float ox = (w - board) * 0.5f;
+                            float oy = 76f;
+
+                            paint.setStyle(Paint.Style.FILL);
+                            paint.setColor(Color.parseColor("#111827"));
+                            canvas.drawRect(ox, oy, ox + board, oy + board, paint);
+
+                            paint.setColor(Color.parseColor("#F43F5E"));
+                            canvas.drawCircle(ox + (foodX + 0.5f) * cell, oy + (foodY + 0.5f) * cell, cell * 0.38f, paint);
+
+                            for (int i = 0; i < bodyX.size(); i++) {
+                                paint.setColor(i == 0 ? Color.parseColor("#4ADE80") : Color.parseColor("#22C55E"));
+                                float l = ox + bodyX.get(i) * cell + 2f;
+                                float t = oy + bodyY.get(i) * cell + 2f;
+                                canvas.drawRoundRect(l, t, l + cell - 4f, t + cell - 4f, 6f, 6f, paint);
+                            }
+
+                            paint.setColor(Color.WHITE);
+                            paint.setTextSize(32f);
+                            paint.setTextAlign(Paint.Align.LEFT);
+                            canvas.drawText("SCORE " + score + "   BEST " + best, ox, 48f, paint);
+
+                            if (gameOver) {
+                                paint.setColor(Color.parseColor("#CC000000"));
+                                canvas.drawRect(ox, oy + board * 0.35f, ox + board, oy + board * 0.65f, paint);
+                                paint.setColor(Color.parseColor("#F87171"));
+                                paint.setTextAlign(Paint.Align.CENTER);
+                                paint.setTextSize(42f);
+                                canvas.drawText("GAME OVER", ox + board * 0.5f, oy + board * 0.50f, paint);
+                            }
+                        }
+
+                        @Override
+                        public boolean onTouchEvent(MotionEvent event) {
+                            if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                                if (gameOver) { resetGame(); return true; }
+                                downX = event.getX();
+                                downY = event.getY();
+                                return true;
+                            } else if (event.getAction() == MotionEvent.ACTION_UP) {
+                                float dx = event.getX() - downX;
+                                float dy = event.getY() - downY;
+                                if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 24f) {
+                                    setDirection(dx > 0 ? 1 : -1, 0);
+                                } else if (Math.abs(dy) > 24f) {
+                                    setDirection(0, dy > 0 ? 1 : -1);
+                                }
+                                return true;
+                            }
+                            return super.onTouchEvent(event);
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.MUSIC_SYNTH_PAD -> {
+                files["src/$pkgPath/MainActivity.java"] = """
+                    package $packageName;
+
+                    import android.app.Activity;
+                    import android.graphics.Color;
+                    import android.graphics.Typeface;
+                    import android.os.Bundle;
+                    import android.os.Handler;
+                    import android.os.Looper;
+                    import android.view.Gravity;
+                    import android.view.View;
+                    import android.widget.Button;
+                    import android.widget.GridLayout;
+                    import android.widget.LinearLayout;
+                    import android.widget.TextView;
+
+                    public class MainActivity extends Activity {
+                        private final Handler handler = new Handler(Looper.getMainLooper());
+                        private TextView statusBanner;
+                        private int bpm = 120;
+                        private int currentStep = 0;
+                        private boolean playing = false;
+
+                        private final Runnable stepLoop = new Runnable() {
+                            @Override
+                            public void run() {
+                                if (!playing) return;
+                                currentStep = (currentStep + 1) % 8;
+                                statusBanner.setText("PLAYING • STEP " + (currentStep + 1) + "/8 • " + bpm + " BPM");
+                                handler.postDelayed(this, Math.max(120, 15000 / bpm));
+                            }
+                        };
+
+                        @Override
+                        protected void onCreate(Bundle savedInstanceState) {
+                            super.onCreate(savedInstanceState);
+                            LinearLayout root = new LinearLayout(this);
+                            root.setOrientation(LinearLayout.VERTICAL);
+                            root.setBackgroundColor(Color.parseColor("#0F172A"));
+                            root.setPadding(24, 36, 24, 24);
+
+                            statusBanner = new TextView(this);
+                            statusBanner.setText("BEAT STUDIO READY • 120 BPM");
+                            statusBanner.setTextColor(Color.parseColor("#38BDF8"));
+                            statusBanner.setTextSize(16);
+                            statusBanner.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                            statusBanner.setGravity(Gravity.CENTER);
+                            statusBanner.setPadding(16, 24, 16, 24);
+                            statusBanner.setBackgroundColor(Color.parseColor("#1E293B"));
+                            root.addView(statusBanner);
+
+                            GridLayout grid = new GridLayout(this);
+                            grid.setColumnCount(3);
+                            grid.setPadding(0, 24, 0, 24);
+
+                            final String[] pads = {"KICK", "SNARE", "HI-HAT", "CLAP", "808 BASS", "CHORD", "ARP C4", "SYNTH E4", "BELL G4"};
+                            final String[] padColors = {"#EF4444", "#F97316", "#FACC15", "#22C55E", "#14B8A6", "#38BDF8", "#6366F1", "#A855F7", "#EC4899"};
+
+                            for (int i = 0; i < pads.length; i++) {
+                                final String label = pads[i];
+                                Button padBtn = new Button(this);
+                                padBtn.setText(label);
+                                padBtn.setTextColor(Color.WHITE);
+                                padBtn.setBackgroundColor(Color.parseColor(padColors[i]));
+                                GridLayout.LayoutParams gp = new GridLayout.LayoutParams();
+                                gp.width = 0;
+                                gp.height = 170;
+                                gp.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f);
+                                gp.setMargins(8, 8, 8, 8);
+                                padBtn.setLayoutParams(gp);
+                                padBtn.setOnClickListener(new View.OnClickListener() {
+                                    @Override
+                                    public void onClick(View v) {
+                                        statusBanner.setText("TRIGGERED: " + label + " • " + bpm + " BPM");
+                                    }
+                                });
+                                grid.addView(padBtn);
+                            }
+                            root.addView(grid);
+
+                            LinearLayout transport = new LinearLayout(this);
+                            transport.setOrientation(LinearLayout.HORIZONTAL);
+                            Button playBtn = new Button(this);
+                            playBtn.setText("Start / Stop");
+                            playBtn.setTextColor(Color.WHITE);
+                            playBtn.setBackgroundColor(Color.parseColor("#10B981"));
+                            playBtn.setOnClickListener(new View.OnClickListener() {
+                                @Override
+                                public void onClick(View v) {
+                                    playing = !playing;
+                                    if (playing) {
+                                        handler.post(stepLoop);
+                                    } else {
+                                        handler.removeCallbacks(stepLoop);
+                                        statusBanner.setText("PAUSED • " + bpm + " BPM");
+                                    }
+                                }
+                            });
+                            Button tempoUp = new Button(this);
+                            tempoUp.setText("+10 BPM");
+                            tempoUp.setOnClickListener(new View.OnClickListener() {
+                                @Override
+                                public void onClick(View v) {
+                                    bpm = Math.min(200, bpm + 10);
+                                    statusBanner.setText("TEMPO: " + bpm + " BPM");
+                                }
+                            });
+                            transport.addView(playBtn);
+                            transport.addView(tempoUp);
+                            root.addView(transport);
+                            setContentView(root);
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.EXPENSE_TRACKER -> {
+                files["src/$pkgPath/MainActivity.java"] = """
+                    package $packageName;
+
+                    import android.app.Activity;
+                    import android.graphics.Color;
+                    import android.graphics.Typeface;
+                    import android.os.Bundle;
+                    import android.view.View;
+                    import android.widget.Button;
+                    import android.widget.EditText;
+                    import android.widget.LinearLayout;
+                    import android.widget.ScrollView;
+                    import android.widget.TextView;
+                    import android.widget.Toast;
+
+                    public class MainActivity extends Activity {
+                        private double balance = 1250.0;
+                        private TextView balanceLabel;
+                        private EditText descInput;
+                        private EditText amountInput;
+                        private LinearLayout ledgerList;
+
+                        @Override
+                        protected void onCreate(Bundle savedInstanceState) {
+                            super.onCreate(savedInstanceState);
+                            LinearLayout root = new LinearLayout(this);
+                            root.setOrientation(LinearLayout.VERTICAL);
+                            root.setBackgroundColor(Color.parseColor("#0F172A"));
+                            root.setPadding(28, 36, 28, 28);
+
+                            balanceLabel = new TextView(this);
+                            balanceLabel.setText("Balance: $1250.00");
+                            balanceLabel.setTextSize(28);
+                            balanceLabel.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                            balanceLabel.setTextColor(Color.parseColor("#34D399"));
+                            balanceLabel.setPadding(24, 24, 24, 24);
+                            balanceLabel.setBackgroundColor(Color.parseColor("#1E293B"));
+                            root.addView(balanceLabel);
+
+                            descInput = new EditText(this);
+                            descInput.setHint("Category or item (e.g. Cloud Hosting)");
+                            descInput.setTextColor(Color.WHITE);
+                            descInput.setHintTextColor(Color.parseColor("#94A3B8"));
+                            root.addView(descInput);
+
+                            amountInput = new EditText(this);
+                            amountInput.setHint("Amount (e.g. 24.50)");
+                            amountInput.setTextColor(Color.WHITE);
+                            amountInput.setHintTextColor(Color.parseColor("#94A3B8"));
+                            root.addView(amountInput);
+
+                            LinearLayout row = new LinearLayout(this);
+                            row.setOrientation(LinearLayout.HORIZONTAL);
+                            Button expenseBtn = new Button(this);
+                            expenseBtn.setText("- Expense");
+                            expenseBtn.setTextColor(Color.WHITE);
+                            expenseBtn.setBackgroundColor(Color.parseColor("#EF4444"));
+                            expenseBtn.setOnClickListener(new View.OnClickListener() {
+                                @Override
+                                public void onClick(View v) { recordEntry(false); }
+                            });
+                            Button incomeBtn = new Button(this);
+                            incomeBtn.setText("+ Income");
+                            incomeBtn.setTextColor(Color.WHITE);
+                            incomeBtn.setBackgroundColor(Color.parseColor("#10B981"));
+                            incomeBtn.setOnClickListener(new View.OnClickListener() {
+                                @Override
+                                public void onClick(View v) { recordEntry(true); }
+                            });
+                            row.addView(expenseBtn);
+                            row.addView(incomeBtn);
+                            root.addView(row);
+
+                            ScrollView scroll = new ScrollView(this);
+                            ledgerList = new LinearLayout(this);
+                            ledgerList.setOrientation(LinearLayout.VERTICAL);
+                            scroll.addView(ledgerList);
+                            root.addView(scroll);
+                            setContentView(root);
+                        }
+
+                        private void recordEntry(boolean isIncome) {
+                            String label = descInput.getText().toString().trim();
+                            if (label.isEmpty()) label = isIncome ? "Deposit" : "Purchase";
+                            double amt = 10.0;
+                            try {
+                                amt = Math.abs(Double.parseDouble(amountInput.getText().toString().trim()));
+                            } catch (Exception ignored) { }
+                            balance += isIncome ? amt : -amt;
+                            balanceLabel.setText(String.format("Balance: $%.2f", balance));
+                            TextView item = new TextView(this);
+                            item.setText((isIncome ? "+ $" : "- $") + String.format("%.2f", amt) + "  •  " + label);
+                            item.setTextColor(isIncome ? Color.parseColor("#34D399") : Color.parseColor("#FCA5A5"));
+                            item.setPadding(16, 14, 16, 14);
+                            ledgerList.addView(item, 0);
+                            descInput.setText("");
+                            amountInput.setText("");
+                            Toast.makeText(this, "Entry logged", Toast.LENGTH_SHORT).show();
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.QUIZ_STUDIO -> {
+                files["src/$pkgPath/MainActivity.java"] = """
+                    package $packageName;
+
+                    import android.app.Activity;
+                    import android.graphics.Color;
+                    import android.graphics.Typeface;
+                    import android.os.Bundle;
+                    import android.view.View;
+                    import android.widget.Button;
+                    import android.widget.LinearLayout;
+                    import android.widget.TextView;
+                    import android.widget.Toast;
+
+                    public class MainActivity extends Activity {
+                        private final String[] questions = {
+                            "Which file declares an Android app's launcher Activity?",
+                            "Which bytecode format runs on Android ART?",
+                            "Which layout arranges child views vertically or horizontally?",
+                            "What signs an APK cleanly with v1/v2/v3 schemes?"
+                        };
+                        private final String[] answers = {
+                            "AndroidManifest.xml",
+                            "DEX (Dalvik Executable)",
+                            "LinearLayout",
+                            "ApkSigner"
+                        };
+                        private final String[][] options = {
+                            {"AndroidManifest.xml", "build.gradle", "strings.xml", "styles.xml"},
+                            {"DEX (Dalvik Executable)", "ELF64", "WASM", "MSIL"},
+                            {"LinearLayout", "RecyclerView", "SurfaceView", "IntentFilter"},
+                            {"ApkSigner", "ZipAligner", "DexMerge", "Aapt"}
+                        };
+                        private int idx = 0;
+                        private int score = 0;
+                        private int streak = 0;
+                        private TextView scoreView;
+                        private TextView questionView;
+                        private final Button[] optBtns = new Button[4];
+
+                        @Override
+                        protected void onCreate(Bundle savedInstanceState) {
+                            super.onCreate(savedInstanceState);
+                            LinearLayout root = new LinearLayout(this);
+                            root.setOrientation(LinearLayout.VERTICAL);
+                            root.setBackgroundColor(Color.parseColor("#0B1120"));
+                            root.setPadding(32, 48, 32, 32);
+
+                            scoreView = new TextView(this);
+                            scoreView.setTextColor(Color.parseColor("#38BDF8"));
+                            scoreView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+                            scoreView.setTextSize(16);
+                            root.addView(scoreView);
+
+                            questionView = new TextView(this);
+                            questionView.setTextColor(Color.WHITE);
+                            questionView.setTextSize(20);
+                            questionView.setTypeface(Typeface.DEFAULT_BOLD);
+                            questionView.setPadding(0, 24, 0, 32);
+                            root.addView(questionView);
+
+                            for (int i = 0; i < 4; i++) {
+                                final int choice = i;
+                                Button b = new Button(this);
+                                b.setTextColor(Color.WHITE);
+                                b.setBackgroundColor(Color.parseColor("#1E293B"));
+                                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                                );
+                                lp.setMargins(0, 10, 0, 10);
+                                b.setLayoutParams(lp);
+                                b.setOnClickListener(new View.OnClickListener() {
+                                    @Override
+                                    public void onClick(View v) { answerQuestion(choice); }
+                                });
+                                optBtns[i] = b;
+                                root.addView(b);
+                            }
+                            renderQuestion();
+                            setContentView(root);
+                        }
+
+                        private void renderQuestion() {
+                            int qIdx = idx % questions.length;
+                            scoreView.setText("SCORE: " + score + "   STREAK: x" + streak + "   Q" + (qIdx + 1) + "/" + questions.length);
+                            questionView.setText(questions[qIdx]);
+                            for (int i = 0; i < 4; i++) {
+                                optBtns[i].setText(options[qIdx][i]);
+                            }
+                        }
+
+                        private void answerQuestion(int choice) {
+                            int qIdx = idx % questions.length;
+                            String picked = options[qIdx][choice];
+                            if (picked.equals(answers[qIdx])) {
+                                streak++;
+                                score += 100 * streak;
+                                Toast.makeText(this, "Correct! +" + (100 * streak), Toast.LENGTH_SHORT).show();
+                            } else {
+                                streak = 0;
+                                Toast.makeText(this, "Answer: " + answers[qIdx], Toast.LENGTH_SHORT).show();
+                            }
+                            idx++;
+                            renderQuestion();
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.WEATHER_DASHBOARD -> {
+                files["src/$pkgPath/MainActivity.java"] = """
+                    package $packageName;
+
+                    import android.app.Activity;
+                    import android.graphics.Color;
+                    import android.graphics.Typeface;
+                    import android.os.Bundle;
+                    import android.view.View;
+                    import android.widget.Button;
+                    import android.widget.LinearLayout;
+                    import android.widget.TextView;
+
+                    public class MainActivity extends Activity {
+                        private TextView cityTitle;
+                        private TextView tempView;
+                        private TextView metaView;
+                        private ForecastChartView chartView;
+
+                        @Override
+                        protected void onCreate(Bundle savedInstanceState) {
+                            super.onCreate(savedInstanceState);
+                            LinearLayout root = new LinearLayout(this);
+                            root.setOrientation(LinearLayout.VERTICAL);
+                            root.setBackgroundColor(Color.parseColor("#0B1324"));
+                            root.setPadding(28, 40, 28, 28);
+
+                            LinearLayout cityBar = new LinearLayout(this);
+                            cityBar.setOrientation(LinearLayout.HORIZONTAL);
+                            final String[] cities = {"Tokyo", "London", "New York", "Cairo"};
+                            final int[] temps = {23, 15, 19, 31};
+                            final String[] conds = {"Clear • Wind 11 km/h", "Light Mist • Wind 18 km/h", "Partly Cloudy • Wind 14 km/h", "Sunny • Wind 9 km/h"};
+
+                            cityTitle = new TextView(this);
+                            cityTitle.setTextColor(Color.parseColor("#93C5FD"));
+                            cityTitle.setTextSize(18);
+                            cityTitle.setPadding(0, 24, 0, 8);
+
+                            tempView = new TextView(this);
+                            tempView.setTextColor(Color.WHITE);
+                            tempView.setTextSize(48);
+                            tempView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+
+                            metaView = new TextView(this);
+                            metaView.setTextColor(Color.parseColor("#94A3B8"));
+                            metaView.setPadding(0, 8, 0, 24);
+
+                            chartView = new ForecastChartView(this);
+
+                            for (int i = 0; i < cities.length; i++) {
+                                final int idx = i;
+                                Button b = new Button(this);
+                                b.setText(cities[i]);
+                                b.setTextColor(Color.WHITE);
+                                b.setBackgroundColor(Color.parseColor("#1E293B"));
+                                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                                lp.setMargins(4, 0, 4, 0);
+                                b.setLayoutParams(lp);
+                                b.setOnClickListener(new View.OnClickListener() {
+                                    @Override
+                                    public void onClick(View v) {
+                                        cityTitle.setText(cities[idx] + " Weather Station");
+                                        tempView.setText(temps[idx] + "°C");
+                                        metaView.setText(conds[idx]);
+                                        chartView.setBaseTemp(temps[idx]);
+                                    }
+                                });
+                                cityBar.addView(b);
+                            }
+
+                            root.addView(cityBar);
+                            root.addView(cityTitle);
+                            root.addView(tempView);
+                            root.addView(metaView);
+                            root.addView(chartView, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                            cityTitle.setText(cities[0] + " Weather Station");
+                            tempView.setText(temps[0] + "°C");
+                            metaView.setText(conds[0]);
+                            chartView.setBaseTemp(temps[0]);
+                            setContentView(root);
+                        }
+                    }
+                """.trimIndent() + "\n"
+
+                files["src/$pkgPath/ForecastChartView.java"] = """
+                    package $packageName;
+
+                    import android.content.Context;
+                    import android.graphics.Canvas;
+                    import android.graphics.Color;
+                    import android.graphics.Paint;
+                    import android.view.View;
+
+                    public class ForecastChartView extends View {
+                        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+                        private int baseTemp = 23;
+
+                        public ForecastChartView(Context context) {
+                            super(context);
+                        }
+
+                        public void setBaseTemp(int t) {
+                            baseTemp = t;
+                            invalidate();
+                        }
+
+                        @Override
+                        protected void onDraw(Canvas canvas) {
+                            super.onDraw(canvas);
+                            float w = Math.max(1f, getWidth());
+                            float h = Math.max(1f, getHeight());
+                            canvas.drawColor(Color.parseColor("#111827"));
+
+                            int[] offsets = {-3, -2, 0, 2, 3, 1, -1};
+                            float stepX = w / (offsets.length + 1);
+                            paint.setStyle(Paint.Style.STROKE);
+                            paint.setStrokeWidth(6f);
+                            paint.setColor(Color.parseColor("#38BDF8"));
+
+                            float prevX = 0f;
+                            float prevY = 0f;
+                            for (int i = 0; i < offsets.length; i++) {
+                                float x = stepX * (i + 1);
+                                float y = h * 0.55f - offsets[i] * 26f;
+                                if (i > 0) canvas.drawLine(prevX, prevY, x, y, paint);
+                                prevX = x;
+                                prevY = y;
+                            }
+
+                            paint.setStyle(Paint.Style.FILL);
+                            for (int i = 0; i < offsets.length; i++) {
+                                float x = stepX * (i + 1);
+                                float y = h * 0.55f - offsets[i] * 26f;
+                                paint.setColor(Color.parseColor("#FBBF24"));
+                                canvas.drawCircle(x, y, 10f, paint);
+                                paint.setColor(Color.WHITE);
+                                paint.setTextSize(26f);
+                                paint.setTextAlign(Paint.Align.CENTER);
+                                canvas.drawText((baseTemp + offsets[i]) + "°", x, y - 20f, paint);
+                            }
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.PIXEL_SPRITE_EDITOR -> {
+                files["src/$pkgPath/MainActivity.java"] = """
+                    package $packageName;
+
+                    import android.app.Activity;
+                    import android.graphics.Color;
+                    import android.os.Bundle;
+                    import android.view.View;
+                    import android.widget.Button;
+                    import android.widget.LinearLayout;
+
+                    public class MainActivity extends Activity {
+                        @Override
+                        protected void onCreate(Bundle savedInstanceState) {
+                            super.onCreate(savedInstanceState);
+                            LinearLayout root = new LinearLayout(this);
+                            root.setOrientation(LinearLayout.VERTICAL);
+                            root.setBackgroundColor(Color.parseColor("#0B0F17"));
+
+                            final PixelCanvasView canvasView = new PixelCanvasView(this);
+                            root.addView(canvasView, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                            LinearLayout palette = new LinearLayout(this);
+                            palette.setOrientation(LinearLayout.HORIZONTAL);
+                            palette.setBackgroundColor(Color.parseColor("#182030"));
+                            palette.setPadding(12, 12, 12, 12);
+
+                            final int[] swatches = {
+                                Color.parseColor("#38BDF8"),
+                                Color.parseColor("#22C55E"),
+                                Color.parseColor("#FACC15"),
+                                Color.parseColor("#F43F5E"),
+                                Color.parseColor("#FFFFFF")
+                            };
+                            final String[] names = {"Sky", "Lime", "Gold", "Rose", "White"};
+                            for (int i = 0; i < swatches.length; i++) {
+                                final int c = swatches[i];
+                                Button b = new Button(this);
+                                b.setText(names[i]);
+                                b.setTextColor(Color.BLACK);
+                                b.setBackgroundColor(c);
+                                b.setOnClickListener(new View.OnClickListener() {
+                                    @Override
+                                    public void onClick(View v) { canvasView.setBrushColor(c); }
+                                });
+                                palette.addView(b);
+                            }
+                            Button clearBtn = new Button(this);
+                            clearBtn.setText("Clear");
+                            clearBtn.setOnClickListener(new View.OnClickListener() {
+                                @Override
+                                public void onClick(View v) { canvasView.clearGrid(); }
+                            });
+                            palette.addView(clearBtn);
+
+                            root.addView(palette);
+                            setContentView(root);
+                        }
+                    }
+                """.trimIndent() + "\n"
+
+                files["src/$pkgPath/PixelCanvasView.java"] = """
+                    package $packageName;
+
+                    import android.content.Context;
+                    import android.graphics.Canvas;
+                    import android.graphics.Color;
+                    import android.graphics.Paint;
+                    import android.view.MotionEvent;
+                    import android.view.View;
+
+                    public class PixelCanvasView extends View {
+                        private static final int SIZE = 12;
+                        private final int[] pixels = new int[SIZE * SIZE];
+                        private final Paint paint = new Paint();
+                        private int activeColor = Color.parseColor("#38BDF8");
+
+                        public PixelCanvasView(Context context) {
+                            super(context);
+                            clearGrid();
+                        }
+
+                        public void setBrushColor(int color) {
+                            activeColor = color;
+                        }
+
+                        public void clearGrid() {
+                            for (int i = 0; i < pixels.length; i++) {
+                                pixels[i] = 0;
+                            }
+                            invalidate();
+                        }
+
+                        @Override
+                        protected void onDraw(Canvas canvas) {
+                            super.onDraw(canvas);
+                            float board = Math.min(getWidth(), getHeight()) - 32f;
+                            float cell = board / SIZE;
+                            float ox = (getWidth() - board) * 0.5f;
+                            float oy = (getHeight() - board) * 0.5f;
+                            canvas.drawColor(Color.parseColor("#0B0F17"));
+
+                            for (int r = 0; r < SIZE; r++) {
+                                for (int c = 0; c < SIZE; c++) {
+                                    int col = pixels[r * SIZE + c];
+                                    float l = ox + c * cell;
+                                    float t = oy + r * cell;
+                                    paint.setStyle(Paint.Style.FILL);
+                                    paint.setColor(col == 0 ? Color.parseColor("#111827") : col);
+                                    canvas.drawRect(l + 1f, t + 1f, l + cell - 1f, t + cell - 1f, paint);
+                                    paint.setStyle(Paint.Style.STROKE);
+                                    paint.setColor(Color.parseColor("#1E293B"));
+                                    canvas.drawRect(l, t, l + cell, t + cell, paint);
+                                }
+                            }
+                        }
+
+                        @Override
+                        public boolean onTouchEvent(MotionEvent event) {
+                            if (event.getAction() == MotionEvent.ACTION_DOWN || event.getAction() == MotionEvent.ACTION_MOVE) {
+                                float board = Math.min(getWidth(), getHeight()) - 32f;
+                                float ox = (getWidth() - board) * 0.5f;
+                                float oy = (getHeight() - board) * 0.5f;
+                                int c = (int) (((event.getX() - ox) / board) * SIZE);
+                                int r = (int) (((event.getY() - oy) / board) * SIZE);
+                                if (c >= 0 && c < SIZE && r >= 0 && r < SIZE) {
+                                    pixels[r * SIZE + c] = activeColor;
+                                    invalidate();
+                                }
+                                return true;
+                            }
+                            return super.onTouchEvent(event);
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
         }
     }
 
@@ -2266,6 +3095,809 @@ object TemplateProvider {
                             tv.textSize = 22f
                             tv.gravity = Gravity.CENTER
                             setContentView(tv)
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.SNAKE_ARCADE -> {
+                files["src/$pkgPath/MainActivity.kt"] = """
+                    package $packageName
+
+                    import android.app.Activity
+                    import android.graphics.Color
+                    import android.os.Bundle
+                    import android.widget.Button
+                    import android.widget.LinearLayout
+
+                    class MainActivity : Activity() {
+                        override fun onCreate(savedInstanceState: Bundle?) {
+                            super.onCreate(savedInstanceState)
+                            val root = LinearLayout(this)
+                            root.orientation = LinearLayout.VERTICAL
+                            root.setBackgroundColor(Color.parseColor("#0B0F17"))
+
+                            val game = SnakeGameView(this)
+                            val gameLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+                            root.addView(game, gameLp)
+
+                            val pad = LinearLayout(this)
+                            pad.orientation = LinearLayout.HORIZONTAL
+                            pad.setBackgroundColor(Color.parseColor("#111827"))
+                            pad.setPadding(16, 12, 16, 12)
+
+                            val labels = arrayOf("LEFT", "UP", "DOWN", "RIGHT", "RESET")
+                            for (i in 0 until labels.size) {
+                                val idx = i
+                                val b = Button(this)
+                                b.text = labels[i]
+                                b.setTextColor(Color.WHITE)
+                                b.setBackgroundColor(if (idx == 4) Color.parseColor("#DC2626") else Color.parseColor("#1E293B"))
+                                val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                                lp.setMargins(4, 0, 4, 0)
+                                b.layoutParams = lp
+                                b.setOnClickListener {
+                                    if (idx == 0) game.setDirection(-1, 0)
+                                    else if (idx == 1) game.setDirection(0, -1)
+                                    else if (idx == 2) game.setDirection(0, 1)
+                                    else if (idx == 3) game.setDirection(1, 0)
+                                    else game.resetGame()
+                                }
+                                pad.addView(b)
+                            }
+                            root.addView(pad)
+                            setContentView(root)
+                        }
+                    }
+                """.trimIndent() + "\n"
+
+                files["src/$pkgPath/SnakeGameView.kt"] = """
+                    package $packageName
+
+                    import android.content.Context
+                    import android.graphics.Canvas
+                    import android.graphics.Color
+                    import android.graphics.Paint
+                    import android.os.Handler
+                    import android.os.Looper
+                    import android.view.MotionEvent
+                    import android.view.View
+                    import java.util.ArrayList
+                    import java.util.Random
+
+                    class SnakeGameView(context: Context) : View(context) {
+                        private val gridSize = 16
+                        private val bodyX = ArrayList<Int>()
+                        private val bodyY = ArrayList<Int>()
+                        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+                        private val handler = Handler(Looper.getMainLooper())
+                        private val rng = Random()
+                        private var dirX = 1
+                        private var dirY = 0
+                        private var foodX = 10
+                        private var foodY = 8
+                        private var score = 0
+                        private var best = 0
+                        private var gameOver = false
+                        private var downX = 0f
+                        private var downY = 0f
+
+                        private val ticker = object : Runnable {
+                            override fun run() {
+                                stepGame()
+                                invalidate()
+                                handler.postDelayed(this, 160)
+                            }
+                        }
+
+                        init {
+                            resetGame()
+                            handler.postDelayed(ticker, 160)
+                        }
+
+                        fun setDirection(dx: Int, dy: Int) {
+                            if (dx == -dirX && dy == -dirY) return
+                            dirX = dx
+                            dirY = dy
+                        }
+
+                        fun resetGame() {
+                            bodyX.clear()
+                            bodyY.clear()
+                            bodyX.add(6)
+                            bodyY.add(8)
+                            bodyX.add(5)
+                            bodyY.add(8)
+                            bodyX.add(4)
+                            bodyY.add(8)
+                            dirX = 1
+                            dirY = 0
+                            score = 0
+                            gameOver = false
+                            spawnFood()
+                            invalidate()
+                        }
+
+                        private fun spawnFood() {
+                            foodX = rng.nextInt(gridSize)
+                            foodY = rng.nextInt(gridSize)
+                        }
+
+                        private fun stepGame() {
+                            if (gameOver) return
+                            val nx = bodyX[0] + dirX
+                            val ny = bodyY[0] + dirY
+                            if (nx < 0 || ny < 0 || nx >= gridSize || ny >= gridSize) {
+                                gameOver = true
+                                return
+                            }
+                            for (i in 0 until bodyX.size) {
+                                if (bodyX[i] == nx && bodyY[i] == ny) {
+                                    gameOver = true
+                                    return
+                                }
+                            }
+                            bodyX.add(0, nx)
+                            bodyY.add(0, ny)
+                            if (nx == foodX && ny == foodY) {
+                                score += 10
+                                if (score > best) best = score
+                                spawnFood()
+                            } else {
+                                bodyX.removeAt(bodyX.size - 1)
+                                bodyY.removeAt(bodyY.size - 1)
+                            }
+                        }
+
+                        override fun onDraw(canvas: Canvas) {
+                            super.onDraw(canvas)
+                            val w = Math.max(1, getWidth())
+                            val h = Math.max(1, getHeight())
+                            canvas.drawColor(Color.parseColor("#0B0F17"))
+
+                            val board = Math.min(w - 32f, h - 100f)
+                            val cell = board / gridSize
+                            val ox = (w - board) * 0.5f
+                            val oy = 76f
+
+                            paint.style = Paint.Style.FILL
+                            paint.color = Color.parseColor("#111827")
+                            canvas.drawRect(ox, oy, ox + board, oy + board, paint)
+
+                            paint.color = Color.parseColor("#F43F5E")
+                            canvas.drawCircle(ox + (foodX + 0.5f) * cell, oy + (foodY + 0.5f) * cell, cell * 0.38f, paint)
+
+                            for (i in 0 until bodyX.size) {
+                                paint.color = if (i == 0) Color.parseColor("#4ADE80") else Color.parseColor("#22C55E")
+                                val l = ox + bodyX[i] * cell + 2f
+                                val t = oy + bodyY[i] * cell + 2f
+                                canvas.drawRoundRect(l, t, l + cell - 4f, t + cell - 4f, 6f, 6f, paint)
+                            }
+
+                            paint.color = Color.WHITE
+                            paint.textSize = 32f
+                            paint.textAlign = Paint.Align.LEFT
+                            canvas.drawText("SCORE ${'$'}score   BEST ${'$'}best", ox, 48f, paint)
+
+                            if (gameOver) {
+                                paint.color = Color.parseColor("#CC000000")
+                                canvas.drawRect(ox, oy + board * 0.35f, ox + board, oy + board * 0.65f, paint)
+                                paint.color = Color.parseColor("#F87171")
+                                paint.textAlign = Paint.Align.CENTER
+                                paint.textSize = 42f
+                                canvas.drawText("GAME OVER", ox + board * 0.5f, oy + board * 0.50f, paint)
+                            }
+                        }
+
+                        override fun onTouchEvent(event: MotionEvent): Boolean {
+                            if (event.action == MotionEvent.ACTION_DOWN) {
+                                if (gameOver) {
+                                    resetGame()
+                                    return true
+                                }
+                                downX = event.x
+                                downY = event.y
+                                return true
+                            } else if (event.action == MotionEvent.ACTION_UP) {
+                                val dx = event.x - downX
+                                val dy = event.y - downY
+                                if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 24f) {
+                                    setDirection(if (dx > 0) 1 else -1, 0)
+                                } else if (Math.abs(dy) > 24f) {
+                                    setDirection(0, if (dy > 0) 1 else -1)
+                                }
+                                return true
+                            }
+                            return super.onTouchEvent(event)
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.MUSIC_SYNTH_PAD -> {
+                files["src/$pkgPath/MainActivity.kt"] = """
+                    package $packageName
+
+                    import android.app.Activity
+                    import android.graphics.Color
+                    import android.graphics.Typeface
+                    import android.os.Bundle
+                    import android.os.Handler
+                    import android.os.Looper
+                    import android.view.Gravity
+                    import android.widget.Button
+                    import android.widget.GridLayout
+                    import android.widget.LinearLayout
+                    import android.widget.TextView
+
+                    class MainActivity : Activity() {
+                        private val handler = Handler(Looper.getMainLooper())
+                        private lateinit var statusBanner: TextView
+                        private var bpm = 120
+                        private var currentStep = 0
+                        private var playing = false
+
+                        private val stepLoop = object : Runnable {
+                            override fun run() {
+                                if (playing) {
+                                    currentStep = (currentStep + 1) % 8
+                                    statusBanner.text = "PLAYING • STEP ${'$'}{currentStep + 1}/8 • ${'$'}bpm BPM"
+                                    handler.postDelayed(this, Math.max(120, 15000 / bpm).toLong())
+                                }
+                            }
+                        }
+
+                        override fun onCreate(savedInstanceState: Bundle?) {
+                            super.onCreate(savedInstanceState)
+                            val root = LinearLayout(this)
+                            root.orientation = LinearLayout.VERTICAL
+                            root.setBackgroundColor(Color.parseColor("#0F172A"))
+                            root.setPadding(24, 36, 24, 24)
+
+                            statusBanner = TextView(this)
+                            statusBanner.text = "BEAT STUDIO READY • 120 BPM"
+                            statusBanner.setTextColor(Color.parseColor("#38BDF8"))
+                            statusBanner.textSize = 16f
+                            statusBanner.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                            statusBanner.gravity = Gravity.CENTER
+                            statusBanner.setPadding(16, 24, 16, 24)
+                            statusBanner.setBackgroundColor(Color.parseColor("#1E293B"))
+                            root.addView(statusBanner)
+
+                            val grid = GridLayout(this)
+                            grid.columnCount = 3
+                            grid.setPadding(0, 24, 0, 24)
+
+                            val pads = arrayOf("KICK", "SNARE", "HI-HAT", "CLAP", "808 BASS", "CHORD", "ARP C4", "SYNTH E4", "BELL G4")
+                            val padColors = arrayOf("#EF4444", "#F97316", "#FACC15", "#22C55E", "#14B8A6", "#38BDF8", "#6366F1", "#A855F7", "#EC4899")
+
+                            for (i in 0 until pads.size) {
+                                val label = pads[i]
+                                val padBtn = Button(this)
+                                padBtn.text = label
+                                padBtn.setTextColor(Color.WHITE)
+                                padBtn.setBackgroundColor(Color.parseColor(padColors[i]))
+                                val gp = GridLayout.LayoutParams()
+                                gp.width = 0
+                                gp.height = 170
+                                gp.columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                                gp.setMargins(8, 8, 8, 8)
+                                padBtn.layoutParams = gp
+                                padBtn.setOnClickListener {
+                                    statusBanner.text = "TRIGGERED: ${'$'}label • ${'$'}bpm BPM"
+                                }
+                                grid.addView(padBtn)
+                            }
+                            root.addView(grid)
+
+                            val transport = LinearLayout(this)
+                            transport.orientation = LinearLayout.HORIZONTAL
+                            val playBtn = Button(this)
+                            playBtn.text = "Start / Stop"
+                            playBtn.setTextColor(Color.WHITE)
+                            playBtn.setBackgroundColor(Color.parseColor("#10B981"))
+                            playBtn.setOnClickListener {
+                                playing = !playing
+                                if (playing) {
+                                    handler.post(stepLoop)
+                                } else {
+                                    handler.removeCallbacks(stepLoop)
+                                    statusBanner.text = "PAUSED • ${'$'}bpm BPM"
+                                }
+                            }
+                            val tempoUp = Button(this)
+                            tempoUp.text = "+10 BPM"
+                            tempoUp.setOnClickListener {
+                                bpm = Math.min(200, bpm + 10)
+                                statusBanner.text = "TEMPO: ${'$'}bpm BPM"
+                            }
+                            transport.addView(playBtn)
+                            transport.addView(tempoUp)
+                            root.addView(transport)
+                            setContentView(root)
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.EXPENSE_TRACKER -> {
+                files["src/$pkgPath/MainActivity.kt"] = """
+                    package $packageName
+
+                    import android.app.Activity
+                    import android.graphics.Color
+                    import android.graphics.Typeface
+                    import android.os.Bundle
+                    import android.widget.Button
+                    import android.widget.EditText
+                    import android.widget.LinearLayout
+                    import android.widget.ScrollView
+                    import android.widget.TextView
+                    import android.widget.Toast
+
+                    class MainActivity : Activity() {
+                        private var balance = 1250.0
+                        private lateinit var balanceLabel: TextView
+                        private lateinit var descInput: EditText
+                        private lateinit var amountInput: EditText
+                        private lateinit var ledgerList: LinearLayout
+
+                        override fun onCreate(savedInstanceState: Bundle?) {
+                            super.onCreate(savedInstanceState)
+                            val root = LinearLayout(this)
+                            root.orientation = LinearLayout.VERTICAL
+                            root.setBackgroundColor(Color.parseColor("#0F172A"))
+                            root.setPadding(28, 36, 28, 28)
+
+                            balanceLabel = TextView(this)
+                            balanceLabel.text = "Balance: $1250.00"
+                            balanceLabel.textSize = 28f
+                            balanceLabel.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                            balanceLabel.setTextColor(Color.parseColor("#34D399"))
+                            balanceLabel.setPadding(24, 24, 24, 24)
+                            balanceLabel.setBackgroundColor(Color.parseColor("#1E293B"))
+                            root.addView(balanceLabel)
+
+                            descInput = EditText(this)
+                            descInput.hint = "Category or item (e.g. Cloud Hosting)"
+                            descInput.setTextColor(Color.WHITE)
+                            descInput.setHintTextColor(Color.parseColor("#94A3B8"))
+                            root.addView(descInput)
+
+                            amountInput = EditText(this)
+                            amountInput.hint = "Amount (e.g. 24.50)"
+                            amountInput.setTextColor(Color.WHITE)
+                            amountInput.setHintTextColor(Color.parseColor("#94A3B8"))
+                            root.addView(amountInput)
+
+                            val row = LinearLayout(this)
+                            row.orientation = LinearLayout.HORIZONTAL
+                            val expenseBtn = Button(this)
+                            expenseBtn.text = "- Expense"
+                            expenseBtn.setTextColor(Color.WHITE)
+                            expenseBtn.setBackgroundColor(Color.parseColor("#EF4444"))
+                            expenseBtn.setOnClickListener { recordEntry(false) }
+
+                            val incomeBtn = Button(this)
+                            incomeBtn.text = "+ Income"
+                            incomeBtn.setTextColor(Color.WHITE)
+                            incomeBtn.setBackgroundColor(Color.parseColor("#10B981"))
+                            incomeBtn.setOnClickListener { recordEntry(true) }
+
+                            row.addView(expenseBtn)
+                            row.addView(incomeBtn)
+                            root.addView(row)
+
+                            val scroll = ScrollView(this)
+                            ledgerList = LinearLayout(this)
+                            ledgerList.orientation = LinearLayout.VERTICAL
+                            scroll.addView(ledgerList)
+                            root.addView(scroll)
+                            setContentView(root)
+                        }
+
+                        private fun recordEntry(isIncome: Boolean) {
+                            var label = descInput.text.toString().trim()
+                            if (label.isEmpty()) label = if (isIncome) "Deposit" else "Purchase"
+                            val rawAmt = amountInput.text.toString().trim()
+                            val amt = if (rawAmt.isEmpty()) 10.0 else Math.abs(rawAmt.toDouble())
+                            balance += if (isIncome) amt else -amt
+                            balanceLabel.text = String.format("Balance: $%.2f", balance)
+                            val item = TextView(this)
+                            val sign = if (isIncome) "+ $" else "- $"
+                            item.text = sign + String.format("%.2f", amt) + "  •  " + label
+                            item.setTextColor(if (isIncome) Color.parseColor("#34D399") else Color.parseColor("#FCA5A5"))
+                            item.setPadding(16, 14, 16, 14)
+                            ledgerList.addView(item, 0)
+                            descInput.setText("")
+                            amountInput.setText("")
+                            Toast.makeText(this@MainActivity, "Entry logged", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.QUIZ_STUDIO -> {
+                files["src/$pkgPath/MainActivity.kt"] = """
+                    package $packageName
+
+                    import android.app.Activity
+                    import android.graphics.Color
+                    import android.graphics.Typeface
+                    import android.os.Bundle
+                    import android.widget.Button
+                    import android.widget.LinearLayout
+                    import android.widget.TextView
+                    import android.widget.Toast
+
+                    class MainActivity : Activity() {
+                        private val questions = arrayOf(
+                            "Which file declares an Android app's launcher Activity?",
+                            "Which bytecode format runs on Android ART?",
+                            "Which layout arranges child views vertically or horizontally?",
+                            "What signs an APK cleanly with v1/v2/v3 schemes?"
+                        )
+                        private val answers = arrayOf(
+                            "AndroidManifest.xml",
+                            "DEX (Dalvik Executable)",
+                            "LinearLayout",
+                            "ApkSigner"
+                        )
+                        private val opt0 = arrayOf("AndroidManifest.xml", "build.gradle", "strings.xml", "styles.xml")
+                        private val opt1 = arrayOf("DEX (Dalvik Executable)", "ELF64", "WASM", "MSIL")
+                        private val opt2 = arrayOf("LinearLayout", "RecyclerView", "SurfaceView", "IntentFilter")
+                        private val opt3 = arrayOf("ApkSigner", "ZipAligner", "DexMerge", "Aapt")
+
+                        private var idx = 0
+                        private var score = 0
+                        private var streak = 0
+                        private lateinit var scoreView: TextView
+                        private lateinit var questionView: TextView
+                        private lateinit var btn0: Button
+                        private lateinit var btn1: Button
+                        private lateinit var btn2: Button
+                        private lateinit var btn3: Button
+
+                        override fun onCreate(savedInstanceState: Bundle?) {
+                            super.onCreate(savedInstanceState)
+                            val root = LinearLayout(this)
+                            root.orientation = LinearLayout.VERTICAL
+                            root.setBackgroundColor(Color.parseColor("#0B1120"))
+                            root.setPadding(32, 48, 32, 32)
+
+                            scoreView = TextView(this)
+                            scoreView.setTextColor(Color.parseColor("#38BDF8"))
+                            scoreView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                            scoreView.textSize = 16f
+                            root.addView(scoreView)
+
+                            questionView = TextView(this)
+                            questionView.setTextColor(Color.WHITE)
+                            questionView.textSize = 20f
+                            questionView.setTypeface(Typeface.DEFAULT_BOLD)
+                            questionView.setPadding(0, 24, 0, 32)
+                            root.addView(questionView)
+
+                            btn0 = makeOptionButton(0)
+                            root.addView(btn0)
+                            btn1 = makeOptionButton(1)
+                            root.addView(btn1)
+                            btn2 = makeOptionButton(2)
+                            root.addView(btn2)
+                            btn3 = makeOptionButton(3)
+                            root.addView(btn3)
+
+                            renderQuestion()
+                            setContentView(root)
+                        }
+
+                        private fun makeOptionButton(choice: Int): Button {
+                            val b = Button(this)
+                            b.setTextColor(Color.WHITE)
+                            b.setBackgroundColor(Color.parseColor("#1E293B"))
+                            val lp = LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+                            )
+                            lp.setMargins(0, 10, 0, 10)
+                            b.layoutParams = lp
+                            b.setOnClickListener { answerQuestion(choice) }
+                            return b
+                        }
+
+                        private fun currentOption(qIdx: Int, c: Int): String {
+                            if (qIdx == 0) return opt0[c]
+                            if (qIdx == 1) return opt1[c]
+                            if (qIdx == 2) return opt2[c]
+                            return opt3[c]
+                        }
+
+                        private fun renderQuestion() {
+                            val qIdx = idx % questions.size
+                            scoreView.text = "SCORE: ${'$'}score   STREAK: x${'$'}streak   Q${'$'}{qIdx + 1}/${'$'}{questions.size}"
+                            questionView.text = questions[qIdx]
+                            btn0.text = currentOption(qIdx, 0)
+                            btn1.text = currentOption(qIdx, 1)
+                            btn2.text = currentOption(qIdx, 2)
+                            btn3.text = currentOption(qIdx, 3)
+                        }
+
+                        private fun answerQuestion(choice: Int) {
+                            val qIdx = idx % questions.size
+                            val picked = currentOption(qIdx, choice)
+                            if (picked.equals(answers[qIdx])) {
+                                streak++
+                                score += 100 * streak
+                                Toast.makeText(this@MainActivity, "Correct! +${'$'}{100 * streak}", Toast.LENGTH_SHORT).show()
+                            } else {
+                                streak = 0
+                                Toast.makeText(this@MainActivity, "Answer: ${'$'}{answers[qIdx]}", Toast.LENGTH_SHORT).show()
+                            }
+                            idx++
+                            renderQuestion()
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.WEATHER_DASHBOARD -> {
+                files["src/$pkgPath/MainActivity.kt"] = """
+                    package $packageName
+
+                    import android.app.Activity
+                    import android.graphics.Color
+                    import android.graphics.Typeface
+                    import android.os.Bundle
+                    import android.widget.Button
+                    import android.widget.LinearLayout
+                    import android.widget.TextView
+
+                    class MainActivity : Activity() {
+                        private lateinit var cityTitle: TextView
+                        private lateinit var tempView: TextView
+                        private lateinit var metaView: TextView
+                        private lateinit var chartView: ForecastChartView
+
+                        override fun onCreate(savedInstanceState: Bundle?) {
+                            super.onCreate(savedInstanceState)
+                            val root = LinearLayout(this)
+                            root.orientation = LinearLayout.VERTICAL
+                            root.setBackgroundColor(Color.parseColor("#0B1324"))
+                            root.setPadding(28, 40, 28, 28)
+
+                            val cityBar = LinearLayout(this)
+                            cityBar.orientation = LinearLayout.HORIZONTAL
+                            val cities = arrayOf("Tokyo", "London", "New York", "Cairo")
+                            val temps = intArrayOf(23, 15, 19, 31)
+                            val conds = arrayOf("Clear • Wind 11 km/h", "Light Mist • Wind 18 km/h", "Partly Cloudy • Wind 14 km/h", "Sunny • Wind 9 km/h")
+
+                            cityTitle = TextView(this)
+                            cityTitle.setTextColor(Color.parseColor("#93C5FD"))
+                            cityTitle.textSize = 18f
+                            cityTitle.setPadding(0, 24, 0, 8)
+
+                            tempView = TextView(this)
+                            tempView.setTextColor(Color.WHITE)
+                            tempView.textSize = 48f
+                            tempView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+
+                            metaView = TextView(this)
+                            metaView.setTextColor(Color.parseColor("#94A3B8"))
+                            metaView.setPadding(0, 8, 0, 24)
+
+                            chartView = ForecastChartView(this)
+
+                            for (i in 0 until cities.size) {
+                                val idx = i
+                                val b = Button(this)
+                                b.text = cities[i]
+                                b.setTextColor(Color.WHITE)
+                                b.setBackgroundColor(Color.parseColor("#1E293B"))
+                                val lp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                                lp.setMargins(4, 0, 4, 0)
+                                b.layoutParams = lp
+                                b.setOnClickListener {
+                                    cityTitle.text = cities[idx] + " Weather Station"
+                                    tempView.text = "${'$'}{temps[idx]}°C"
+                                    metaView.text = conds[idx]
+                                    chartView.setBaseTemp(temps[idx])
+                                }
+                                cityBar.addView(b)
+                            }
+
+                            root.addView(cityBar)
+                            root.addView(cityTitle)
+                            root.addView(tempView)
+                            root.addView(metaView)
+                            val chartLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+                            root.addView(chartView, chartLp)
+
+                            cityTitle.text = cities[0] + " Weather Station"
+                            tempView.text = "${'$'}{temps[0]}°C"
+                            metaView.text = conds[0]
+                            chartView.setBaseTemp(temps[0])
+                            setContentView(root)
+                        }
+                    }
+                """.trimIndent() + "\n"
+
+                files["src/$pkgPath/ForecastChartView.kt"] = """
+                    package $packageName
+
+                    import android.content.Context
+                    import android.graphics.Canvas
+                    import android.graphics.Color
+                    import android.graphics.Paint
+                    import android.view.View
+
+                    class ForecastChartView(context: Context) : View(context) {
+                        private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+                        private var baseTemp = 23
+
+                        fun setBaseTemp(t: Int) {
+                            baseTemp = t
+                            invalidate()
+                        }
+
+                        override fun onDraw(canvas: Canvas) {
+                            super.onDraw(canvas)
+                            val w = Math.max(1f, getWidth().toFloat())
+                            val h = Math.max(1f, getHeight().toFloat())
+                            canvas.drawColor(Color.parseColor("#111827"))
+
+                            val offsets = intArrayOf(-3, -2, 0, 2, 3, 1, -1)
+                            val stepX = w / (offsets.size + 1)
+                            paint.style = Paint.Style.STROKE
+                            paint.strokeWidth = 6f
+                            paint.color = Color.parseColor("#38BDF8")
+
+                            var prevX = 0f
+                            var prevY = 0f
+                            for (i in 0 until offsets.size) {
+                                val x = stepX * (i + 1)
+                                val y = h * 0.55f - offsets[i] * 26f
+                                if (i > 0) canvas.drawLine(prevX, prevY, x, y, paint)
+                                prevX = x
+                                prevY = y
+                            }
+
+                            paint.style = Paint.Style.FILL
+                            for (i in 0 until offsets.size) {
+                                val x = stepX * (i + 1)
+                                val y = h * 0.55f - offsets[i] * 26f
+                                paint.color = Color.parseColor("#FBBF24")
+                                canvas.drawCircle(x, y, 10f, paint)
+                                paint.color = Color.WHITE
+                                paint.textSize = 26f
+                                paint.textAlign = Paint.Align.CENTER
+                                canvas.drawText("${'$'}{baseTemp + offsets[i]}°", x, y - 20f, paint)
+                            }
+                        }
+                    }
+                """.trimIndent() + "\n"
+            }
+
+            ProjectTemplate.PIXEL_SPRITE_EDITOR -> {
+                files["src/$pkgPath/MainActivity.kt"] = """
+                    package $packageName
+
+                    import android.app.Activity
+                    import android.graphics.Color
+                    import android.os.Bundle
+                    import android.widget.Button
+                    import android.widget.LinearLayout
+
+                    class MainActivity : Activity() {
+                        override fun onCreate(savedInstanceState: Bundle?) {
+                            super.onCreate(savedInstanceState)
+                            val root = LinearLayout(this)
+                            root.orientation = LinearLayout.VERTICAL
+                            root.setBackgroundColor(Color.parseColor("#0B0F17"))
+
+                            val canvasView = PixelCanvasView(this)
+                            val canvasLp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+                            root.addView(canvasView, canvasLp)
+
+                            val palette = LinearLayout(this)
+                            palette.orientation = LinearLayout.HORIZONTAL
+                            palette.setBackgroundColor(Color.parseColor("#182030"))
+                            palette.setPadding(12, 12, 12, 12)
+
+                            val swatches = intArrayOf(
+                                Color.parseColor("#38BDF8"),
+                                Color.parseColor("#22C55E"),
+                                Color.parseColor("#FACC15"),
+                                Color.parseColor("#F43F5E"),
+                                Color.parseColor("#FFFFFF")
+                            )
+                            val names = arrayOf("Sky", "Lime", "Gold", "Rose", "White")
+                            for (i in 0 until swatches.size) {
+                                val c = swatches[i]
+                                val b = Button(this)
+                                b.text = names[i]
+                                b.setTextColor(Color.BLACK)
+                                b.setBackgroundColor(c)
+                                b.setOnClickListener { canvasView.setBrushColor(c) }
+                                palette.addView(b)
+                            }
+                            val clearBtn = Button(this)
+                            clearBtn.text = "Clear"
+                            clearBtn.setOnClickListener { canvasView.clearGrid() }
+                            palette.addView(clearBtn)
+
+                            root.addView(palette)
+                            setContentView(root)
+                        }
+                    }
+                """.trimIndent() + "\n"
+
+                files["src/$pkgPath/PixelCanvasView.kt"] = """
+                    package $packageName
+
+                    import android.content.Context
+                    import android.graphics.Canvas
+                    import android.graphics.Color
+                    import android.graphics.Paint
+                    import android.view.MotionEvent
+                    import android.view.View
+
+                    class PixelCanvasView(context: Context) : View(context) {
+                        private val gridSize = 12
+                        private val pixels = IntArray(gridSize * gridSize)
+                        private val paint = Paint()
+                        private var activeColor = Color.parseColor("#38BDF8")
+
+                        init {
+                            clearGrid()
+                        }
+
+                        fun setBrushColor(color: Int) {
+                            activeColor = color
+                        }
+
+                        fun clearGrid() {
+                            for (i in 0 until pixels.size) {
+                                pixels[i] = 0
+                            }
+                            invalidate()
+                        }
+
+                        override fun onDraw(canvas: Canvas) {
+                            super.onDraw(canvas)
+                            val board = Math.min(getWidth(), getHeight()) - 32f
+                            val cell = board / gridSize
+                            val ox = (getWidth() - board) * 0.5f
+                            val oy = (getHeight() - board) * 0.5f
+                            canvas.drawColor(Color.parseColor("#0B0F17"))
+
+                            for (r in 0 until gridSize) {
+                                for (c in 0 until gridSize) {
+                                    val col = pixels[r * gridSize + c]
+                                    val l = ox + c * cell
+                                    val t = oy + r * cell
+                                    paint.style = Paint.Style.FILL
+                                    paint.color = if (col == 0) Color.parseColor("#111827") else col
+                                    canvas.drawRect(l + 1f, t + 1f, l + cell - 1f, t + cell - 1f, paint)
+                                    paint.style = Paint.Style.STROKE
+                                    paint.color = Color.parseColor("#1E293B")
+                                    canvas.drawRect(l, t, l + cell, t + cell, paint)
+                                }
+                            }
+                        }
+
+                        override fun onTouchEvent(event: MotionEvent): Boolean {
+                            if (event.action == MotionEvent.ACTION_DOWN || event.action == MotionEvent.ACTION_MOVE) {
+                                val board = Math.min(getWidth(), getHeight()) - 32f
+                                val ox = (getWidth() - board) * 0.5f
+                                val oy = (getHeight() - board) * 0.5f
+                                val c = (((event.x - ox) / board) * gridSize).toInt()
+                                val r = (((event.y - oy) / board) * gridSize).toInt()
+                                if (c >= 0 && c < gridSize && r >= 0 && r < gridSize) {
+                                    pixels[r * gridSize + c] = activeColor
+                                    invalidate()
+                                }
+                                return true
+                            }
+                            return super.onTouchEvent(event)
                         }
                     }
                 """.trimIndent() + "\n"

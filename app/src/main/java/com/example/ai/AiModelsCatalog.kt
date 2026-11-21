@@ -332,6 +332,22 @@ object AiModelsCatalog {
             contextWindow = "1M ctx",
         ),
         AiModelOption(
+            id = "gpt-5.1",
+            provider = AiProvider.OPENAI,
+            label = "GPT-5.1",
+            badge = "GPT-5.1",
+            description = "OpenAI GPT-5.1 flagship coding & agentic model.",
+            contextWindow = "400K ctx",
+        ),
+        AiModelOption(
+            id = "gpt-5-codex",
+            provider = AiProvider.OPENAI,
+            label = "GPT-5 Codex",
+            badge = "Codex",
+            description = "Agentic software engineering model via OpenAI Responses API.",
+            contextWindow = "400K ctx",
+        ),
+        AiModelOption(
             id = "gpt-5",
             provider = AiProvider.OPENAI,
             label = "GPT-5",
@@ -409,8 +425,9 @@ object AiModelsCatalog {
             provider = AiProvider.OPENAI,
             label = "ChatGPT-4o Latest",
             badge = "4o",
-            description = "Dynamic alias pointing to the current ChatGPT 4o snapshot.",
+            description = "Dynamic alias pointing to the current ChatGPT 4o snapshot (text-mode tool support).",
             contextWindow = "128K ctx",
+            supportsTools = false,
         ),
         // OpenAI Reasoning o-Series
         AiModelOption(
@@ -425,8 +442,8 @@ object AiModelsCatalog {
             id = "o3-pro",
             provider = AiProvider.OPENAI,
             label = "o3-pro",
-            badge = "o-Series",
-            description = "Extended-compute o3 reasoning for toughest architecture problems.",
+            badge = "Responses",
+            description = "Extended-compute o3 reasoning via OpenAI Responses API.",
             contextWindow = "200K ctx",
         ),
         AiModelOption(
@@ -458,8 +475,18 @@ object AiModelsCatalog {
             provider = AiProvider.OPENAI,
             label = "o1-mini",
             badge = "o-Series",
-            description = "Compact first-generation o-series reasoning model.",
+            description = "Compact first-generation o-series reasoning model (text-mode adapted).",
             contextWindow = "128K ctx",
+            supportsTools = false,
+            supportsSystemPrompt = false,
+        ),
+        AiModelOption(
+            id = "codex-mini-latest",
+            provider = AiProvider.OPENAI,
+            label = "Codex Mini Latest",
+            badge = "Codex",
+            description = "Fast coding CLI model routed via OpenAI Responses API.",
+            contextWindow = "200K ctx",
         ),
         // Classic GPT-4 & GPT-3.5
         AiModelOption(
@@ -522,13 +549,37 @@ object AiModelsCatalog {
             description = "High-capacity long-horizon Claude model for demanding workflows.",
             contextWindow = "200K ctx",
         ),
-        // Claude 4.5 / 4.1 / 4.0 Generation
+        // Claude 4.6 / 4.5 / 4.1 / 4.0 Generation (Verified Anthropic IDs)
+        AiModelOption(
+            id = "claude-opus-4-6",
+            provider = AiProvider.CLAUDE,
+            label = "Claude Opus 4.6",
+            badge = "Claude 4.6",
+            description = "Flagship Anthropic Claude Opus 4.6 for multi-file Android engineering.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
+            id = "claude-sonnet-4-6",
+            provider = AiProvider.CLAUDE,
+            label = "Claude Sonnet 4.6",
+            badge = "Claude 4.6",
+            description = "Fast, flagship Claude Sonnet 4.6 coding agent.",
+            contextWindow = "200K ctx",
+        ),
         AiModelOption(
             id = "claude-opus-4-5",
             provider = AiProvider.CLAUDE,
             label = "Claude Opus 4.5",
             badge = "Claude 4.5",
             description = "High-intelligence Claude 4.5 Opus for multi-file refactoring.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
+            id = "claude-opus-4-5-20251101",
+            provider = AiProvider.CLAUDE,
+            label = "Claude Opus 4.5 (2025-11-01)",
+            badge = "Claude 4.5",
+            description = "Pinned Claude Opus 4.5 snapshot.",
             contextWindow = "200K ctx",
         ),
         AiModelOption(
@@ -540,6 +591,14 @@ object AiModelsCatalog {
             contextWindow = "200K ctx",
         ),
         AiModelOption(
+            id = "claude-sonnet-4-5-20250929",
+            provider = AiProvider.CLAUDE,
+            label = "Claude Sonnet 4.5 (2025-09-29)",
+            badge = "Claude 4.5",
+            description = "Pinned Claude Sonnet 4.5 snapshot.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
             id = "claude-haiku-4-5",
             provider = AiProvider.CLAUDE,
             label = "Claude Haiku 4.5",
@@ -548,11 +607,27 @@ object AiModelsCatalog {
             contextWindow = "200K ctx",
         ),
         AiModelOption(
+            id = "claude-haiku-4-5-20251001",
+            provider = AiProvider.CLAUDE,
+            label = "Claude Haiku 4.5 (2025-10-01)",
+            badge = "Claude 4.5",
+            description = "Pinned Claude Haiku 4.5 snapshot.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
             id = "claude-opus-4-1",
             provider = AiProvider.CLAUDE,
             label = "Claude Opus 4.1",
             badge = "Claude 4.1",
             description = "Refined Claude 4.1 Opus for complex agentic coding tasks.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
+            id = "claude-opus-4-1-20250805",
+            provider = AiProvider.CLAUDE,
+            label = "Claude Opus 4.1 (2025-08-05)",
+            badge = "Claude 4.1",
+            description = "Pinned Claude Opus 4.1 snapshot.",
             contextWindow = "200K ctx",
         ),
         AiModelOption(
@@ -581,11 +656,27 @@ object AiModelsCatalog {
             contextWindow = "200K ctx",
         ),
         AiModelOption(
+            id = "claude-3-7-sonnet-20250219",
+            provider = AiProvider.CLAUDE,
+            label = "Claude 3.7 Sonnet (2025-02-19)",
+            badge = "Claude 3.7",
+            description = "Pinned Claude 3.7 Sonnet engineering model.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
             id = "claude-3-5-sonnet-latest",
             provider = AiProvider.CLAUDE,
             label = "Claude 3.5 Sonnet",
             badge = "Claude 3.5",
             description = "Classic 3.5 Sonnet coding favorite.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
+            id = "claude-3-5-sonnet-20241022",
+            provider = AiProvider.CLAUDE,
+            label = "Claude 3.5 Sonnet (2024-10-22)",
+            badge = "Claude 3.5",
+            description = "Classic Claude 3.5 Sonnet snapshot.",
             contextWindow = "200K ctx",
         ),
         AiModelOption(
@@ -597,11 +688,19 @@ object AiModelsCatalog {
             contextWindow = "200K ctx",
         ),
         AiModelOption(
+            id = "claude-3-5-haiku-20241022",
+            provider = AiProvider.CLAUDE,
+            label = "Claude 3.5 Haiku (2024-10-22)",
+            badge = "Claude 3.5",
+            description = "Pinned Claude 3.5 Haiku snapshot.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
             id = "claude-3-opus-20240229",
             provider = AiProvider.CLAUDE,
             label = "Claude 3 Opus",
             badge = "Claude 3",
-            description = "Legacy Claude 3 Opus flagship.",
+            description = "Legacy Claude 3 Opus flagship (4096 max_tokens adapted).",
             contextWindow = "200K ctx",
         ),
         AiModelOption(
@@ -609,7 +708,7 @@ object AiModelsCatalog {
             provider = AiProvider.CLAUDE,
             label = "Claude 3 Sonnet",
             badge = "Claude 3",
-            description = "Legacy balanced Claude 3 model.",
+            description = "Legacy balanced Claude 3 model (4096 max_tokens adapted).",
             contextWindow = "200K ctx",
         ),
         AiModelOption(
@@ -617,7 +716,7 @@ object AiModelsCatalog {
             provider = AiProvider.CLAUDE,
             label = "Claude 3 Haiku",
             badge = "Claude 3",
-            description = "Legacy ultra-fast Claude 3 Haiku.",
+            description = "Legacy ultra-fast Claude 3 Haiku (4096 max_tokens adapted).",
             contextWindow = "200K ctx",
         ),
     )
@@ -722,11 +821,35 @@ object AiModelsCatalog {
             contextWindow = "1M ctx",
         ),
         AiModelOption(
+            id = "anthropic/claude-opus-4.5",
+            provider = AiProvider.OPENROUTER,
+            label = "Claude Opus 4.5 (OR)",
+            badge = "Claude",
+            description = "Anthropic Claude Opus 4.5 routed via OpenRouter.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
+            id = "anthropic/claude-sonnet-4.5",
+            provider = AiProvider.OPENROUTER,
+            label = "Claude Sonnet 4.5 (OR)",
+            badge = "Claude",
+            description = "Anthropic Claude Sonnet 4.5 routed via OpenRouter.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
             id = "anthropic/claude-sonnet-4",
             provider = AiProvider.OPENROUTER,
             label = "Claude Sonnet 4 (OR)",
             badge = "Claude",
             description = "Anthropic Claude Sonnet 4 routed via OpenRouter with accurate tool calling.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
+            id = "anthropic/claude-haiku-4.5",
+            provider = AiProvider.OPENROUTER,
+            label = "Claude Haiku 4.5 (OR)",
+            badge = "Claude",
+            description = "Anthropic Claude Haiku 4.5 routed via OpenRouter.",
             contextWindow = "200K ctx",
         ),
         AiModelOption(
@@ -738,11 +861,27 @@ object AiModelsCatalog {
             contextWindow = "200K ctx",
         ),
         AiModelOption(
+            id = "anthropic/claude-3.5-sonnet",
+            provider = AiProvider.OPENROUTER,
+            label = "Claude 3.5 Sonnet (OR)",
+            badge = "Claude",
+            description = "Anthropic Claude 3.5 Sonnet routed via OpenRouter.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
             id = "openai/gpt-5",
             provider = AiProvider.OPENROUTER,
             label = "GPT-5 (OR)",
             badge = "GPT-5",
             description = "OpenAI GPT-5 routed via OpenRouter.",
+            contextWindow = "400K ctx",
+        ),
+        AiModelOption(
+            id = "openai/gpt-5-mini",
+            provider = AiProvider.OPENROUTER,
+            label = "GPT-5 Mini (OR)",
+            badge = "GPT-5",
+            description = "OpenAI GPT-5 Mini routed via OpenRouter.",
             contextWindow = "400K ctx",
         ),
         AiModelOption(
@@ -752,6 +891,30 @@ object AiModelsCatalog {
             badge = "GPT-4.1",
             description = "OpenAI GPT-4.1 routed via OpenRouter with 1M context.",
             contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "openai/gpt-4o",
+            provider = AiProvider.OPENROUTER,
+            label = "GPT-4o (OR)",
+            badge = "4o",
+            description = "OpenAI GPT-4o routed via OpenRouter.",
+            contextWindow = "128K ctx",
+        ),
+        AiModelOption(
+            id = "openai/gpt-4o-mini",
+            provider = AiProvider.OPENROUTER,
+            label = "GPT-4o Mini (OR)",
+            badge = "4o",
+            description = "OpenAI GPT-4o Mini routed via OpenRouter.",
+            contextWindow = "128K ctx",
+        ),
+        AiModelOption(
+            id = "openai/o4-mini",
+            provider = AiProvider.OPENROUTER,
+            label = "o4-mini (OR)",
+            badge = "o-Series",
+            description = "OpenAI o4-mini reasoning model routed via OpenRouter.",
+            contextWindow = "200K ctx",
         ),
         AiModelOption(
             id = "qwen/qwen3-coder",
@@ -806,7 +969,7 @@ object AiModelsCatalog {
             AiProvider.OPENROUTER -> builtInOpenRouterModels
         }
         val liveForProvider = liveDiscovered.filter { it.provider == provider }
-        if (provider == AiProvider.OPENROUTER && liveForProvider.isNotEmpty()) {
+        if ((provider == AiProvider.OPENROUTER || provider == AiProvider.OPENAI || provider == AiProvider.CLAUDE) && liveForProvider.isNotEmpty()) {
             val builtInById = base.associateBy { it.id.lowercase() }
             val mergedLive = linkedMapOf<String, AiModelOption>()
             liveForProvider.forEach { live ->
@@ -814,7 +977,10 @@ object AiModelsCatalog {
                 val refined = if (builtInMeta != null) {
                     live.copy(
                         label = builtInMeta.label.ifBlank { live.label },
+                        badge = builtInMeta.badge.ifBlank { live.badge },
                         description = builtInMeta.description.ifBlank { live.description },
+                        contextWindow = builtInMeta.contextWindow.ifBlank { live.contextWindow },
+                        supportsTools = if (provider == AiProvider.OPENROUTER) live.supportsTools && builtInMeta.supportsTools else builtInMeta.supportsTools,
                         supportsSystemPrompt = live.supportsSystemPrompt && builtInMeta.supportsSystemPrompt,
                     )
                 } else {
@@ -904,6 +1070,75 @@ object AiModelsCatalog {
         )?.id ?: clean
     }
 
+    fun resolveOpenAiModelId(
+        requestedModelId: String,
+        liveModels: List<AiModelOption>,
+    ): String {
+        val clean = normalizeModelId(AiProvider.OPENAI, requestedModelId)
+        val liveOpenAi = liveModels.filter { it.provider == AiProvider.OPENAI }
+        if (liveOpenAi.isEmpty()) return clean
+        liveOpenAi.firstOrNull { it.id.equals(clean, ignoreCase = true) }?.let { return it.id }
+
+        val cleanTokens = clean.lowercase().split('-', '_', '.').filter { it.length >= 2 }.toSet()
+        return liveOpenAi.minWithOrNull(
+            compareBy<AiModelOption>(
+                { opt ->
+                    val optTokens = opt.id.lowercase().split('-', '_', '.').toSet()
+                    -cleanTokens.intersect(optTokens).size
+                },
+                { opt ->
+                    val id = opt.id.lowercase()
+                    when {
+                        id.startsWith("gpt-5") -> 0
+                        id.startsWith("gpt-4.1") -> 1
+                        id.startsWith("gpt-4o") -> 2
+                        id.startsWith("o4") || id.startsWith("o3") -> 3
+                        else -> 4
+                    }
+                },
+                { it.id.length },
+                { it.id },
+            ),
+        )?.id ?: clean
+    }
+
+    fun resolveClaudeModelId(
+        requestedModelId: String,
+        liveModels: List<AiModelOption>,
+    ): String {
+        val clean = normalizeModelId(AiProvider.CLAUDE, requestedModelId)
+        val liveClaude = liveModels.filter { it.provider == AiProvider.CLAUDE }
+        if (liveClaude.isEmpty()) return clean
+        liveClaude.firstOrNull { it.id.equals(clean, ignoreCase = true) }?.let { return it.id }
+
+        val cleanLower = clean.lowercase().removeSuffix("-latest")
+        liveClaude.firstOrNull {
+            val id = it.id.lowercase()
+            id.startsWith(cleanLower) || cleanLower.startsWith(id.removeSuffix("-latest"))
+        }?.let { return it.id }
+
+        val cleanTokens = cleanLower.split('-', '.').filter { it.length >= 2 }.toSet()
+        return liveClaude.minWithOrNull(
+            compareBy<AiModelOption>(
+                { opt ->
+                    val optTokens = opt.id.lowercase().split('-', '.').toSet()
+                    -cleanTokens.intersect(optTokens).size
+                },
+                { opt ->
+                    val id = opt.id.lowercase()
+                    when {
+                        id.contains("sonnet-4") -> 0
+                        id.contains("opus-4") -> 1
+                        id.contains("haiku-4") -> 2
+                        id.contains("3-7-sonnet") || id.contains("3-5-sonnet") -> 3
+                        else -> 4
+                    }
+                },
+                { it.id },
+            ),
+        )?.id ?: clean
+    }
+
     fun isCodingCapableGeminiModel(rawModelId: String): Boolean {
         val id = rawModelId.lowercase().trim().removePrefix("models/")
         if (id.isBlank()) return false
@@ -950,18 +1185,41 @@ object AiModelsCatalog {
                 "gemini-2.0-flash-lite",
                 "gemini-2.5-pro",
             )
-            AiProvider.OPENAI -> listOf(
-                "gpt-5-mini",
-                "gpt-4.1",
-                "gpt-4o",
-                "gpt-4o-mini",
-            )
-            AiProvider.CLAUDE -> listOf(
-                "claude-sonnet-4-5",
-                "claude-3-7-sonnet-latest",
-                "claude-haiku-4-5",
-                "claude-3-5-sonnet-latest",
-            )
+            AiProvider.OPENAI -> {
+                val liveIds = liveModels.filter { it.provider == AiProvider.OPENAI }.map { it.id }
+                val prioritizedLive = liveIds.sortedWith(
+                    compareBy<String>(
+                        { !it.equals("gpt-5", ignoreCase = true) && !it.startsWith("gpt-5-mini", ignoreCase = true) },
+                        { !it.startsWith("gpt-4.1", ignoreCase = true) },
+                        { !it.startsWith("gpt-4o", ignoreCase = true) },
+                        { it },
+                    ),
+                ).take(6)
+                prioritizedLive + listOf(
+                    "gpt-5-mini",
+                    "gpt-4.1",
+                    "gpt-4o",
+                    "gpt-4o-mini",
+                )
+            }
+            AiProvider.CLAUDE -> {
+                val liveIds = liveModels.filter { it.provider == AiProvider.CLAUDE }.map { it.id }
+                val prioritizedLive = liveIds.sortedWith(
+                    compareBy<String>(
+                        { !it.contains("sonnet-4", ignoreCase = true) },
+                        { !it.contains("haiku-4", ignoreCase = true) },
+                        { !it.contains("opus-4", ignoreCase = true) },
+                        { it },
+                    ),
+                ).take(6)
+                prioritizedLive + listOf(
+                    "claude-sonnet-4-5",
+                    "claude-sonnet-4-20250514",
+                    "claude-3-7-sonnet-latest",
+                    "claude-haiku-4-5",
+                    "claude-3-5-sonnet-latest",
+                )
+            }
             AiProvider.OPENROUTER -> {
                 val liveOr = liveModels.filter { it.provider == AiProvider.OPENROUTER }
                 val liveFree = liveOr

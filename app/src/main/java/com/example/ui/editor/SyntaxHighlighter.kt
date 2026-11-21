@@ -13,6 +13,7 @@ import com.example.ui.theme.SyntaxColors
 class CodeSyntaxVisualTransformation(
     private val language: FileLanguage,
     private val colors: SyntaxColors,
+    private val filePath: String = "",
 ) : VisualTransformation {
     private var lastSource: String? = null
     private var lastHighlighted: AnnotatedString? = null
@@ -20,7 +21,7 @@ class CodeSyntaxVisualTransformation(
     override fun filter(text: AnnotatedString): TransformedText {
         val raw = text.text
         val cached = if (raw === lastSource) lastHighlighted else null
-        val highlighted = cached ?: SyntaxHighlighter.highlight(raw, language, colors).also {
+        val highlighted = cached ?: SyntaxHighlighter.highlight(raw, language, colors, filePath).also {
             lastSource = raw
             lastHighlighted = it
         }
@@ -64,6 +65,13 @@ object SyntaxHighlighter {
         "when", "where", "while",
     )
 
+    private val GRADLE_KEYWORDS = KOTLIN_KEYWORDS + setOf(
+        "plugins", "android", "dependencies", "implementation", "api", "testImplementation",
+        "androidTestImplementation", "ksp", "id", "version", "apply", "namespace",
+        "compileSdk", "minSdk", "targetSdk", "defaultConfig", "buildTypes", "release",
+        "debug", "sourceSets", "repositories", "google", "mavenCentral", "include",
+    )
+
     private val KOTLIN_COMMON_TYPES = JAVA_COMMON_TYPES + setOf(
         "Int", "Long", "Float", "Double", "Boolean", "Char", "Byte", "Short",
         "Unit", "Nothing", "Any", "IntArray", "FloatArray", "BooleanArray", "Array",
@@ -76,15 +84,26 @@ object SyntaxHighlighter {
         code: String,
         language: FileLanguage,
         colors: SyntaxColors,
+        filePath: String = "",
     ): AnnotatedString {
-        if (language == FileLanguage.TEXT || code.isEmpty()) return AnnotatedString(code)
+        if (code.isEmpty()) return AnnotatedString(code)
+        val lowerPath = filePath.lowercase()
+        val isGradle = lowerPath.endsWith(".gradle") || lowerPath.endsWith(".gradle.kts") || lowerPath.endsWith(".kts")
+        val isYaml = lowerPath.endsWith(".yml") || lowerPath.endsWith(".yaml") || lowerPath.endsWith(".toml") || lowerPath.endsWith(".properties")
+        val isMarkdown = lowerPath.endsWith(".md") || lowerPath.endsWith(".markdown")
+        if (language == FileLanguage.TEXT && !isGradle && !isYaml && !isMarkdown) {
+            return AnnotatedString(code)
+        }
         val clipped = if (code.length > MAX_HIGHLIGHT_CHARS) code.substring(0, MAX_HIGHLIGHT_CHARS) else code
-        val styledHead = when (language) {
-            FileLanguage.JAVA -> highlightJvmLanguage(clipped, colors, JAVA_KEYWORDS, JAVA_COMMON_TYPES)
-            FileLanguage.KOTLIN -> highlightJvmLanguage(clipped, colors, KOTLIN_KEYWORDS, KOTLIN_COMMON_TYPES)
-            FileLanguage.XML -> highlightXml(clipped, colors)
-            FileLanguage.JSON -> highlightJson(clipped, colors)
-            FileLanguage.TEXT -> AnnotatedString(clipped)
+        val styledHead = when {
+            isGradle -> highlightJvmLanguage(clipped, colors, GRADLE_KEYWORDS, KOTLIN_COMMON_TYPES)
+            isYaml -> highlightYamlOrToml(clipped, colors)
+            isMarkdown -> highlightMarkdown(clipped, colors)
+            language == FileLanguage.JAVA -> highlightJvmLanguage(clipped, colors, JAVA_KEYWORDS, JAVA_COMMON_TYPES)
+            language == FileLanguage.KOTLIN -> highlightJvmLanguage(clipped, colors, KOTLIN_KEYWORDS, KOTLIN_COMMON_TYPES)
+            language == FileLanguage.XML -> highlightXml(clipped, colors)
+            language == FileLanguage.JSON -> highlightJson(clipped, colors)
+            else -> AnnotatedString(clipped)
         }
         if (code.length <= MAX_HIGHLIGHT_CHARS) return styledHead
         return buildAnnotatedString {
@@ -92,6 +111,46 @@ object SyntaxHighlighter {
             append(code.substring(MAX_HIGHLIGHT_CHARS))
         }
     }
+
+    private fun highlightYamlOrToml(code: String, colors: SyntaxColors): AnnotatedString =
+        buildAnnotatedString {
+            append(code)
+            var offset = 0
+            code.lines().forEach { line ->
+                val trimmed = line.trimStart()
+                if (trimmed.startsWith("#")) {
+                    addStyle(SpanStyle(color = colors.comment), offset, offset + line.length)
+                } else {
+                    val colon = line.indexOfFirst { it == ':' || it == '=' }
+                    if (colon > 0) {
+                        addStyle(SpanStyle(color = colors.xmlAttr, fontWeight = FontWeight.Medium), offset, offset + colon)
+                    }
+                    val firstQuote = line.indexOf('"')
+                    if (firstQuote >= 0) {
+                        addStyle(SpanStyle(color = colors.string), offset + firstQuote, offset + line.length)
+                    }
+                }
+                offset += line.length + 1
+            }
+        }
+
+    private fun highlightMarkdown(code: String, colors: SyntaxColors): AnnotatedString =
+        buildAnnotatedString {
+            append(code)
+            var offset = 0
+            code.lines().forEach { line ->
+                val trimmed = line.trimStart()
+                when {
+                    trimmed.startsWith("#") ->
+                        addStyle(SpanStyle(color = colors.keyword, fontWeight = FontWeight.Bold), offset, offset + line.length)
+                    trimmed.startsWith("```") || trimmed.startsWith(">") ->
+                        addStyle(SpanStyle(color = colors.comment), offset, offset + line.length)
+                    trimmed.startsWith("-") || trimmed.startsWith("*") ->
+                        addStyle(SpanStyle(color = colors.xmlTag), offset, (offset + 2).coerceAtMost(offset + line.length))
+                }
+                offset += line.length + 1
+            }
+        }
 
     private fun highlightJvmLanguage(
         code: String,

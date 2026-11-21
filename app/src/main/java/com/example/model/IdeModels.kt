@@ -135,6 +135,42 @@ enum class ProjectTemplate(
         defaultAppName = "My App",
         defaultPackage = "com.example.myapp",
     ),
+    SNAKE_ARCADE(
+        displayName = "Snake Arcade",
+        subtitle = "Retro 60fps Canvas grid Snake game with swipe controls, food & high score",
+        defaultAppName = "SnakeStudio",
+        defaultPackage = "com.example.snakestudio",
+    ),
+    MUSIC_SYNTH_PAD(
+        displayName = "Beat & Synth Pad",
+        subtitle = "Interactive 12-pad drum & synthesizer board with step sequencer & BPM",
+        defaultAppName = "BeatPad",
+        defaultPackage = "com.example.beatpad",
+    ),
+    EXPENSE_TRACKER(
+        displayName = "Budget & Expense",
+        subtitle = "Personal expense ledger with category totals & instant transaction log",
+        defaultAppName = "BudgetPro",
+        defaultPackage = "com.example.budgetpro",
+    ),
+    QUIZ_STUDIO(
+        displayName = "Trivia & Quiz Studio",
+        subtitle = "Timed Android & coding trivia game with streak multiplier & scoreboard",
+        defaultAppName = "QuizMaster",
+        defaultPackage = "com.example.quizmaster",
+    ),
+    WEATHER_DASHBOARD(
+        displayName = "Forecast Dashboard",
+        subtitle = "Multi-city weather telemetry cards with custom hourly trend chart canvas",
+        defaultAppName = "SkyCast",
+        defaultPackage = "com.example.skycast",
+    ),
+    PIXEL_SPRITE_EDITOR(
+        displayName = "Pixel Sprite Studio",
+        subtitle = "16x16 pixel art sprite editor with live mirror preview & color palette",
+        defaultAppName = "PixelCraft",
+        defaultPackage = "com.example.pixelcraft",
+    ),
 }
 
 data class GitHubRepoLink(
@@ -264,11 +300,53 @@ data class BuildResult(
     val artifactSha256: String = "",
 )
 
+enum class IdeThemePreset(
+    val displayName: String,
+    val isDark: Boolean,
+    val subtitle: String,
+) {
+    DARCULA("Darcula Dark", true, "Authentic Android Studio classic dark workspace"),
+    ISLANDS_MIDNIGHT("Islands Midnight", true, "Modern Android Studio New UI with crisp midnight islands"),
+    NORD_STUDIO("Nord Studio", true, "Cool Arctic slate contrast for long coding sessions"),
+    HIGH_CONTRAST("High Contrast", true, "Pure pitch-black surface with maximum token clarity"),
+    INTELLIJ_LIGHT("IntelliJ Light", false, "Clean daylight studio theme with crisp syntax contrast"),
+}
+
+enum class IdeAccentPreset(
+    val displayName: String,
+    val primaryHex: Long,
+    val secondaryHex: Long,
+) {
+    ANDROID_GREEN("Android Green", 0xFF3DDC84, 0xFF58A6FF),
+    JETBRAINS_BLUE("Studio Blue", 0xFF3574F0, 0xFF3DDC84),
+    CYAN_FORGE("Cyan Pulse", 0xFF38BDF8, 0xFF34D399),
+    KOTLIN_PURPLE("Kotlin Purple", 0xFF9E7BFF, 0xFF3DDC84),
+    AMBER_GOLD("Amber Studio", 0xFFF59E0B, 0xFF38BDF8),
+}
+
+enum class UiDensity(
+    val displayName: String,
+    val scaleFactor: Float,
+) {
+    COMPACT("Compact", 0.85f),
+    STANDARD("Standard", 1.0f),
+    COMFORTABLE("Comfortable", 1.15f),
+}
+
 data class EditorSettings(
     val fontSizeSp: Int = 13,
     val wordWrap: Boolean = false,
     val autoIndent: Boolean = true,
     val darkTheme: Boolean = true,
+    val themePreset: IdeThemePreset = IdeThemePreset.DARCULA,
+    val accentPreset: IdeAccentPreset = IdeAccentPreset.ANDROID_GREEN,
+    val uiDensity: UiDensity = UiDensity.STANDARD,
+    val showLineNumbers: Boolean = true,
+    val highlightBrackets: Boolean = true,
+    val showBreadcrumbs: Boolean = true,
+    val showStatusBar: Boolean = true,
+    val aiTemperature: Float = 0.3f,
+    val customSystemInstruction: String = "",
 )
 
 data class ProjectSearchHit(

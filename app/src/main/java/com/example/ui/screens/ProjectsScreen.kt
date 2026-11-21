@@ -77,10 +77,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.CloudUpload
+import androidx.compose.material.icons.filled.Gamepad
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Paid
+import androidx.compose.material.icons.filled.Quiz
 import androidx.compose.material.icons.filled.SportsEsports
 import androidx.compose.material.icons.filled.ViewInAr
+import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -100,9 +106,51 @@ import com.example.ui.panels.GitHubSheetDialog
 import com.example.ui.panels.ModelMenuDialog
 import com.example.ui.panels.ProviderKeysDialog
 import com.example.ui.panels.ReleaseKeystoreDialog
+import com.example.ui.panels.UiCustomizationDialog
 import com.example.ui.panels.formatBytes
 import com.example.ui.theme.JetBrainsMonoFontFamily
 import java.text.NumberFormat
+
+private enum class TemplateCategory(val label: String) {
+    ALL("All"),
+    GAMES("Games & 2.5D"),
+    APPS("Apps & Data"),
+    CREATIVE("Creative & Audio"),
+    TOOLS("Utilities"),
+}
+
+private fun templateCategoryOf(t: ProjectTemplate): TemplateCategory = when (t) {
+    ProjectTemplate.ARCADE_SHOOTER,
+    ProjectTemplate.VOXEL_LAUNCHER_STUDIO,
+    ProjectTemplate.SNAKE_ARCADE,
+    ProjectTemplate.QUIZ_STUDIO -> TemplateCategory.GAMES
+    ProjectTemplate.CANVAS_DRAW,
+    ProjectTemplate.MUSIC_SYNTH_PAD,
+    ProjectTemplate.PIXEL_SPRITE_EDITOR -> TemplateCategory.CREATIVE
+    ProjectTemplate.EXPENSE_TRACKER,
+    ProjectTemplate.WEATHER_DASHBOARD,
+    ProjectTemplate.NOTES_APP -> TemplateCategory.APPS
+    ProjectTemplate.COUNTER_APP,
+    ProjectTemplate.CALCULATOR,
+    ProjectTemplate.STOPWATCH_APP,
+    ProjectTemplate.BLANK_ACTIVITY -> TemplateCategory.TOOLS
+}
+
+private fun templateIconOf(t: ProjectTemplate) = when (t) {
+    ProjectTemplate.ARCADE_SHOOTER -> Icons.Default.SportsEsports
+    ProjectTemplate.VOXEL_LAUNCHER_STUDIO -> Icons.Default.ViewInAr
+    ProjectTemplate.SNAKE_ARCADE -> Icons.Default.Gamepad
+    ProjectTemplate.QUIZ_STUDIO -> Icons.Default.Quiz
+    ProjectTemplate.MUSIC_SYNTH_PAD -> Icons.Default.MusicNote
+    ProjectTemplate.PIXEL_SPRITE_EDITOR -> Icons.Default.Palette
+    ProjectTemplate.EXPENSE_TRACKER -> Icons.Default.Paid
+    ProjectTemplate.WEATHER_DASHBOARD -> Icons.Default.WbSunny
+    ProjectTemplate.CANVAS_DRAW -> Icons.Default.Palette
+    ProjectTemplate.CALCULATOR -> Icons.Default.Build
+    ProjectTemplate.NOTES_APP -> Icons.Default.EditNote
+    ProjectTemplate.STOPWATCH_APP -> Icons.Default.Timer
+    else -> Icons.Default.Code
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -149,9 +197,17 @@ fun ProjectsScreen(
     var showKeystoreDialog by remember { mutableStateOf(false) }
     var showGitHubDialog by remember { mutableStateOf(false) }
     var showHomeMenu by remember { mutableStateOf(false) }
+    var selectedTemplateCategory by remember { mutableStateOf(TemplateCategory.ALL) }
 
     val snackbarHostState = remember { SnackbarHostState() }
     val nf = remember { NumberFormat.getIntegerInstance() }
+    val filteredTemplates = remember(selectedTemplateCategory) {
+        if (selectedTemplateCategory == TemplateCategory.ALL) {
+            ProjectTemplate.entries
+        } else {
+            ProjectTemplate.entries.filter { templateCategoryOf(it) == selectedTemplateCategory }
+        }
+    }
 
     LaunchedEffect(statusBanner) {
         if (!statusBanner.isNullOrBlank()) {
@@ -186,14 +242,14 @@ fun ProjectsScreen(
                         }
                         Column(modifier = Modifier.weight(1f, fill = false)) {
                             Text(
-                                text = "Android Studio: For Android",
+                                text = "Android Studio",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
                             Text(
-                                text = "Offline APK & AAB IDE",
+                                text = "Kotlin • Java 8–25 • Offline APK/AAB & AI",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
@@ -280,8 +336,8 @@ fun ProjectsScreen(
                                 modifier = Modifier.testTag("home_github_account_button"),
                             )
                             DropdownMenuItem(
-                                text = { Text("IDE Settings") },
-                                leadingIcon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                                text = { Text("Customize UI & AI Studio") },
+                                leadingIcon = { Icon(Icons.Default.Palette, contentDescription = null) },
                                 onClick = {
                                     showHomeMenu = false
                                     showSettingsDialog = true
@@ -401,53 +457,119 @@ fun ProjectsScreen(
                                     modifier = Modifier.weight(1.1f),
                                 )
                             }
+
+                            // Android Studio Welcome Quick Actions
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                AssistChip(
+                                    onClick = { createDialogTemplate = ProjectTemplate.COUNTER_APP },
+                                    label = { Text("New Project") },
+                                    leadingIcon = { Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                )
+                                AssistChip(
+                                    onClick = { showGitHubDialog = true },
+                                    label = { Text("Clone GitHub Repo") },
+                                    leadingIcon = { Icon(Icons.Default.CloudUpload, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                    modifier = Modifier.testTag("welcome_clone_github_button"),
+                                )
+                                AssistChip(
+                                    onClick = { showSettingsDialog = true },
+                                    label = { Text("Customize UI") },
+                                    leadingIcon = { Icon(Icons.Default.Palette, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                    modifier = Modifier.testTag("welcome_customize_ui_button"),
+                                )
+                                AssistChip(
+                                    onClick = { showKeysDialog = true },
+                                    label = { Text("AI Providers") },
+                                    leadingIcon = { Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                                )
+                            }
                         }
                     }
                 }
 
-                // Starter Templates
+                // Starter Templates (${ProjectTemplate.entries.size} total)
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(
-                            text = "Start From Template (${ProjectTemplate.entries.size})",
-                            style = MaterialTheme.typography.titleLarge,
-                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                        ) {
+                            Text(
+                                text = "Templates (${filteredTemplates.size}/${ProjectTemplate.entries.size})",
+                                style = MaterialTheme.typography.titleLarge,
+                            )
+                            Text(
+                                text = editorSettings.themePreset.displayName,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.clickable { showSettingsDialog = true },
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            TemplateCategory.entries.forEach { cat ->
+                                FilterChip(
+                                    selected = selectedTemplateCategory == cat,
+                                    onClick = { selectedTemplateCategory = cat },
+                                    label = { Text(cat.label, style = MaterialTheme.typography.labelSmall) },
+                                )
+                            }
+                        }
                         LazyRow(
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            items(ProjectTemplate.entries) { template ->
+                            items(filteredTemplates, key = { it.name }) { template ->
                                 Card(
                                     onClick = { createDialogTemplate = template },
                                     colors = CardDefaults.cardColors(
                                         containerColor = MaterialTheme.colorScheme.surfaceContainer,
                                     ),
                                     modifier = Modifier
-                                        .width(220.dp)
+                                        .width(226.dp)
                                         .testTag("template_card_${template.name.lowercase()}"),
                                 ) {
                                     Column(
                                         modifier = Modifier.padding(14.dp),
                                         verticalArrangement = Arrangement.spacedBy(8.dp),
                                     ) {
-                                        Surface(
-                                            color = MaterialTheme.colorScheme.primaryContainer,
-                                            shape = RoundedCornerShape(10.dp),
-                                            modifier = Modifier.size(36.dp),
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically,
                                         ) {
-                                            Box(contentAlignment = Alignment.Center) {
-                                                Icon(
-                                                    imageVector = when (template) {
-                                                        ProjectTemplate.ARCADE_SHOOTER -> Icons.Default.SportsEsports
-                                                        ProjectTemplate.VOXEL_LAUNCHER_STUDIO -> Icons.Default.ViewInAr
-                                                        ProjectTemplate.CANVAS_DRAW -> Icons.Default.Palette
-                                                        ProjectTemplate.CALCULATOR -> Icons.Default.Build
-                                                        ProjectTemplate.NOTES_APP -> Icons.Default.EditNote
-                                                        ProjectTemplate.STOPWATCH_APP -> Icons.Default.Timer
-                                                        else -> Icons.Default.Code
-                                                    },
-                                                    contentDescription = null,
-                                                    tint = MaterialTheme.colorScheme.primary,
-                                                    modifier = Modifier.size(20.dp),
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.primaryContainer,
+                                                shape = RoundedCornerShape(10.dp),
+                                                modifier = Modifier.size(36.dp),
+                                            ) {
+                                                Box(contentAlignment = Alignment.Center) {
+                                                    Icon(
+                                                        imageVector = templateIconOf(template),
+                                                        contentDescription = null,
+                                                        tint = MaterialTheme.colorScheme.primary,
+                                                        modifier = Modifier.size(20.dp),
+                                                    )
+                                                }
+                                            }
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                                shape = RoundedCornerShape(8.dp),
+                                            ) {
+                                                Text(
+                                                    text = templateCategoryOf(template).label.substringBefore(" "),
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
                                                 )
                                             }
                                         }
@@ -503,7 +625,7 @@ fun ProjectsScreen(
                                         style = MaterialTheme.typography.titleSmall,
                                     )
                                     Text(
-                                        text = "Preparing Android Studio: For Android workspace",
+                                        text = "Preparing Android Studio workspace",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -536,15 +658,7 @@ fun ProjectsScreen(
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
                                     Icon(
-                                        when (project.template) {
-                                            ProjectTemplate.ARCADE_SHOOTER -> Icons.Default.SportsEsports
-                                            ProjectTemplate.VOXEL_LAUNCHER_STUDIO -> Icons.Default.ViewInAr
-                                            ProjectTemplate.CANVAS_DRAW -> Icons.Default.Palette
-                                            ProjectTemplate.CALCULATOR -> Icons.Default.Build
-                                            ProjectTemplate.NOTES_APP -> Icons.Default.EditNote
-                                            ProjectTemplate.STOPWATCH_APP -> Icons.Default.Timer
-                                            else -> Icons.Default.Code
-                                        },
+                                        templateIconOf(project.template),
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.primary,
                                     )
@@ -952,68 +1066,10 @@ fun EditorSettingsDialog(
     onUpdateSettings: ((EditorSettings) -> EditorSettings) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("IDE & Editor Settings") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Column {
-                    Text(
-                        text = "Editor Font Size: ${settings.fontSizeSp} sp",
-                        style = MaterialTheme.typography.labelLarge,
-                    )
-                    Slider(
-                        value = settings.fontSizeSp.toFloat(),
-                        onValueChange = { v ->
-                            onUpdateSettings { it.copy(fontSizeSp = v.toInt()) }
-                        },
-                        valueRange = 10f..20f,
-                        steps = 9,
-                    )
-                }
-                SettingsToggleRow(
-                    label = "Dark IDE Theme",
-                    checked = settings.darkTheme,
-                    onCheckedChange = { checked ->
-                        onUpdateSettings { it.copy(darkTheme = checked) }
-                    },
-                )
-                SettingsToggleRow(
-                    label = "Word Wrap",
-                    checked = settings.wordWrap,
-                    onCheckedChange = { checked ->
-                        onUpdateSettings { it.copy(wordWrap = checked) }
-                    },
-                )
-                SettingsToggleRow(
-                    label = "Auto-Indent on Newline",
-                    checked = settings.autoIndent,
-                    onCheckedChange = { checked ->
-                        onUpdateSettings { it.copy(autoIndent = checked) }
-                    },
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Done")
-            }
-        },
+    UiCustomizationDialog(
+        settings = settings,
+        onUpdateSettings = onUpdateSettings,
+        onDismiss = onDismiss,
     )
 }
 
-@Composable
-private fun SettingsToggleRow(
-    label: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(text = label, style = MaterialTheme.typography.bodyLarge)
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}

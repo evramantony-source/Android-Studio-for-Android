@@ -43,12 +43,50 @@ data class ChatMessage(
     val timestampMillis: Long = System.currentTimeMillis(),
 )
 
+enum class AgentRole(
+    val label: String,
+    val badge: String,
+    val shortHint: String,
+    val defaultSystemFocus: String,
+) {
+    GENERAL(
+        label = "Main Agent",
+        badge = "Main",
+        shortHint = "Full-stack coding, building & debugging",
+        defaultSystemFocus = "",
+    ),
+    FEATURE_BUILDER(
+        label = "Feature Architect",
+        badge = "Features",
+        shortHint = "Adds new screens, gameplay, animations & UI polish",
+        defaultSystemFocus = "ROLE: Feature Architect Agent. Focus on designing and implementing complete new user-facing features, rich UI/Canvas experiences, clean modular code, and running build_apk to verify every addition.",
+    ),
+    ERROR_FIXER(
+        label = "Error Fixer",
+        badge = "Fixer",
+        shortHint = "Diagnoses compiler diagnostics, crashes & layout bugs",
+        defaultSystemFocus = "ROLE: Error Fixer Agent. Focus ruthlessly on compiler diagnostics, runtime crashes, XML references, imports, Java/Kotlin compatibility, and minimal surgical fixes verified by build_apk.",
+    ),
+    GITHUB_WATCHER(
+        label = "GitHub Monitor",
+        badge = "GitHub",
+        shortHint = "Monitors push status, branches, Actions CI runs & logs",
+        defaultSystemFocus = "ROLE: GitHub & CI Monitor Agent. Focus on inspecting repository diff status, branches, GitHub Actions workflow runs, build failure logs, pushing commits safely, and re-running CI workflows.",
+    ),
+}
+
 data class ProjectChatThread(
     val id: String,
     val title: String,
     val isMain: Boolean = false,
     val updatedAtMillis: Long = System.currentTimeMillis(),
     val messages: List<ChatMessage> = emptyList(),
+    val agentRole: AgentRole = AgentRole.GENERAL,
+    val providerName: String = "",
+    val modelId: String = "",
+    val customSystemInstruction: String = "",
+    val temperature: Float? = null,
+    val isPinnedAgent: Boolean = false,
 )
 
 sealed interface AiUiState {
@@ -118,14 +156,66 @@ object ProjectChatStore {
         isMain = true,
         updatedAtMillis = System.currentTimeMillis(),
         messages = emptyList(),
+        agentRole = AgentRole.GENERAL,
+        isPinnedAgent = true,
     )
 
-    fun createSideThread(index: Int, customTitle: String = ""): ProjectChatThread = ProjectChatThread(
+    fun createRoleAgentThread(
+        role: AgentRole,
+        providerName: String = "",
+        modelId: String = "",
+    ): ProjectChatThread = when (role) {
+        AgentRole.GENERAL -> createMainThread().copy(providerName = providerName, modelId = modelId)
+        AgentRole.FEATURE_BUILDER -> ProjectChatThread(
+            id = "agent_feature",
+            title = role.label,
+            isMain = false,
+            updatedAtMillis = System.currentTimeMillis(),
+            messages = emptyList(),
+            agentRole = role,
+            providerName = providerName,
+            modelId = modelId,
+            isPinnedAgent = true,
+        )
+        AgentRole.ERROR_FIXER -> ProjectChatThread(
+            id = "agent_fixer",
+            title = role.label,
+            isMain = false,
+            updatedAtMillis = System.currentTimeMillis(),
+            messages = emptyList(),
+            agentRole = role,
+            providerName = providerName,
+            modelId = modelId,
+            isPinnedAgent = true,
+        )
+        AgentRole.GITHUB_WATCHER -> ProjectChatThread(
+            id = "agent_github",
+            title = role.label,
+            isMain = false,
+            updatedAtMillis = System.currentTimeMillis(),
+            messages = emptyList(),
+            agentRole = role,
+            providerName = providerName,
+            modelId = modelId,
+            isPinnedAgent = true,
+        )
+    }
+
+    fun createSideThread(
+        index: Int,
+        customTitle: String = "",
+        providerName: String = "",
+        modelId: String = "",
+    ): ProjectChatThread = ProjectChatThread(
         id = "side_${UUID.randomUUID().toString().take(8)}",
         title = customTitle.trim().ifBlank { "Side Chat $index" },
         isMain = false,
         updatedAtMillis = System.currentTimeMillis(),
         messages = emptyList(),
+        agentRole = AgentRole.GENERAL,
+        providerName = providerName,
+        modelId = modelId,
+        isPinnedAgent = false,
     )
 
     suspend fun loadThreads(projectDir: File): List<ProjectChatThread> = withContext(Dispatchers.IO) {
@@ -188,14 +278,21 @@ object ProjectChatStore {
                         .put("timestampMillis", msg.timestampMillis),
                 )
             }
-            arr.put(
-                JSONObject()
-                    .put("id", thread.id)
-                    .put("title", thread.title)
-                    .put("isMain", thread.isMain)
-                    .put("updatedAtMillis", thread.updatedAtMillis)
-                    .put("messages", msgArr),
-            )
+            val tObj = JSONObject()
+                .put("id", thread.id)
+                .put("title", thread.title)
+                .put("isMain", thread.isMain)
+                .put("updatedAtMillis", thread.updatedAtMillis)
+                .put("messages", msgArr)
+                .put("agentRole", thread.agentRole.name)
+                .put("providerName", thread.providerName)
+                .put("modelId", thread.modelId)
+                .put("customSystemInstruction", thread.customSystemInstruction)
+                .put("isPinnedAgent", thread.isPinnedAgent)
+            if (thread.temperature != null) {
+                tObj.put("temperature", thread.temperature.toDouble())
+            }
+            arr.put(tObj)
         }
         root.put("threads", arr)
         return root.toString()
@@ -264,6 +361,10 @@ object ProjectChatStore {
                     ),
                 )
             }
+            val parsedRole = runCatching {
+                AgentRole.valueOf(tObj.optString("agentRole", AgentRole.GENERAL.name))
+            }.getOrDefault(AgentRole.GENERAL)
+            val tempVal = if (tObj.has("temperature")) tObj.optDouble("temperature").toFloat() else null
             list.add(
                 ProjectChatThread(
                     id = tObj.optString("id"),
@@ -271,6 +372,12 @@ object ProjectChatStore {
                     isMain = tObj.optBoolean("isMain", false),
                     updatedAtMillis = tObj.optLong("updatedAtMillis", System.currentTimeMillis()),
                     messages = msgs,
+                    agentRole = parsedRole,
+                    providerName = tObj.optString("providerName", ""),
+                    modelId = tObj.optString("modelId", ""),
+                    customSystemInstruction = tObj.optString("customSystemInstruction", ""),
+                    temperature = tempVal,
+                    isPinnedAgent = tObj.optBoolean("isPinnedAgent", tObj.optBoolean("isMain", false)),
                 ),
             )
         }

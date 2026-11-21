@@ -111,8 +111,17 @@ object EmulatorEngine {
         files: List<ProjectFile>,
     ): LiveVmSession? {
         return runCatching {
-            val stringsMap = parseStringsXml(files.find { it.relativePath == "res/values/strings.xml" }?.content.orEmpty())
-            val manifestXml = files.find { it.relativePath == "AndroidManifest.xml" }?.content.orEmpty()
+            val stringsXml = files.firstOrNull {
+                it.relativePath == "res/values/strings.xml" ||
+                    it.relativePath == "app/src/main/res/values/strings.xml" ||
+                    it.relativePath == "src/main/res/values/strings.xml"
+            }?.content.orEmpty()
+            val manifestXml = files.firstOrNull {
+                it.relativePath == "AndroidManifest.xml" ||
+                    it.relativePath == "app/src/main/AndroidManifest.xml" ||
+                    it.relativePath == "src/main/AndroidManifest.xml"
+            }?.content.orEmpty()
+            val stringsMap = parseStringsXml(stringsXml)
             val resolvedAppName = resolveStringRef(
                 extractManifestAttr(manifestXml, "label") ?: appName,
                 stringsMap,
@@ -131,9 +140,25 @@ object EmulatorEngine {
         files: List<ProjectFile>,
     ): EmulatorProgram {
         return runCatching {
-            val stringsMap = parseStringsXml(files.find { it.relativePath == "res/values/strings.xml" }?.content.orEmpty())
-            val colorsMap = parseColorsXml(files.find { it.relativePath == "res/values/colors.xml" }?.content.orEmpty())
-            val manifestXml = files.find { it.relativePath == "AndroidManifest.xml" }?.content.orEmpty()
+            val stringsMap = parseStringsXml(
+                files.firstOrNull {
+                    it.relativePath == "res/values/strings.xml" ||
+                        it.relativePath == "app/src/main/res/values/strings.xml" ||
+                        it.relativePath == "src/main/res/values/strings.xml"
+                }?.content.orEmpty(),
+            )
+            val colorsMap = parseColorsXml(
+                files.firstOrNull {
+                    it.relativePath == "res/values/colors.xml" ||
+                        it.relativePath == "app/src/main/res/values/colors.xml" ||
+                        it.relativePath == "src/main/res/values/colors.xml"
+                }?.content.orEmpty(),
+            )
+            val manifestXml = files.firstOrNull {
+                it.relativePath == "AndroidManifest.xml" ||
+                    it.relativePath == "app/src/main/AndroidManifest.xml" ||
+                    it.relativePath == "src/main/AndroidManifest.xml"
+            }?.content.orEmpty()
             val resolvedAppName = resolveStringRef(
                 extractManifestAttr(manifestXml, "label") ?: appName,
                 stringsMap,

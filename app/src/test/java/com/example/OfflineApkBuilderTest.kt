@@ -1164,4 +1164,80 @@ class OfflineApkBuilderTest {
             .verify()
         assertTrue("Rich Kotlin APK signature invalid: ${verification.errors}", verification.isVerified)
     }
+
+    @Test
+    fun buildsAndSignsStandardGradleLayoutRepoAndExtractsCodeStructure() {
+        val projectDir = tempFolder.newFolder("standard_gradle_repo")
+        val gradleFiles = mapOf(
+            "app/src/main/AndroidManifest.xml" to """
+                <?xml version="1.0" encoding="utf-8"?>
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+                    package="com.example.gradlerepo">
+                    <application android:label="@string/app_name">
+                        <activity
+                            android:name=".MainActivity"
+                            android:exported="true">
+                            <intent-filter>
+                                <action android:name="android.intent.action.MAIN" />
+                                <category android:name="android.intent.category.LAUNCHER" />
+                            </intent-filter>
+                        </activity>
+                    </application>
+                </manifest>
+            """.trimIndent(),
+            "app/src/main/res/values/strings.xml" to """
+                <resources>
+                    <string name="app_name">Gradle Repo App</string>
+                </resources>
+            """.trimIndent(),
+            "app/src/main/java/com/example/gradlerepo/MainActivity.kt" to """
+                package com.example.gradlerepo
+
+                import android.app.Activity
+                import android.os.Bundle
+                import android.widget.TextView
+
+                class MainActivity : Activity() {
+                    private val bannerText = "Imported Gradle Repo"
+
+                    override fun onCreate(savedInstanceState: Bundle?) {
+                        super.onCreate(savedInstanceState)
+                        val tv = TextView(this)
+                        tv.text = bannerText
+                        setContentView(tv)
+                    }
+                }
+            """.trimIndent(),
+        )
+        gradleFiles.forEach { (relPath, content) ->
+            val target = File(projectDir, relPath)
+            target.parentFile?.mkdirs()
+            target.writeText(content)
+        }
+
+        val result = OfflineApkBuilder().buildWithToolchain(
+            projectDir = projectDir,
+            packageName = "com.example.gradlerepo",
+            stubsJar = resolveAsset("android-stubs.jar"),
+            keystoreFile = resolveAsset("debug_signing.p12"),
+        )
+        assertTrue("Expected standard Gradle layout APK build to succeed, logs=${result.logs}", result.success)
+        val apkFile = File(result.apkPath!!)
+        val verification = ApkVerifier.Builder(apkFile)
+            .setMinCheckedPlatformVersion(24)
+            .build()
+            .verify()
+        assertTrue("Gradle layout APK signature invalid: ${verification.errors}", verification.isVerified)
+
+        val symbols = com.example.ui.editor.CodeStructureExtractor.extract(
+            gradleFiles["app/src/main/java/com/example/gradlerepo/MainActivity.kt"]!!,
+            FileLanguage.KOTLIN,
+        )
+        assertTrue(symbols.any { it.name == "MainActivity" && it.kind == com.example.ui.editor.SymbolKind.CLASS })
+        assertTrue(symbols.any { it.name.startsWith("onCreate(") && it.kind == com.example.ui.editor.SymbolKind.METHOD })
+        assertEquals(
+            "MainActivity › onCreate()",
+            com.example.ui.editor.CodeStructureExtractor.activeSymbolBreadcrumb(symbols, 12),
+        )
+    }
 }

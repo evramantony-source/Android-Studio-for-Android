@@ -251,6 +251,17 @@ internal object ProviderApiClient {
         )
     }
 
+    fun isResponsesOnlyOpenAiModel(modelId: String): Boolean {
+        val tail = modelId.trim().lowercase().substringAfter('/')
+        return tail == "o3-pro" ||
+            tail.startsWith("o3-pro-") ||
+            tail.startsWith("o1-pro") ||
+            tail.startsWith("gpt-5-pro") ||
+            tail.contains("-codex") ||
+            tail.startsWith("codex-") ||
+            tail.contains("deep-research")
+    }
+
     suspend fun streamOpenAi(
         apiKey: String,
         modelId: String,
@@ -258,8 +269,14 @@ internal object ProviderApiClient {
         thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
         includeGitHubTools: Boolean = true,
         includeTools: Boolean = true,
+        allowTextToolCalls: Boolean = true,
+        includeStreamOptions: Boolean = true,
         includeTemperature: Boolean = true,
+        foldSystemIntoUser: Boolean = false,
+        stripImages: Boolean = false,
+        temperature: Float = 0.3f,
         onConnected: () -> Unit,
+        onReasoningDelta: () -> Unit = {},
         onTextDelta: (String) -> Unit,
     ): ExternalTurnOutcome = streamOpenAiCompatible(
         endpointUrl = "https://api.openai.com/v1/chat/completions",
@@ -271,14 +288,15 @@ internal object ProviderApiClient {
         extraHeaders = emptyMap(),
         includeTools = includeTools,
         includeGitHubTools = includeGitHubTools,
-        allowTextToolCalls = false,
-        includeStreamOptions = true,
+        allowTextToolCalls = allowTextToolCalls,
+        includeStreamOptions = includeStreamOptions,
         includeTemperature = includeTemperature,
+        temperature = temperature,
         allowOpenRouterDataCollectionFallback = false,
-        foldSystemIntoUser = false,
-        stripImages = false,
+        foldSystemIntoUser = foldSystemIntoUser,
+        stripImages = stripImages,
         onConnected = onConnected,
-        onReasoningDelta = {},
+        onReasoningDelta = onReasoningDelta,
         onTextDelta = onTextDelta,
     )
 
@@ -292,6 +310,7 @@ internal object ProviderApiClient {
         allowTextToolCalls: Boolean = true,
         includeStreamOptions: Boolean = true,
         includeTemperature: Boolean = true,
+        temperature: Float = 0.3f,
         allowOpenRouterDataCollectionFallback: Boolean = false,
         foldSystemIntoUser: Boolean = false,
         stripImages: Boolean = false,
@@ -307,13 +326,14 @@ internal object ProviderApiClient {
         isOpenRouter = true,
         extraHeaders = mapOf(
             "HTTP-Referer" to "https://github.com/android-studio-for-android",
-            "X-Title" to "Android Studio: For Android",
+            "X-Title" to "Android Studio",
         ),
         includeTools = includeTools,
         includeGitHubTools = includeGitHubTools,
         allowTextToolCalls = allowTextToolCalls,
         includeStreamOptions = includeStreamOptions,
         includeTemperature = includeTemperature,
+        temperature = temperature,
         allowOpenRouterDataCollectionFallback = allowOpenRouterDataCollectionFallback,
         foldSystemIntoUser = foldSystemIntoUser,
         stripImages = stripImages,
@@ -533,6 +553,7 @@ internal object ProviderApiClient {
         includeTools: Boolean = true,
         includeStreamOptions: Boolean = true,
         includeTemperature: Boolean = true,
+        temperature: Float = 0.3f,
         allowOpenRouterDataCollectionFallback: Boolean = false,
     ): JSONObject {
         val bodyObj = JSONObject()
@@ -554,7 +575,7 @@ internal object ProviderApiClient {
             tailModel.startsWith("o4") ||
             (!isOpenRouter && (tailModel.startsWith("gpt-5") || tailModel.startsWith("gpt-6")))
         if (includeTemperature && !isFixedTempReasoning) {
-            bodyObj.put("temperature", 0.3)
+            bodyObj.put("temperature", temperature.coerceIn(0f, 1.5f).toDouble())
         } else if (!isOpenRouter && isFixedTempReasoning && !tailModel.startsWith("o1")) {
             val effort = when (thinkingMode) {
                 AiThinkingMode.FAST -> "low"
@@ -588,6 +609,7 @@ internal object ProviderApiClient {
         allowTextToolCalls: Boolean,
         includeStreamOptions: Boolean,
         includeTemperature: Boolean,
+        temperature: Float,
         allowOpenRouterDataCollectionFallback: Boolean,
         foldSystemIntoUser: Boolean,
         stripImages: Boolean,
@@ -637,6 +659,7 @@ internal object ProviderApiClient {
             includeTools = includeTools,
             includeStreamOptions = includeStreamOptions,
             includeTemperature = includeTemperature,
+            temperature = temperature,
             allowOpenRouterDataCollectionFallback = allowOpenRouterDataCollectionFallback,
         )
 
@@ -860,18 +883,410 @@ internal object ProviderApiClient {
         }
     }
 
+    suspend fun streamOpenAiResponses(
+        apiKey: String,
+        modelId: String,
+        messages: JSONArray,
+        thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
+        includeGitHubTools: Boolean = true,
+        includeTools: Boolean = true,
+        allowTextToolCalls: Boolean = true,
+        includeTemperature: Boolean = true,
+        temperature: Float = 0.3f,
+        stripImages: Boolean = false,
+        onConnected: () -> Unit,
+        onReasoningDelta: () -> Unit = {},
+        onTextDelta: (String) -> Unit,
+    ): ExternalTurnOutcome = withContext(Dispatchers.IO) {
+        val startedAt = System.currentTimeMillis()
+        val instructionsParts = mutableListOf<String>()
+        val inputItems = JSONArray()
+
+        for (i in 0 until messages.length()) {
+            val msg = messages.optJSONObject(i) ?: continue
+            val role = msg.optString("role")
+            val contentAny = msg.opt("content")
+            when (role) {
+                "system" -> {
+                    val t = contentAny?.toString().orEmpty()
+                    if (t.isNotBlank()) instructionsParts.add(t)
+                }
+                "tool" -> {
+                    inputItems.put(
+                        JSONObject()
+                            .put("type", "function_call_output")
+                            .put("call_id", msg.optString("tool_call_id", "call_0"))
+                            .put("output", contentAny?.toString().orEmpty()),
+                    )
+                }
+                "assistant" -> {
+                    val txt = contentAny?.toString().orEmpty().takeIf { it != "null" && it.isNotBlank() }
+                    if (txt != null) {
+                        inputItems.put(
+                            JSONObject()
+                                .put("role", "assistant")
+                                .put("content", txt),
+                        )
+                    }
+                    val tcArr = msg.optJSONArray("tool_calls")
+                    if (tcArr != null && includeTools) {
+                        for (k in 0 until tcArr.length()) {
+                            val tc = tcArr.optJSONObject(k) ?: continue
+                            val fn = tc.optJSONObject("function") ?: continue
+                            val name = fn.optString("name")
+                            if (name.isNotBlank()) {
+                                inputItems.put(
+                                    JSONObject()
+                                        .put("type", "function_call")
+                                        .put("call_id", tc.optString("id", "call_$k"))
+                                        .put("name", name)
+                                        .put("arguments", fn.optString("arguments", "{}")),
+                                )
+                            }
+                        }
+                    }
+                }
+                else -> {
+                    if (contentAny is JSONArray) {
+                        val contentOut = JSONArray()
+                        for (j in 0 until contentAny.length()) {
+                            val part = contentAny.optJSONObject(j) ?: continue
+                            when (part.optString("type")) {
+                                "text" -> {
+                                    val t = part.optString("text", "")
+                                    if (t.isNotEmpty()) {
+                                        contentOut.put(JSONObject().put("type", "input_text").put("text", t))
+                                    }
+                                }
+                                "image_url" -> {
+                                    if (!stripImages) {
+                                        val urlStr = part.optJSONObject("image_url")?.optString("url").orEmpty()
+                                        if (urlStr.isNotEmpty()) {
+                                            contentOut.put(JSONObject().put("type", "input_image").put("image_url", urlStr))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (contentOut.length() > 0) {
+                            inputItems.put(JSONObject().put("role", "user").put("content", contentOut))
+                        }
+                    } else {
+                        inputItems.put(
+                            JSONObject()
+                                .put("role", "user")
+                                .put("content", contentAny?.toString().orEmpty()),
+                        )
+                    }
+                }
+            }
+        }
+
+        if (!includeTools && allowTextToolCalls) {
+            instructionsParts.add(buildTextModeToolPrompt(includeGitHubTools))
+        }
+
+        val bodyObj = JSONObject()
+            .put("model", modelId)
+            .put("input", inputItems)
+            .put("stream", true)
+
+        val joinedInstructions = instructionsParts.joinToString("\n\n").trim()
+        if (joinedInstructions.isNotEmpty()) {
+            bodyObj.put("instructions", joinedInstructions)
+        }
+
+        if (includeTools) {
+            val activeSpecs = buildSharedToolSpecs().filter { (name, _, _) ->
+                includeGitHubTools || !name.startsWith("github_")
+            }
+            val toolsArr = JSONArray().apply {
+                activeSpecs.forEach { (name, desc, schema) ->
+                    put(
+                        JSONObject()
+                            .put("type", "function")
+                            .put("name", name)
+                            .put("description", desc)
+                            .put("parameters", schema),
+                    )
+                }
+            }
+            bodyObj.put("tools", toolsArr)
+        }
+
+        val lowerModel = modelId.lowercase().substringAfter('/')
+        val isReasoningModel = lowerModel.startsWith("o") || lowerModel.startsWith("gpt-5") || lowerModel.contains("codex")
+        if (isReasoningModel) {
+            val effort = when (thinkingMode) {
+                AiThinkingMode.FAST -> "low"
+                AiThinkingMode.BALANCED -> "medium"
+                AiThinkingMode.DEEP -> "high"
+            }
+            bodyObj.put("reasoning", JSONObject().put("effort", effort))
+        } else if (includeTemperature) {
+            bodyObj.put("temperature", temperature.coerceIn(0f, 1.5f).toDouble())
+        }
+
+        val bodyBytes = bodyObj.toString().toByteArray(Charsets.UTF_8)
+        val conn = (URL("https://api.openai.com/v1/responses").openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = READ_TIMEOUT_MS
+            useCaches = false
+            doOutput = true
+            setFixedLengthStreamingMode(bodyBytes.size)
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Accept", "text/event-stream")
+            setRequestProperty("Accept-Encoding", "identity")
+            setRequestProperty("Authorization", "Bearer $apiKey")
+        }
+
+        val cancelHandle = coroutineContext[Job]?.invokeOnCompletion { cause ->
+            if (cause != null) Thread { runCatching { conn.disconnect() } }.start()
+        }
+
+        val textSb = StringBuilder()
+        var lastStreamedVisible = ""
+        val fnCallIds = mutableMapOf<String, String>()
+        val fnCallNames = mutableMapOf<String, String>()
+        val fnCallArgs = mutableMapOf<String, StringBuilder>()
+        val fnOrder = mutableListOf<String>()
+        var inputTokens = 0L
+        var outputTokens = 0L
+        var totalTokens = 0L
+        var finishReason: String? = null
+
+        try {
+            conn.outputStream.use { os ->
+                os.write(bodyBytes)
+                os.flush()
+            }
+
+            val status = conn.responseCode
+            if (status !in 200..299) {
+                val rawErr = (conn.errorStream ?: conn.inputStream)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                val msg = GeminiCodeAssistant.extractApiErrorMessage(rawErr).ifBlank { conn.responseMessage ?: "HTTP $status" }
+                throw GeminiApiException(status, msg)
+            }
+
+            onConnected()
+
+            BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { reader ->
+                while (true) {
+                    coroutineContext.ensureActive()
+                    val line = reader.readLine() ?: break
+                    if (!line.startsWith("data:")) continue
+                    val payload = line.removePrefix("data:").trim()
+                    if (payload.isEmpty() || payload == "[DONE]") continue
+
+                    val root = runCatching { JSONObject(payload) }.getOrNull() ?: continue
+                    val type = root.optString("type", "")
+                    when (type) {
+                        "error" -> {
+                            val err = root.optJSONObject("error")
+                            throw GeminiApiException(status, err?.optString("message") ?: "OpenAI Responses error")
+                        }
+                        "response.reasoning_summary_text.delta", "response.reasoning.delta" -> {
+                            onReasoningDelta()
+                        }
+                        "response.output_text.delta" -> {
+                            val delta = root.optString("delta", "")
+                            if (delta.isNotEmpty()) {
+                                textSb.append(delta)
+                                val hideTools = !includeTools && allowTextToolCalls
+                                val sanitized = sanitizeStreamingVisibleText(textSb.toString(), hideTools)
+                                    .let { if (lastStreamedVisible.isEmpty()) it.trimStart() else it }
+                                if (sanitized.length > lastStreamedVisible.length && sanitized.startsWith(lastStreamedVisible)) {
+                                    val inc = sanitized.substring(lastStreamedVisible.length)
+                                    lastStreamedVisible = sanitized
+                                    onTextDelta(inc)
+                                }
+                            }
+                        }
+                        "response.output_item.added" -> {
+                            val item = root.optJSONObject("item") ?: continue
+                            if (item.optString("type") == "function_call") {
+                                val itemId = item.optString("id").ifBlank { "item_${fnOrder.size}" }
+                                if (itemId !in fnOrder) fnOrder.add(itemId)
+                                fnCallIds[itemId] = item.optString("call_id").ifBlank { itemId }
+                                val name = item.optString("name", "")
+                                if (name.isNotBlank()) fnCallNames[itemId] = name
+                                fnCallArgs.getOrPut(itemId) { StringBuilder() }
+                            }
+                        }
+                        "response.function_call_arguments.delta" -> {
+                            val itemId = root.optString("item_id").ifBlank { fnOrder.lastOrNull().orEmpty() }
+                            val delta = root.optString("delta", "")
+                            if (itemId.isNotBlank() && delta.isNotEmpty()) {
+                                fnCallArgs.getOrPut(itemId) { StringBuilder() }.append(delta)
+                            }
+                        }
+                        "response.output_item.done" -> {
+                            val item = root.optJSONObject("item") ?: continue
+                            if (item.optString("type") == "function_call") {
+                                val itemId = item.optString("id").ifBlank { "item_${fnOrder.size}" }
+                                if (itemId !in fnOrder) fnOrder.add(itemId)
+                                fnCallIds[itemId] = item.optString("call_id").ifBlank { itemId }
+                                val name = item.optString("name", "")
+                                if (name.isNotBlank()) fnCallNames[itemId] = name
+                                val fullArgs = item.optString("arguments", "")
+                                if (fullArgs.isNotBlank() && (fnCallArgs[itemId]?.isEmpty() != false)) {
+                                    fnCallArgs[itemId] = StringBuilder(fullArgs)
+                                }
+                            }
+                        }
+                        "response.completed", "response.done" -> {
+                            val resp = root.optJSONObject("response")
+                            finishReason = resp?.optString("status")?.takeIf { it.isNotBlank() } ?: "completed"
+                            resp?.optJSONObject("usage")?.let { u ->
+                                inputTokens = u.optLong("input_tokens", inputTokens)
+                                outputTokens = u.optLong("output_tokens", outputTokens)
+                                totalTokens = u.optLong("total_tokens", inputTokens + outputTokens)
+                            }
+                        }
+                    }
+                }
+            }
+
+            var calls = fnOrder.mapNotNull { itemId ->
+                val name = fnCallNames[itemId]?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                OpenAiToolCallRecord(
+                    id = fnCallIds[itemId] ?: itemId,
+                    name = name,
+                    argsJson = fnCallArgs[itemId]?.toString().orEmpty().ifBlank { "{}" },
+                )
+            }
+            var finalVisibleText = stripThinkBlocks(textSb.toString())
+            if (calls.isEmpty() && !includeTools && allowTextToolCalls && finalVisibleText.contains("<tool_call>", ignoreCase = true)) {
+                val (cleaned, parsedTextCalls) = extractTextToolCalls(finalVisibleText)
+                if (parsedTextCalls.isNotEmpty()) {
+                    finalVisibleText = cleaned
+                    calls = parsedTextCalls
+                }
+            }
+            if (calls.isEmpty() && finalVisibleText.isBlank()) {
+                throw GeminiApiException(502, "$modelId returned an empty response")
+            }
+
+            ExternalTurnOutcome(
+                text = finalVisibleText,
+                openAiToolCalls = calls,
+                usage = TokenUsageDelta(
+                    inputTokens = inputTokens,
+                    outputTokens = outputTokens,
+                    totalTokens = if (totalTokens > 0) totalTokens else inputTokens + outputTokens,
+                    latencyMs = System.currentTimeMillis() - startedAt,
+                ),
+                finishReason = finishReason,
+            )
+        } finally {
+            cancelHandle?.dispose()
+            conn.disconnect()
+        }
+    }
+
+    internal fun buildAdaptedClaudeMessages(
+        messages: JSONArray,
+        stripImages: Boolean,
+        convertToolsToTextHistory: Boolean,
+        foldedSystemPrefix: String = "",
+    ): JSONArray {
+        val out = JSONArray()
+        for (i in 0 until messages.length()) {
+            val orig = messages.optJSONObject(i) ?: continue
+            val role = orig.optString("role", "user")
+            val contentAny = orig.opt("content")
+            if (contentAny is JSONArray) {
+                val newBlocks = JSONArray()
+                val textBuf = StringBuilder()
+                for (j in 0 until contentAny.length()) {
+                    val b = contentAny.optJSONObject(j) ?: continue
+                    val bType = b.optString("type")
+                    when {
+                        bType == "image" && stripImages -> {
+                            textBuf.append("\n[Image attachment omitted]")
+                        }
+                        bType == "tool_use" && convertToolsToTextHistory -> {
+                            val name = b.optString("name")
+                            val inp = b.optJSONObject("input")?.toString() ?: "{}"
+                            textBuf.append("\n<tool_call>{\"name\":\"$name\",\"arguments\":$inp}</tool_call>")
+                        }
+                        bType == "tool_result" && convertToolsToTextHistory -> {
+                            val resStr = b.optString("content", "{}")
+                            textBuf.append("\n[Tool Result]\n$resStr")
+                        }
+                        else -> {
+                            if (convertToolsToTextHistory && bType == "text") {
+                                textBuf.append(b.optString("text", ""))
+                            } else {
+                                newBlocks.put(JSONObject(b.toString()))
+                            }
+                        }
+                    }
+                }
+                if (convertToolsToTextHistory) {
+                    val merged = textBuf.toString().trim().ifBlank { "Continuing." }
+                    out.put(JSONObject().put("role", role).put("content", merged))
+                } else {
+                    if (newBlocks.length() > 0) {
+                        out.put(JSONObject().put("role", role).put("content", newBlocks))
+                    } else if (textBuf.isNotBlank()) {
+                        out.put(JSONObject().put("role", role).put("content", textBuf.toString().trim()))
+                    }
+                }
+            } else {
+                out.put(JSONObject(orig.toString()))
+            }
+        }
+
+        if (foldedSystemPrefix.isNotBlank()) {
+            val firstUserIdx = (0 until out.length()).firstOrNull { out.optJSONObject(it)?.optString("role") == "user" }
+            if (firstUserIdx != null) {
+                val first = out.getJSONObject(firstUserIdx)
+                val c = first.opt("content")
+                if (c is JSONArray) {
+                    val updated = JSONArray().apply {
+                        put(JSONObject().put("type", "text").put("text", "Instructions:\n$foldedSystemPrefix\n\nUser request:"))
+                        for (k in 0 until c.length()) put(c.get(k))
+                    }
+                    first.put("content", updated)
+                } else {
+                    first.put("content", "Instructions:\n$foldedSystemPrefix\n\nUser request:\n${c ?: ""}")
+                }
+            } else {
+                val fallbackArr = JSONArray().apply {
+                    put(JSONObject().put("role", "user").put("content", foldedSystemPrefix))
+                    for (k in 0 until out.length()) put(out.get(k))
+                }
+                return fallbackArr
+            }
+        }
+        return out
+    }
+
     suspend fun streamClaude(
         apiKey: String,
         modelId: String,
         systemInstruction: String,
         messages: JSONArray,
         thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
+        maxTokens: Int = 8192,
+        includeTools: Boolean = true,
+        allowTextToolCalls: Boolean = true,
+        includeGitHubTools: Boolean = true,
+        includeSystem: Boolean = true,
+        includeTemperature: Boolean = false,
+        temperature: Float = 0.3f,
+        stripImages: Boolean = false,
         onConnected: () -> Unit,
         onTextDelta: (String) -> Unit,
     ): ExternalTurnOutcome = withContext(Dispatchers.IO) {
         val startedAt = System.currentTimeMillis()
+        val activeSpecs = buildSharedToolSpecs().filter { (name, _, _) ->
+            includeGitHubTools || !name.startsWith("github_")
+        }
         val tools = JSONArray().apply {
-            buildSharedToolSpecs().forEach { (name, desc, schema) ->
+            activeSpecs.forEach { (name, desc, schema) ->
                 put(
                     JSONObject()
                         .put("name", name)
@@ -881,15 +1296,37 @@ internal object ProviderApiClient {
             }
         }
 
-        val bodyBytes = JSONObject()
+        val effectiveSystem = buildString {
+            append(systemInstruction)
+            if (!includeTools && allowTextToolCalls) {
+                if (isNotEmpty()) append("\n\n")
+                append(buildTextModeToolPrompt(includeGitHubTools))
+            }
+        }
+        val adaptedMessages = buildAdaptedClaudeMessages(
+            messages = messages,
+            stripImages = stripImages,
+            convertToolsToTextHistory = !includeTools,
+            foldedSystemPrefix = if (!includeSystem) effectiveSystem else "",
+        )
+
+        val bodyJson = JSONObject()
             .put("model", modelId)
-            .put("max_tokens", 8192)
-            .put("system", systemInstruction)
-            .put("messages", messages)
-            .put("tools", tools)
+            .put("max_tokens", maxTokens)
+            .put("messages", adaptedMessages)
             .put("stream", true)
-            .toString()
-            .toByteArray(Charsets.UTF_8)
+
+        if (includeSystem && effectiveSystem.isNotBlank()) {
+            bodyJson.put("system", effectiveSystem)
+        }
+        if (includeTools && tools.length() > 0) {
+            bodyJson.put("tools", tools)
+        }
+        if (includeTemperature) {
+            bodyJson.put("temperature", temperature.coerceIn(0f, 1.0f).toDouble())
+        }
+
+        val bodyBytes = bodyJson.toString().toByteArray(Charsets.UTF_8)
 
         val conn = (URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
@@ -910,6 +1347,7 @@ internal object ProviderApiClient {
         }
 
         val textSb = StringBuilder()
+        var lastStreamedVisible = ""
         val toolIds = mutableMapOf<Int, String>()
         val toolNames = mutableMapOf<Int, String>()
         val toolJsonBuilders = mutableMapOf<Int, StringBuilder>()
@@ -929,7 +1367,8 @@ internal object ProviderApiClient {
             if (status !in 200..299) {
                 val rawErr = (conn.errorStream ?: conn.inputStream)?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
                 val msg = GeminiCodeAssistant.extractApiErrorMessage(rawErr).ifBlank { conn.responseMessage ?: "HTTP $status" }
-                throw GeminiApiException(status, msg)
+                val retryAfterSec = conn.getHeaderField("retry-after")?.trim()?.toLongOrNull()
+                throw GeminiApiException(status, msg, retryAfterSec?.let { (it * 1000L).coerceIn(300L, 4500L) })
             }
 
             onConnected()
@@ -977,7 +1416,14 @@ internal object ProviderApiClient {
                                     if (txt.isNotEmpty()) {
                                         textSb.append(txt)
                                         blockTexts.getOrPut(idx) { StringBuilder() }.append(txt)
-                                        onTextDelta(txt)
+                                        val hideTools = !includeTools && allowTextToolCalls
+                                        val sanitized = sanitizeStreamingVisibleText(textSb.toString(), hideTools)
+                                            .let { if (lastStreamedVisible.isEmpty()) it.trimStart() else it }
+                                        if (sanitized.length > lastStreamedVisible.length && sanitized.startsWith(lastStreamedVisible)) {
+                                            val inc = sanitized.substring(lastStreamedVisible.length)
+                                            lastStreamedVisible = sanitized
+                                            onTextDelta(inc)
+                                        }
                                     }
                                 }
                                 "input_json_delta" -> {
@@ -1030,6 +1476,18 @@ internal object ProviderApiClient {
                 }
             }
 
+            var finalVisibleText = textSb.toString()
+            if (toolUses.isEmpty() && !includeTools && allowTextToolCalls && finalVisibleText.contains("<tool_call>", ignoreCase = true)) {
+                val (cleaned, parsedTextCalls) = extractTextToolCalls(finalVisibleText)
+                if (parsedTextCalls.isNotEmpty()) {
+                    finalVisibleText = cleaned
+                    parsedTextCalls.forEach { tc ->
+                        val parsedInput = runCatching { JSONObject(tc.argsJson) }.getOrElse { JSONObject() }
+                        toolUses.add(ClaudeToolUseRecord(id = tc.id, name = tc.name, input = parsedInput))
+                    }
+                }
+            }
+
             val remReq = conn.getHeaderField("anthropic-ratelimit-requests-remaining")
             val remTok = conn.getHeaderField("anthropic-ratelimit-tokens-remaining")
             val quotaNote = listOfNotNull(
@@ -1038,7 +1496,7 @@ internal object ProviderApiClient {
             ).joinToString(" • ")
 
             ExternalTurnOutcome(
-                text = textSb.toString(),
+                text = finalVisibleText,
                 claudeToolUses = toolUses,
                 claudeAssistantBlocks = assistantBlocks,
                 usage = TokenUsageDelta(

@@ -3,6 +3,7 @@ package com.example.data
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -17,12 +18,15 @@ import com.example.model.BuildVariant
 import com.example.model.EditorSettings
 import com.example.model.FileLanguage
 import com.example.model.GitHubRepoLink
+import com.example.model.IdeAccentPreset
+import com.example.model.IdeThemePreset
 import com.example.model.JavaVersionOption
 import com.example.model.ProjectFile
 import com.example.model.ProjectLanguage
 import com.example.model.ProjectMetadata
 import com.example.model.ProjectTemplate
 import com.example.model.ReleaseSigningConfig
+import com.example.model.UiDensity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -56,6 +60,15 @@ class ProjectRepository(
         val WORD_WRAP = booleanPreferencesKey("editor_word_wrap")
         val AUTO_INDENT = booleanPreferencesKey("editor_auto_indent")
         val DARK_THEME = booleanPreferencesKey("editor_dark_theme")
+        val THEME_PRESET = stringPreferencesKey("ide_theme_preset")
+        val ACCENT_PRESET = stringPreferencesKey("ide_accent_preset")
+        val UI_DENSITY = stringPreferencesKey("ide_ui_density")
+        val SHOW_LINE_NUMBERS = booleanPreferencesKey("editor_show_line_numbers")
+        val HIGHLIGHT_BRACKETS = booleanPreferencesKey("editor_highlight_brackets")
+        val SHOW_BREADCRUMBS = booleanPreferencesKey("editor_show_breadcrumbs")
+        val SHOW_STATUS_BAR = booleanPreferencesKey("editor_show_status_bar")
+        val AI_TEMPERATURE = floatPreferencesKey("ai_temperature")
+        val CUSTOM_SYSTEM_INSTRUCTION = stringPreferencesKey("ai_custom_system_instruction")
 
         val ACTIVE_PROVIDER = stringPreferencesKey("ai_active_provider")
         val CUSTOM_GEMINI_API_KEY = stringPreferencesKey("custom_gemini_api_key")
@@ -287,27 +300,81 @@ class ProjectRepository(
     }
 
     val editorSettings: Flow<EditorSettings> = context.editorDataStore.data.map { prefs ->
+        val dark = prefs[PrefKeys.DARK_THEME] ?: true
+        val preset = runCatching {
+            IdeThemePreset.valueOf(prefs[PrefKeys.THEME_PRESET].orEmpty())
+        }.getOrElse {
+            if (dark) IdeThemePreset.DARCULA else IdeThemePreset.INTELLIJ_LIGHT
+        }
+        val accent = runCatching {
+            IdeAccentPreset.valueOf(prefs[PrefKeys.ACCENT_PRESET].orEmpty())
+        }.getOrDefault(IdeAccentPreset.ANDROID_GREEN)
+        val density = runCatching {
+            UiDensity.valueOf(prefs[PrefKeys.UI_DENSITY].orEmpty())
+        }.getOrDefault(UiDensity.STANDARD)
         EditorSettings(
             fontSizeSp = prefs[PrefKeys.FONT_SIZE] ?: 13,
             wordWrap = prefs[PrefKeys.WORD_WRAP] ?: false,
             autoIndent = prefs[PrefKeys.AUTO_INDENT] ?: true,
-            darkTheme = prefs[PrefKeys.DARK_THEME] ?: true,
+            darkTheme = preset.isDark,
+            themePreset = preset,
+            accentPreset = accent,
+            uiDensity = density,
+            showLineNumbers = prefs[PrefKeys.SHOW_LINE_NUMBERS] ?: true,
+            highlightBrackets = prefs[PrefKeys.HIGHLIGHT_BRACKETS] ?: true,
+            showBreadcrumbs = prefs[PrefKeys.SHOW_BREADCRUMBS] ?: true,
+            showStatusBar = prefs[PrefKeys.SHOW_STATUS_BAR] ?: true,
+            aiTemperature = (prefs[PrefKeys.AI_TEMPERATURE] ?: 0.3f).coerceIn(0f, 1.5f),
+            customSystemInstruction = prefs[PrefKeys.CUSTOM_SYSTEM_INSTRUCTION].orEmpty(),
         )
     }
 
     suspend fun updateEditorSettings(transform: (EditorSettings) -> EditorSettings) {
         context.editorDataStore.edit { prefs ->
+            val dark = prefs[PrefKeys.DARK_THEME] ?: true
+            val currentPreset = runCatching {
+                IdeThemePreset.valueOf(prefs[PrefKeys.THEME_PRESET].orEmpty())
+            }.getOrElse {
+                if (dark) IdeThemePreset.DARCULA else IdeThemePreset.INTELLIJ_LIGHT
+            }
             val current = EditorSettings(
                 fontSizeSp = prefs[PrefKeys.FONT_SIZE] ?: 13,
                 wordWrap = prefs[PrefKeys.WORD_WRAP] ?: false,
                 autoIndent = prefs[PrefKeys.AUTO_INDENT] ?: true,
-                darkTheme = prefs[PrefKeys.DARK_THEME] ?: true,
+                darkTheme = currentPreset.isDark,
+                themePreset = currentPreset,
+                accentPreset = runCatching {
+                    IdeAccentPreset.valueOf(prefs[PrefKeys.ACCENT_PRESET].orEmpty())
+                }.getOrDefault(IdeAccentPreset.ANDROID_GREEN),
+                uiDensity = runCatching {
+                    UiDensity.valueOf(prefs[PrefKeys.UI_DENSITY].orEmpty())
+                }.getOrDefault(UiDensity.STANDARD),
+                showLineNumbers = prefs[PrefKeys.SHOW_LINE_NUMBERS] ?: true,
+                highlightBrackets = prefs[PrefKeys.HIGHLIGHT_BRACKETS] ?: true,
+                showBreadcrumbs = prefs[PrefKeys.SHOW_BREADCRUMBS] ?: true,
+                showStatusBar = prefs[PrefKeys.SHOW_STATUS_BAR] ?: true,
+                aiTemperature = (prefs[PrefKeys.AI_TEMPERATURE] ?: 0.3f).coerceIn(0f, 1.5f),
+                customSystemInstruction = prefs[PrefKeys.CUSTOM_SYSTEM_INSTRUCTION].orEmpty(),
             )
             val updated = transform(current)
+            val syncedPreset = if (updated.darkTheme != current.darkTheme && updated.themePreset == current.themePreset) {
+                if (updated.darkTheme) IdeThemePreset.DARCULA else IdeThemePreset.INTELLIJ_LIGHT
+            } else {
+                updated.themePreset
+            }
             prefs[PrefKeys.FONT_SIZE] = updated.fontSizeSp.coerceIn(10, 22)
             prefs[PrefKeys.WORD_WRAP] = updated.wordWrap
             prefs[PrefKeys.AUTO_INDENT] = updated.autoIndent
-            prefs[PrefKeys.DARK_THEME] = updated.darkTheme
+            prefs[PrefKeys.DARK_THEME] = syncedPreset.isDark
+            prefs[PrefKeys.THEME_PRESET] = syncedPreset.name
+            prefs[PrefKeys.ACCENT_PRESET] = updated.accentPreset.name
+            prefs[PrefKeys.UI_DENSITY] = updated.uiDensity.name
+            prefs[PrefKeys.SHOW_LINE_NUMBERS] = updated.showLineNumbers
+            prefs[PrefKeys.HIGHLIGHT_BRACKETS] = updated.highlightBrackets
+            prefs[PrefKeys.SHOW_BREADCRUMBS] = updated.showBreadcrumbs
+            prefs[PrefKeys.SHOW_STATUS_BAR] = updated.showStatusBar
+            prefs[PrefKeys.AI_TEMPERATURE] = updated.aiTemperature.coerceIn(0f, 1.5f)
+            prefs[PrefKeys.CUSTOM_SYSTEM_INSTRUCTION] = updated.customSystemInstruction
         }
     }
 
@@ -384,8 +451,11 @@ class ProjectRepository(
         val dir = getProjectDir(projectId)
         val current = readMetadata(dir) ?: return@withContext null
         val safeMinSdk = minSdkVersion.coerceIn(21, 35)
-        val manifestFile = File(dir, "AndroidManifest.xml")
-        if (manifestFile.exists()) {
+        val manifestFile = listOf(
+            File(dir, "AndroidManifest.xml"),
+            File(dir, "app/src/main/AndroidManifest.xml"),
+        ).firstOrNull { it.exists() }
+        if (manifestFile != null) {
             val xml = manifestFile.readText()
             val updatedXml = updateManifestMinSdk(xml, safeMinSdk)
             manifestFile.writeText(updatedXml)
@@ -436,12 +506,22 @@ class ProjectRepository(
         val manifestFile = listOf(
             File(dir, "AndroidManifest.xml"),
             File(dir, "app/src/main/AndroidManifest.xml"),
+            File(dir, "src/main/AndroidManifest.xml"),
         ).firstOrNull { it.exists() }
         val manifestText = manifestFile?.let { runCatching { it.readText() }.getOrNull() }.orEmpty()
+        val appGradleText = listOf(
+            File(dir, "app/build.gradle.kts"),
+            File(dir, "app/build.gradle"),
+            File(dir, "build.gradle.kts"),
+            File(dir, "build.gradle"),
+        ).firstOrNull { it.exists() }?.let { runCatching { it.readText() }.getOrNull() }.orEmpty()
 
         val detectedPkg = Regex("""package\s*=\s*"([^"]+)"""")
             .find(manifestText)?.groupValues?.getOrNull(1)?.trim()
             ?.takeIf { it.contains('.') }
+            ?: Regex("""(?:applicationId|namespace)\s*(?:=|\s)\s*["']([a-zA-Z0-9_.]+)["']""")
+                .find(appGradleText)?.groupValues?.getOrNull(1)?.trim()
+                ?.takeIf { it.contains('.') }
             ?: run {
                 dir.walkTopDown()
                     .firstOrNull { it.isFile && (it.extension == "kt" || it.extension == "java") }
@@ -455,6 +535,8 @@ class ProjectRepository(
 
         val detectedMinSdk = Regex("""android:minSdkVersion\s*=\s*"(\d+)"""")
             .find(manifestText)?.groupValues?.getOrNull(1)?.toIntOrNull()?.coerceIn(21, 35)
+            ?: Regex("""minSdk(?:Version)?\s*(?:=|\s)\s*(\d+)""")
+                .find(appGradleText)?.groupValues?.getOrNull(1)?.toIntOrNull()?.coerceIn(21, 35)
             ?: current.minSdkVersion
 
         var ktCount = 0
@@ -590,7 +672,12 @@ class ProjectRepository(
             .filter { file ->
                 if (!file.isFile) return@filter false
                 val rel = file.relativeTo(dir).invariantSeparatorsPath
-                rel != "project.json" && !rel.startsWith("build/") && !rel.startsWith(".droidforge/")
+                rel != "project.json" &&
+                    !rel.startsWith("build/") &&
+                    !rel.startsWith("app/build/") &&
+                    !rel.startsWith(".droidforge/") &&
+                    !rel.startsWith(".git/") &&
+                    !rel.startsWith(".gradle/")
             }
             .map { file ->
                 val rel = file.relativeTo(dir).invariantSeparatorsPath
@@ -609,7 +696,7 @@ class ProjectRepository(
             .sortedWith(
                 compareBy<ProjectFile>(
                     { if (it.fileName == "MainActivity.java" || it.fileName == "MainActivity.kt") 0 else 1 },
-                    { if (it.relativePath.startsWith("src/")) 0 else 1 },
+                    { if (it.relativePath.startsWith("src/") || it.relativePath.startsWith("app/src/main/")) 0 else 1 },
                     { it.relativePath },
                 ),
             )

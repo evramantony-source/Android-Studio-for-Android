@@ -1,6 +1,6 @@
 {
-  "name": "Android Studio: For Android",
-  "description": "Offline Android Java IDE and in-app APK compiler with a built-in Gemini coding assistant.",
+  "name": "Android Studio",
+  "description": "Mobile Android Studio IDE with offline APK/AAB compiler, live resetting emulator, multi-agent AI coding (Gemini, Claude, ChatGPT, OpenRouter), and full GitHub repo sync.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

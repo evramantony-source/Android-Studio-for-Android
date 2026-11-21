@@ -82,6 +82,8 @@ fun BuildPanel(
     onExportArtifact: (String) -> Unit,
     onShareArtifact: (String) -> Unit,
     onOpenGitHubCloudBuild: () -> Unit = {},
+    terminalLines: List<String> = emptyList(),
+    onRunTerminalCommand: (String) -> Unit = {},
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -131,6 +133,20 @@ fun BuildPanel(
                             }
                         },
                         modifier = Modifier.testTag("apk_inspector_tab"),
+                    )
+                    Tab(
+                        selected = selectedTab == 2,
+                        onClick = { selectedTab = 2 },
+                        text = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Text("Terminal")
+                            }
+                        },
+                        modifier = Modifier.testTag("build_terminal_tab"),
                     )
                 }
                 IconButton(onClick = onClose, modifier = Modifier.testTag("close_build_panel")) {
@@ -214,9 +230,15 @@ fun BuildPanel(
                     onOpenGitHubCloudBuild = onOpenGitHubCloudBuild,
                     modifier = Modifier.weight(1f),
                 )
-            } else {
+            } else if (selectedTab == 1) {
                 ArtifactInspectorTab(
                     buildResult = buildResult,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                TerminalToolTab(
+                    lines = terminalLines,
+                    onRunCommand = onRunTerminalCommand,
                     modifier = Modifier.weight(1f),
                 )
             }

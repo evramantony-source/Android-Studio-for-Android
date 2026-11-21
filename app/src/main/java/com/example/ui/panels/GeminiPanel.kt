@@ -31,9 +31,12 @@ import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Edit
@@ -43,10 +46,13 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.StopCircle
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -57,6 +63,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -74,21 +81,27 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.ai.AgentRole
 import com.example.ai.AgentStep
 import com.example.ai.AgentStepStatus
 import com.example.ai.AiModelOption
+import com.example.ai.AiModelsCatalog
 import com.example.ai.AiProvider
 import com.example.ai.AiThinkingMode
 import com.example.ai.AiUiState
 import com.example.ai.AiUsageSummary
 import com.example.ai.ChatMessage
+import com.example.ai.FirebaseAiAgentClient
 import com.example.ai.GeminiCodeAssistant
 import com.example.ai.ProjectChatThread
 import com.example.ai.SuggestedCodeBlock
 import com.example.model.AiAttachment
 import com.example.model.BuildDiagnostic
 import com.example.model.DiagnosticSeverity
+import com.example.model.EditorSettings
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import java.util.Locale
+import kotlin.math.roundToInt
 
 @Composable
 fun GeminiPanel(
@@ -106,6 +119,10 @@ fun GeminiPanel(
     messages: List<ChatMessage>,
     pendingAttachments: List<AiAttachment> = emptyList(),
     aiState: AiUiState,
+    editorSettings: EditorSettings = EditorSettings(),
+    threadMessagesMap: Map<String, List<ChatMessage>> = emptyMap(),
+    threadUiStates: Map<String, AiUiState> = emptyMap(),
+    runningThreadIds: Set<String> = emptySet(),
     showSplitSideChat: Boolean = false,
     onToggleSplitSideChat: (() -> Unit)? = null,
     onSelectProvider: (AiProvider) -> Unit,
@@ -118,6 +135,14 @@ fun GeminiPanel(
     onCreateSideChat: (String) -> Unit,
     onRenameChatThread: (String, String) -> Unit,
     onDeleteChatThread: (String) -> Unit,
+    onLaunchRoleAgent: (AgentRole, String?) -> Unit = { _, _ -> },
+    onUpdateThreadProviderModel: (String, AiProvider, String) -> Unit = { _, _, _ -> },
+    onUpdateThreadSystemAndTemp: (String, String, Float) -> Unit = { _, _, _ -> },
+    onSendPromptToThread: ((String, String) -> Unit)? = null,
+    onStopThread: (String) -> Unit = {},
+    onRetryThread: (String) -> Unit = {},
+    onClearThreadChat: (String) -> Unit = {},
+    onOpenCustomization: (() -> Unit)? = null,
     onPickPhoto: () -> Unit = {},
     onCaptureCamera: () -> Unit = {},
     onPickFile: () -> Unit = {},
@@ -134,6 +159,7 @@ fun GeminiPanel(
     var showKeysDialog by remember { mutableStateOf(false) }
     var showModelMenuDialog by remember { mutableStateOf(false) }
     var showUsageDialog by remember { mutableStateOf(false) }
+    var showThreadTuneDialog by remember { mutableStateOf(false) }
     var renameThreadTarget by remember { mutableStateOf<ProjectChatThread?>(null) }
     var isPanelReady by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
@@ -144,28 +170,47 @@ fun GeminiPanel(
         isPanelReady = true
     }
 
-    val currentModelId = com.example.ai.AiModelsCatalog.normalizeModelId(activeProvider, providerModels[activeProvider])
-    val isFirebaseReady = remember { com.example.ai.FirebaseAiAgentClient.isFirebaseConfigured() }
-    val hasEffectiveKey = remember(activeProvider, providerApiKeys, isFirebaseReady) {
-        when (activeProvider) {
+    val activeThreadMeta = remember(chatThreads, activeThreadId) {
+        chatThreads.find { it.id == activeThreadId }
+    }
+    val effectiveProvider = remember(activeThreadMeta, activeProvider) {
+        activeThreadMeta?.providerName
+            ?.takeIf { it.isNotBlank() }
+            ?.let { runCatching { AiProvider.valueOf(it) }.getOrNull() }
+            ?: activeProvider
+    }
+    val currentModelId = remember(activeThreadMeta, effectiveProvider, providerModels) {
+        val raw = activeThreadMeta?.modelId?.takeIf { it.isNotBlank() } ?: providerModels[effectiveProvider]
+        AiModelsCatalog.normalizeModelId(effectiveProvider, raw)
+    }
+    val effectiveMessages = threadMessagesMap[activeThreadId] ?: activeThreadMeta?.messages ?: messages
+    val effectiveAiState = threadUiStates[activeThreadId] ?: aiState
+    val isActiveThreadRunning = (activeThreadId in runningThreadIds) || (effectiveAiState is AiUiState.Streaming)
+    val effectiveTemperature = activeThreadMeta?.temperature ?: editorSettings.aiTemperature
+    val effectiveSystemInstruction = activeThreadMeta?.customSystemInstruction?.takeIf { it.isNotBlank() }
+        ?: editorSettings.customSystemInstruction
+
+    val isFirebaseReady = remember { FirebaseAiAgentClient.isFirebaseConfigured() }
+    val hasEffectiveKey = remember(effectiveProvider, providerApiKeys, isFirebaseReady) {
+        when (effectiveProvider) {
             AiProvider.GEMINI -> isFirebaseReady ||
                 GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
             AiProvider.OPENROUTER -> GeminiCodeAssistant.resolveOpenRouterApiKey(
                 providerApiKeys[AiProvider.OPENROUTER].orEmpty(),
             ).isNotEmpty()
-            else -> providerApiKeys[activeProvider].orEmpty().isNotBlank()
+            else -> providerApiKeys[effectiveProvider].orEmpty().isNotBlank()
         }
     }
 
-    LaunchedEffect(messages.size, messages.lastOrNull()?.steps?.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
+    LaunchedEffect(effectiveMessages.size, effectiveMessages.lastOrNull()?.steps?.size) {
+        if (effectiveMessages.isNotEmpty()) {
+            listState.animateScrollToItem(effectiveMessages.lastIndex)
         }
     }
 
-    LaunchedEffect(messages.lastOrNull()?.text?.length) {
-        if (messages.isNotEmpty() && aiState is AiUiState.Streaming) {
-            listState.scrollToItem(messages.lastIndex)
+    LaunchedEffect(effectiveMessages.lastOrNull()?.text?.length) {
+        if (effectiveMessages.isNotEmpty() && effectiveAiState is AiUiState.Streaming) {
+            listState.scrollToItem(effectiveMessages.lastIndex)
         }
     }
 
@@ -188,7 +233,7 @@ fun GeminiPanel(
                 ) {
                     CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 3.dp)
                     Text(
-                        text = "Loading ${activeProvider.shortName} Agent...",
+                        text = "Loading ${effectiveProvider.shortName} Agent...",
                         style = MaterialTheme.typography.titleSmall,
                     )
                     Text(
@@ -227,11 +272,17 @@ fun GeminiPanel(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         Text(
-                            text = "${activeProvider.shortName} Agent",
+                            text = "${activeThreadMeta?.agentRole?.badge ?: effectiveProvider.shortName} • ${effectiveProvider.shortName}",
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        if (isActiveThreadRunning) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(12.dp),
+                                strokeWidth = 2.dp,
+                            )
+                        }
                         Icon(
                             Icons.Default.ArrowDropDown,
                             contentDescription = "Choose AI model",
@@ -245,6 +296,20 @@ fun GeminiPanel(
                         color = if (hasEffectiveKey) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                IconButton(
+                    onClick = { showThreadTuneDialog = true },
+                    modifier = Modifier.testTag("thread_tune_button"),
+                ) {
+                    Icon(
+                        Icons.Default.Tune,
+                        contentDescription = "Tune temperature and system instructions",
+                        tint = if (effectiveSystemInstruction.isNotBlank()) {
+                            MaterialTheme.colorScheme.secondary
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
                     )
                 }
                 IconButton(
@@ -275,8 +340,22 @@ fun GeminiPanel(
                         )
                     }
                 }
-                if (messages.isNotEmpty()) {
-                    IconButton(onClick = onClearChat, modifier = Modifier.testTag("gemini_clear_button")) {
+                if (onOpenCustomization != null) {
+                    IconButton(
+                        onClick = onOpenCustomization,
+                        modifier = Modifier.testTag("ai_open_customization_button"),
+                    ) {
+                        Icon(Icons.Default.Palette, contentDescription = "UI and AI Studio customization")
+                    }
+                }
+                if (effectiveMessages.isNotEmpty()) {
+                    IconButton(
+                        onClick = {
+                            onClearThreadChat(activeThreadId)
+                            onClearChat()
+                        },
+                        modifier = Modifier.testTag("gemini_clear_button"),
+                    ) {
                         Icon(Icons.Default.DeleteSweep, contentDescription = "Clear active chat")
                     }
                 }
@@ -304,8 +383,17 @@ fun GeminiPanel(
                         else -> providerApiKeys[provider].orEmpty().isNotBlank()
                     }
                     FilterChip(
-                        selected = activeProvider == provider,
-                        onClick = { onSelectProvider(provider) },
+                        selected = effectiveProvider == provider,
+                        onClick = {
+                            val chosenModel = AiModelsCatalog.normalizeModelId(
+                                provider,
+                                providerModels[provider],
+                            )
+                            onUpdateThreadProviderModel(activeThreadId, provider, chosenModel)
+                            if (activeThreadId == "main") {
+                                onSelectProvider(provider)
+                            }
+                        },
                         label = {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
@@ -329,6 +417,17 @@ fun GeminiPanel(
                 AssistChip(
                     onClick = { showModelMenuDialog = true },
                     label = { Text("Models", style = MaterialTheme.typography.labelSmall) },
+                )
+                AssistChip(
+                    onClick = { showThreadTuneDialog = true },
+                    label = {
+                        Text(
+                            text = "T:${String.format(Locale.US, "%.1f", effectiveTemperature)}",
+                            fontFamily = JetBrainsMonoFontFamily,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    },
+                    modifier = Modifier.testTag("ai_temperature_pill"),
                 )
                 FilterChip(
                     selected = thinkingMode == AiThinkingMode.FAST,
@@ -355,6 +454,75 @@ fun GeminiPanel(
                 )
             }
 
+            // 3 Integrated Parallel Role Agents Strip
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 10.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                listOf(
+                    AgentRole.FEATURE_BUILDER to Icons.Default.Build,
+                    AgentRole.ERROR_FIXER to Icons.Default.BugReport,
+                    AgentRole.GITHUB_WATCHER to Icons.Default.CloudUpload,
+                ).forEach { (role, icon) ->
+                    val roleThread = chatThreads.find { it.agentRole == role }
+                    val isRoleRunning = roleThread?.id?.let { it in runningThreadIds } == true
+                    val isSelected = roleThread?.id == activeThreadId
+                    Surface(
+                        onClick = {
+                            if (roleThread != null) {
+                                onSelectChatThread(roleThread.id)
+                            } else {
+                                onLaunchRoleAgent(role, null)
+                            }
+                        },
+                        color = if (isSelected) {
+                            MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainerHigh
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.testTag("role_agent_chip_${role.name.lowercase()}"),
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                        ) {
+                            if (isRoleRunning) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(12.dp),
+                                    strokeWidth = 2.dp,
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = icon,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(13.dp),
+                                    tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                                )
+                            }
+                            Text(
+                                text = role.badge,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = "Run ${role.label}",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .size(15.dp)
+                                    .clickable { onLaunchRoleAgent(role, null) },
+                            )
+                        }
+                    }
+                }
+            }
+
             // Persistent Per-Project Chat Threads + Side Chats Strip
             Row(
                 modifier = Modifier
@@ -366,6 +534,8 @@ fun GeminiPanel(
             ) {
                 chatThreads.forEach { thread ->
                     val selected = thread.id == activeThreadId
+                    val isThreadRunning = thread.id in runningThreadIds
+                    val threadMsgCount = (threadMessagesMap[thread.id] ?: thread.messages).size
                     Surface(
                         onClick = { onSelectChatThread(thread.id) },
                         color = if (selected) {
@@ -381,9 +551,15 @@ fun GeminiPanel(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
+                            if (isThreadRunning) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(10.dp),
+                                    strokeWidth = 1.8.dp,
+                                )
+                            }
                             Text(
-                                text = if (thread.messages.isNotEmpty() && !selected) {
-                                    "${thread.title} (${thread.messages.size})"
+                                text = if (threadMsgCount > 0 && !selected) {
+                                    "${thread.title} ($threadMsgCount)"
                                 } else {
                                     thread.title
                                 },
@@ -444,7 +620,10 @@ fun GeminiPanel(
                 if (errorDiagnosticsCount > 0) {
                     AssistChip(
                         onClick = {
-                            onSendPrompt("Inspect the build errors, edit the broken files directly, and rebuild until it succeeds.")
+                            onLaunchRoleAgent(
+                                AgentRole.ERROR_FIXER,
+                                "Inspect the $errorDiagnosticsCount build error(s), edit the broken files directly, and rebuild until it succeeds.",
+                            )
                         },
                         label = { Text("Auto-Fix Errors ($errorDiagnosticsCount)") },
                         leadingIcon = {
@@ -454,19 +633,22 @@ fun GeminiPanel(
                 }
                 AssistChip(
                     onClick = {
-                        onSendPrompt("Inspect the project files and explain the app architecture.")
+                        val prompt = "Inspect the project files and explain the app architecture."
+                        onSendPromptToThread?.invoke(activeThreadId, prompt) ?: onSendPrompt(prompt)
                     },
                     label = { Text("Inspect Project") },
                 )
                 AssistChip(
                     onClick = {
-                        onSendPrompt("Build a release APK using build_apk(release=true) and fix any issues.")
+                        val prompt = "Build a release APK using build_apk(release=true) and fix any issues."
+                        onSendPromptToThread?.invoke(activeThreadId, prompt) ?: onSendPrompt(prompt)
                     },
                     label = { Text("Build Release APK") },
                 )
                 AssistChip(
                     onClick = {
-                        onSendPrompt("Build a signed Android App Bundle using build_aab and summarize the bundle contents.")
+                        val prompt = "Build a signed Android App Bundle using build_aab and summarize the bundle contents."
+                        onSendPromptToThread?.invoke(activeThreadId, prompt) ?: onSendPrompt(prompt)
                     },
                     label = { Text("Build AAB") },
                 )
@@ -515,7 +697,7 @@ fun GeminiPanel(
                             }
                         }
                     }
-                } else if (messages.isEmpty()) {
+                } else if (effectiveMessages.isEmpty()) {
                     item {
                         Surface(
                             color = MaterialTheme.colorScheme.surfaceContainer,
@@ -529,12 +711,13 @@ fun GeminiPanel(
                                 verticalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 Text(
-                                    text = "${activeProvider.shortName} Autonomous Agent ($currentModelId)",
+                                    text = "${activeThreadMeta?.title ?: "${effectiveProvider.shortName} Agent"} ($currentModelId)",
                                     style = MaterialTheme.typography.titleMedium,
                                     color = MaterialTheme.colorScheme.primary,
                                 )
                                 Text(
-                                    text = "Chats are saved per project and never reset. Spin up Side Chats above for parallel questions or refactors, and tap any build/edit step to inspect full logs and diffs.",
+                                    text = activeThreadMeta?.agentRole?.shortHint
+                                        ?: "Chats are saved per project and never reset. Run multiple Role Agents or Side Chats in parallel while editing code.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -543,7 +726,7 @@ fun GeminiPanel(
                     }
                 }
 
-                items(messages, key = { it.id }) { msg ->
+                items(effectiveMessages, key = { it.id }) { msg ->
                     ChatBubble(
                         message = msg,
                         activeFileName = activeFileName,
@@ -551,7 +734,7 @@ fun GeminiPanel(
                     )
                 }
 
-                if (aiState is AiUiState.Error) {
+                if (effectiveAiState is AiUiState.Error) {
                     item {
                         Surface(
                             color = MaterialTheme.colorScheme.errorContainer,
@@ -572,27 +755,30 @@ fun GeminiPanel(
                                         tint = MaterialTheme.colorScheme.onErrorContainer,
                                     )
                                     Text(
-                                        text = aiState.message,
+                                        text = effectiveAiState.message,
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onErrorContainer,
                                     )
                                 }
                                 val needsKeyAction = !hasEffectiveKey ||
-                                    aiState.message.contains("key", ignoreCase = true) ||
-                                    aiState.message.contains("App Check", ignoreCase = true) ||
-                                    aiState.message.contains("401") ||
-                                    aiState.message.contains("403")
-                                val needsOpenRouterPrivacyAction = aiState.message.contains("openrouter.ai/settings/privacy", ignoreCase = true) ||
-                                    aiState.message.contains("data policy", ignoreCase = true)
-                                if (aiState.isRetryable || aiState.isModelOverloaded || needsKeyAction || needsOpenRouterPrivacyAction) {
+                                    effectiveAiState.message.contains("key", ignoreCase = true) ||
+                                    effectiveAiState.message.contains("App Check", ignoreCase = true) ||
+                                    effectiveAiState.message.contains("401") ||
+                                    effectiveAiState.message.contains("403")
+                                val needsOpenRouterPrivacyAction = effectiveAiState.message.contains("openrouter.ai/settings/privacy", ignoreCase = true) ||
+                                    effectiveAiState.message.contains("data policy", ignoreCase = true)
+                                if (effectiveAiState.isRetryable || effectiveAiState.isModelOverloaded || needsKeyAction || needsOpenRouterPrivacyAction) {
                                     Row(
                                         modifier = Modifier.horizontalScroll(rememberScrollState()),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
-                                        if (aiState.isRetryable) {
+                                        if (effectiveAiState.isRetryable) {
                                             AssistChip(
-                                                onClick = onRetryGemini,
+                                                onClick = {
+                                                    onRetryThread(activeThreadId)
+                                                    if (activeThreadId == "main") onRetryGemini()
+                                                },
                                                 label = { Text("Retry") },
                                                 leadingIcon = {
                                                     Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -616,7 +802,7 @@ fun GeminiPanel(
                                                 modifier = Modifier.testTag("openrouter_privacy_button"),
                                             )
                                         }
-                                        if (aiState.isModelOverloaded) {
+                                        if (effectiveAiState.isModelOverloaded) {
                                             AssistChip(
                                                 onClick = { showModelMenuDialog = true },
                                                 label = { Text("Switch Model") },
@@ -737,17 +923,25 @@ fun GeminiPanel(
                 OutlinedTextField(
                     value = promptInput,
                     onValueChange = { promptInput = it },
-                    placeholder = { Text("Ask ${activeProvider.shortName} to edit or build...") },
+                    placeholder = {
+                        Text(
+                            "Ask ${activeThreadMeta?.title ?: effectiveProvider.shortName} (${effectiveProvider.shortName})...",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    },
                     maxLines = 3,
                     modifier = Modifier
                         .weight(1f)
                         .testTag("gemini_prompt_input"),
                 )
-                val isBusy = aiState is AiUiState.Streaming
                 val canSend = promptInput.isNotBlank() || pendingAttachments.isNotEmpty()
-                if (isBusy) {
+                if (isActiveThreadRunning) {
                     IconButton(
-                        onClick = onStopGemini,
+                        onClick = {
+                            onStopThread(activeThreadId)
+                            onStopGemini()
+                        },
                         modifier = Modifier.testTag("gemini_stop_button"),
                     ) {
                         Icon(
@@ -781,7 +975,7 @@ fun GeminiPanel(
 
     if (showKeysDialog) {
         ProviderKeysDialog(
-            initialProvider = activeProvider,
+            initialProvider = effectiveProvider,
             providerApiKeys = providerApiKeys,
             providerModels = providerModels,
             onSaveConfig = onSaveProviderConfig,
@@ -791,13 +985,31 @@ fun GeminiPanel(
 
     if (showModelMenuDialog) {
         ModelMenuDialog(
-            activeProvider = activeProvider,
-            providerModels = providerModels,
+            activeProvider = effectiveProvider,
+            providerModels = providerModels + (effectiveProvider to currentModelId),
             liveModels = liveModels,
             isFetchingModels = isFetchingModels,
-            onSelectModel = onSelectModel,
+            onSelectModel = { prov, mdl ->
+                onUpdateThreadProviderModel(activeThreadId, prov, mdl)
+                if (activeThreadId == "main") {
+                    onSelectModel(prov, mdl)
+                }
+            },
             onRefreshLiveModels = onRefreshLiveModels,
             onDismiss = { showModelMenuDialog = false },
+        )
+    }
+
+    if (showThreadTuneDialog) {
+        ThreadSystemTuneDialog(
+            threadTitle = activeThreadMeta?.title ?: "Agent",
+            initialSystemInstruction = effectiveSystemInstruction,
+            initialTemperature = effectiveTemperature,
+            onSave = { sys, temp ->
+                onUpdateThreadSystemAndTemp(activeThreadId, sys, temp)
+                showThreadTuneDialog = false
+            },
+            onDismiss = { showThreadTuneDialog = false },
         )
     }
 
@@ -843,6 +1055,63 @@ fun GeminiPanel(
 }
 
 @Composable
+private fun ThreadSystemTuneDialog(
+    threadTitle: String,
+    initialSystemInstruction: String,
+    initialTemperature: Float,
+    onSave: (String, Float) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var sysInput by remember(initialSystemInstruction) { mutableStateOf(initialSystemInstruction) }
+    var temp by remember(initialTemperature) { mutableStateOf(initialTemperature) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Tune $threadTitle") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("Temperature", style = MaterialTheme.typography.labelLarge)
+                    Text(
+                        text = String.format(Locale.US, "%.2f", temp),
+                        fontFamily = JetBrainsMonoFontFamily,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
+                Slider(
+                    value = temp,
+                    onValueChange = { v -> temp = (v * 10f).roundToInt() / 10f },
+                    valueRange = 0f..1.5f,
+                    steps = 14,
+                )
+                OutlinedTextField(
+                    value = sysInput,
+                    onValueChange = { sysInput = it },
+                    label = { Text("System Instruction for $threadTitle") },
+                    placeholder = { Text("e.g. Focus on Material 3 UI or strict bug-fixing...") },
+                    minLines = 3,
+                    maxLines = 5,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onSave(sysInput, temp) }) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
+}
+
+@Composable
 fun SideChatSplitPane(
     threads: List<ProjectChatThread>,
     activeThreadId: String,
@@ -854,7 +1123,36 @@ fun SideChatSplitPane(
     onApplyCode: (SuggestedCodeBlock) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    threadMessagesMap: Map<String, List<ChatMessage>> = emptyMap(),
+    threadUiStates: Map<String, AiUiState> = emptyMap(),
+    runningThreadIds: Set<String> = emptySet(),
+    activeProvider: AiProvider = AiProvider.GEMINI,
+    providerModels: Map<AiProvider, String> = emptyMap(),
+    liveModels: List<AiModelOption> = emptyList(),
+    isFetchingModels: Boolean = false,
+    onSelectSplitProviderModel: (String, AiProvider, String) -> Unit = { _, _, _ -> },
+    onRefreshLiveModels: (AiProvider) -> Unit = {},
+    onSendPromptToThread: ((String, String) -> Unit)? = null,
+    onStopThread: (String) -> Unit = {},
+    onRetryThread: (String) -> Unit = {},
 ) {
+    var splitInput by remember(splitThread?.id) { mutableStateOf("") }
+    var showSplitModelPicker by remember { mutableStateOf(false) }
+
+    val splitProvider = remember(splitThread, activeProvider) {
+        splitThread?.providerName
+            ?.takeIf { it.isNotBlank() }
+            ?.let { runCatching { AiProvider.valueOf(it) }.getOrNull() }
+            ?: activeProvider
+    }
+    val splitModelId = remember(splitThread, splitProvider, providerModels) {
+        val raw = splitThread?.modelId?.takeIf { it.isNotBlank() } ?: providerModels[splitProvider]
+        AiModelsCatalog.normalizeModelId(splitProvider, raw)
+    }
+    val splitMessages = splitThread?.let { threadMessagesMap[it.id] ?: it.messages }.orEmpty()
+    val splitUiState = splitThread?.let { threadUiStates[it.id] } ?: AiUiState.Idle
+    val isSplitRunning = splitThread?.id?.let { it in runningThreadIds } == true || splitUiState is AiUiState.Streaming
+
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = modifier.fillMaxSize(),
@@ -870,7 +1168,9 @@ fun SideChatSplitPane(
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(enabled = splitThread != null) { showSplitModelPicker = true },
                 ) {
                     Icon(
                         Icons.Default.Forum,
@@ -878,17 +1178,37 @@ fun SideChatSplitPane(
                         tint = MaterialTheme.colorScheme.secondary,
                         modifier = Modifier.size(18.dp),
                     )
-                    Text(
-                        text = splitThread?.title ?: "Side Chat",
-                        style = MaterialTheme.typography.titleSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                text = splitThread?.title ?: "Side Chat",
+                                style = MaterialTheme.typography.titleSmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (isSplitRunning) {
+                                CircularProgressIndicator(modifier = Modifier.size(11.dp), strokeWidth = 1.8.dp)
+                            }
+                        }
+                        if (splitThread != null) {
+                            Text(
+                                text = "${splitProvider.shortName} • $splitModelId",
+                                fontFamily = JetBrainsMonoFontFamily,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
                 }
-                IconButton(onClick = onCreateSideChat) {
+                IconButton(onClick = onCreateSideChat, modifier = Modifier.testTag("split_new_side_chat_button")) {
                     Icon(Icons.Default.AddComment, contentDescription = "New side chat", modifier = Modifier.size(18.dp))
                 }
-                IconButton(onClick = onClose) {
+                IconButton(onClick = onClose, modifier = Modifier.testTag("close_split_side_chat_button")) {
                     Icon(Icons.Default.Close, contentDescription = "Close split side chat", modifier = Modifier.size(18.dp))
                 }
             }
@@ -902,9 +1222,15 @@ fun SideChatSplitPane(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     threads.filter { it.id != activeThreadId }.forEach { thread ->
+                        val running = thread.id in runningThreadIds
                         FilterChip(
                             selected = splitThread?.id == thread.id,
                             onClick = { onSelectSplitThread(thread.id) },
+                            leadingIcon = if (running) {
+                                { CircularProgressIndicator(modifier = Modifier.size(10.dp), strokeWidth = 1.6.dp) }
+                            } else {
+                                null
+                            },
                             label = { Text(thread.title, style = MaterialTheme.typography.labelSmall) },
                         )
                     }
@@ -926,7 +1252,7 @@ fun SideChatSplitPane(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         Text(
-                            text = "Create a Side Chat to compare ideas or keep a separate scratchpad alongside your Main Agent.",
+                            text = "Spin up a parallel Side Chat with its own model to brainstorm or fix while your Main Agent works.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -943,30 +1269,125 @@ fun SideChatSplitPane(
                         .padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    items(splitThread.messages, key = { it.id }) { msg ->
+                    items(splitMessages, key = { it.id }) { msg ->
                         ChatBubble(
                             message = msg,
                             activeFileName = activeFileName,
                             onApplyCode = onApplyCode,
                         )
                     }
+                    if (splitUiState is AiUiState.Error) {
+                        item {
+                            Surface(
+                                color = MaterialTheme.colorScheme.errorContainer,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Text(
+                                        text = splitUiState.message,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                    )
+                                    if (splitUiState.isRetryable) {
+                                        AssistChip(
+                                            onClick = { onRetryThread(splitThread.id) },
+                                            label = { Text("Retry Side Chat") },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
+
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(10.dp),
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    Button(
-                        onClick = { onSwitchToMainInput(splitThread.id) },
-                        modifier = Modifier.fillMaxWidth(),
+
+                if (onSendPromptToThread != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Text("Reply in ${splitThread.title}")
+                        OutlinedTextField(
+                            value = splitInput,
+                            onValueChange = { splitInput = it },
+                            placeholder = {
+                                Text(
+                                    "Ask ${splitThread.title} (${splitProvider.shortName})...",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
+                            maxLines = 3,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("split_chat_prompt_input"),
+                        )
+                        if (isSplitRunning) {
+                            IconButton(
+                                onClick = { onStopThread(splitThread.id) },
+                                modifier = Modifier.testTag("split_chat_stop_button"),
+                            ) {
+                                Icon(
+                                    Icons.Default.StopCircle,
+                                    contentDescription = "Stop side chat",
+                                    tint = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        } else {
+                            IconButton(
+                                onClick = {
+                                    val p = splitInput.trim()
+                                    if (p.isNotEmpty()) {
+                                        splitInput = ""
+                                        onSendPromptToThread(splitThread.id, p)
+                                    }
+                                },
+                                enabled = splitInput.isNotBlank(),
+                                modifier = Modifier.testTag("split_chat_send_button"),
+                            ) {
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send side chat message")
+                            }
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(10.dp),
+                        horizontalArrangement = Arrangement.End,
+                    ) {
+                        Button(
+                            onClick = { onSwitchToMainInput(splitThread.id) },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Reply in ${splitThread.title}")
+                        }
                     }
                 }
             }
         }
+    }
+
+    if (showSplitModelPicker && splitThread != null) {
+        ModelMenuDialog(
+            activeProvider = splitProvider,
+            providerModels = providerModels + (splitProvider to splitModelId),
+            liveModels = liveModels,
+            isFetchingModels = isFetchingModels,
+            onSelectModel = { prov, mdl ->
+                onSelectSplitProviderModel(splitThread.id, prov, mdl)
+            },
+            onRefreshLiveModels = onRefreshLiveModels,
+            onDismiss = { showSplitModelPicker = false },
+        )
     }
 }
 

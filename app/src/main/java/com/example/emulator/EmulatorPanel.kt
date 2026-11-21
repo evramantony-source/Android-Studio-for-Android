@@ -49,6 +49,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -121,7 +122,16 @@ fun EmulatorPanel(
     val strokes = remember(restartNonce) { mutableStateListOf<DrawnStroke>() }
     val activeStrokePoints = remember(restartNonce) { mutableStateListOf<Offset>() }
     val logcat = remember(packageName, restartNonce) {
-        mutableStateListOf("I/ActivityTaskManager: START u0 {cmp=$packageName/.MainActivity}")
+        mutableStateListOf("I/ActivityTaskManager: COLD BOOT u0 {cmp=$packageName/.MainActivity}")
+    }
+
+    // Guarantee fresh cold boot from frame 0 / onCreate every time the emulator is entered
+    DisposableEffect(Unit) {
+        restartNonce++
+        onDispose {
+            liveSession = null
+            vmFrameTick = 0
+        }
     }
 
     fun appendLog(line: String) {
@@ -139,6 +149,15 @@ fun EmulatorPanel(
 
     LaunchedEffect(appName, packageName, files, restartNonce) {
         isBootingVm = true
+        liveSession = null
+        toastText = null
+        fallbackDialogMessage = null
+        vmFrameTick = 0
+        strokes.clear()
+        activeStrokePoints.clear()
+        runtimeState.clear()
+        logcat.clear()
+        appendLog("I/ActivityTaskManager: COLD BOOT u0 {cmp=$packageName/.MainActivity}")
         yield()
         val bootResult = withContext(Dispatchers.Default) {
             runCatching {
@@ -151,7 +170,7 @@ fun EmulatorPanel(
         }
         val (bootedSession, parsedProgram) = bootResult.getOrElse { err ->
             if (err is kotlinx.coroutines.CancellationException) throw err
-            appendLog("E/DroidForgeVM: Boot error: ${err.message ?: err.javaClass.simpleName}")
+            appendLog("E/AndroidStudioVM: Boot error: ${err.message ?: err.javaClass.simpleName}")
             null to EmulatorEngine.parseProject(appName, packageName, emptyList())
         }
         liveSession = bootedSession
@@ -159,10 +178,10 @@ fun EmulatorPanel(
         runtimeState.clear()
         runtimeState.putAll(parsedProgram.initialState)
         if (bootedSession != null) {
-            appendLog("D/DroidForgeVM: Live AST VM executing ${files.size} project file(s)")
+            appendLog("D/AndroidStudioVM: Cold-booted Live AST VM (${files.size} project file(s))")
             syncFromLiveVm(bootedSession)
         } else {
-            appendLog("D/DroidForgeVM: Fallback layout (${parsedProgram.detectedWidgetsCount} widgets)")
+            appendLog("D/AndroidStudioVM: Fallback layout (${parsedProgram.detectedWidgetsCount} widgets)")
         }
         isBootingVm = false
     }
@@ -176,7 +195,7 @@ fun EmulatorPanel(
                 val ticked = runCatching {
                     session.tickTimers(System.currentTimeMillis())
                 }.onFailure { err ->
-                    appendLog("E/DroidForgeVM: Timer error: ${err.message ?: err.javaClass.simpleName}")
+                    appendLog("E/AndroidStudioVM: Timer error: ${err.message ?: err.javaClass.simpleName}")
                 }.getOrDefault(false)
                 if (ticked) {
                     vmFrameTick++
@@ -405,7 +424,7 @@ fun EmulatorPanel(
                     onClick = { restartNonce++ },
                     modifier = Modifier.testTag("emulator_restart_button"),
                 ) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Restart activity")
+                    Icon(Icons.Default.Refresh, contentDescription = "Cold Boot (Reset app from start)")
                 }
                 IconButton(onClick = onClose, modifier = Modifier.testTag("emulator_close_button")) {
                     Icon(Icons.Default.Close, contentDescription = "Close emulator")

@@ -1769,6 +1769,9 @@ object KotlinToJavaTranspiler {
         s = s.replace(Regex("""\bmutableSetOf<([^>]+)>\(\s*\)""")) { m ->
             "new java.util.LinkedHashSet<${boxGenericArgs(m.groupValues[1])}>()"
         }
+        s = s.replace(Regex("""\b(ArrayList|HashMap|HashSet|LinkedHashSet|TreeSet|TreeMap)<([^>]+)>\(""")) { m ->
+            "${m.groupValues[1]}<${boxGenericArgs(m.groupValues[2])}>("
+        }
         s = s.replace(Regex("""\blistOf<[^>]+>\(\s*\)"""), "new java.util.ArrayList<>()")
         s = replaceBalancedCall(s, "listOf") { args -> "_KtRt.listOf($args)" }
         s = replaceBalancedCall(s, "mutableListOf") { args -> "_KtRt.mutableListOf($args)" }
@@ -2458,7 +2461,7 @@ object KotlinToJavaTranspiler {
             e.contains("System.currentTimeMillis()") -> "long"
             e.contains(".x") || e.contains(".y") || e.contains(".getX()") || e.contains(".getY()") -> "float"
             e.startsWith("findViewById<") -> e.substringAfter('<').substringBefore('>')
-            Regex("""^[A-Z][\w.]*(?:<[^>]+>)?\(.*\)$""").matches(e) -> e.substringBefore('(').trim()
+            Regex("""^[A-Z][\w.]*(?:<[^>]+>)?\(.*\)$""").matches(e) -> mapKotlinType(e.substringBefore('(').trim())
             e in varTypes -> varTypes[e]!!
             !e.contains("\"") && Regex("""\s[+\-*/%]\s""").containsMatchIn(e) -> {
                 val tokens = Regex("""[A-Za-z_]\w*""").findAll(e).map { varTypes[it.value] }.toList()
@@ -2529,13 +2532,29 @@ object KotlinToJavaTranspiler {
                     start--
                 }
             } else {
-                while (start >= 0 && (out[start].isLetterOrDigit() || out[start] == '_' || out[start] == '.' || out[start] == '(' || out[start] == ')')) {
-                    if (out[start] == '(') {
-                        var j = start - 1
-                        while (j >= 0 && (out[j].isLetterOrDigit() || out[j] == '_' || out[j] == '.')) j--
-                        start = j + 1
+                while (start >= 0) {
+                    val ch = out[start]
+                    if (ch == ')') {
+                        var depth = 1
+                        start--
+                        while (start >= 0 && depth > 0) {
+                            if (out[start] == ')') depth++ else if (out[start] == '(') depth--
+                            start--
+                        }
+                        continue
+                    } else if (ch == ']') {
+                        var depth = 1
+                        start--
+                        while (start >= 0 && depth > 0) {
+                            if (out[start] == ']') depth++ else if (out[start] == '[') depth--
+                            start--
+                        }
+                        continue
+                    } else if (ch.isLetterOrDigit() || ch == '_' || ch == '.') {
+                        start--
+                    } else {
+                        break
                     }
-                    start--
                 }
                 start++
             }

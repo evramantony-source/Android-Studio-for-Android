@@ -116,16 +116,17 @@ class OfflineApkBuilder(
 
             // 1. Compile XML resources -> R.java + resources.arsc (+ layouts/ids/drawables + proto for AAB)
             log("[1/5] Compiling resources (strings, colors, layouts, drawables)...")
-            val stringsFile = File(projectDir, "res/values/strings.xml")
-            val colorsFile = File(projectDir, "res/values/colors.xml")
-            val layoutDir = File(projectDir, "res/layout")
+            val resRoot = resolveResRoot(projectDir)
+            val stringsFile = File(resRoot, "values/strings.xml")
+            val colorsFile = File(resRoot, "values/colors.xml")
+            val layoutDir = File(resRoot, "layout")
             val layoutFiles = if (layoutDir.exists() && layoutDir.isDirectory) {
                 layoutDir.listFiles()?.filter { it.isFile && it.name.endsWith(".xml", ignoreCase = true) }
                     ?.sortedBy { it.name }
                     ?.map { it.name to it.readText() }
                     .orEmpty()
             } else emptyList()
-            val drawableDir = File(projectDir, "res/drawable")
+            val drawableDir = File(resRoot, "drawable")
             val drawableFiles = if (drawableDir.exists() && drawableDir.isDirectory) {
                 drawableDir.listFiles()?.filter { it.isFile }?.sortedBy { it.name }.orEmpty()
             } else emptyList()
@@ -142,10 +143,10 @@ class OfflineApkBuilder(
             log("      R.java: ${compiledRes.stringCount} strings, ${compiledRes.colorCount} colors, ${compiledRes.layoutCount} layouts, ${compiledRes.idCount} ids")
 
             // 2. Encode AndroidManifest.xml -> binary AXML (or proto XmlNode for AAB)
-            val manifestFile = File(projectDir, "AndroidManifest.xml")
-            if (!manifestFile.exists()) {
+            val manifestFile = resolveManifestFile(projectDir)
+            if (manifestFile == null || !manifestFile.exists()) {
                 diagnostics.add(
-                    BuildDiagnostic("AndroidManifest.xml", 1, 1, DiagnosticSeverity.ERROR, "Missing AndroidManifest.xml in project root."),
+                    BuildDiagnostic("AndroidManifest.xml", 1, 1, DiagnosticSeverity.ERROR, "Missing AndroidManifest.xml (checked root and app/src/main/)."),
                 )
                 return BuildResult(
                     success = false,
@@ -232,7 +233,8 @@ class OfflineApkBuilder(
             // 3. Transpile Kotlin (.kt) and modern Java (11/17/21/25) -> Java 8 and compile via ECJ
             val kotlinGenDir = File(buildDir, "kotlin-gen").apply { mkdirs() }
             val javaGenDir = File(buildDir, "java-gen").apply { mkdirs() }
-            val ktFiles = collectFilesWithExt(File(projectDir, "src"), ".kt")
+            val sourceRoots = resolveSourceRoots(projectDir)
+            val ktFiles = collectSourceFiles(sourceRoots, ".kt")
             val sourceOriginMap = mutableMapOf<String, Pair<String, Map<Int, Int>>>()
             if (ktFiles.isNotEmpty()) {
                 log("[3/5] Transpiling ${ktFiles.size} Kotlin (.kt) source(s) -> Java 8...")
@@ -261,7 +263,7 @@ class OfflineApkBuilder(
                 }
             }
 
-            val rawJavaFiles = collectFilesWithExt(File(projectDir, "src"), ".java")
+            val rawJavaFiles = collectSourceFiles(sourceRoots, ".java")
             val preparedJavaFiles = if (targetJavaVersion.majorVersion > 8 && rawJavaFiles.isNotEmpty()) {
                 val loweredList = mutableListOf<File>()
                 val loweredFeatures = linkedSetOf<String>()
@@ -271,7 +273,10 @@ class OfflineApkBuilder(
                     if (res.rewrittenFeatures.isNotEmpty()) {
                         loweredFeatures.addAll(res.rewrittenFeatures)
                     }
-                    val subRel = jFile.relativeTo(File(projectDir, "src")).invariantSeparatorsPath
+                    val matchingRoot = sourceRoots.firstOrNull { root ->
+                        runCatching { jFile.canonicalPath.startsWith(root.canonicalPath + File.separator) }.getOrDefault(false)
+                    } ?: projectDir
+                    val subRel = jFile.relativeTo(matchingRoot).invariantSeparatorsPath
                     val outJavaFile = File(javaGenDir, subRel).apply { parentFile?.mkdirs() }
                     outJavaFile.writeText(res.java8Source)
                     val genRel = outJavaFile.relativeTo(projectDir).invariantSeparatorsPath
@@ -291,7 +296,7 @@ class OfflineApkBuilder(
                 collectFilesWithExt(genDir, ".java")
             if (javaFiles.isEmpty()) {
                 diagnostics.add(
-                    BuildDiagnostic("src", 1, 1, DiagnosticSeverity.ERROR, "No .java or .kt source files found in src/."),
+                    BuildDiagnostic("src", 1, 1, DiagnosticSeverity.ERROR, "No .java or .kt source files found in src/ or app/src/main/."),
                 )
                 return BuildResult(
                     success = false,
@@ -401,7 +406,7 @@ class OfflineApkBuilder(
             }
 
             // Compute estimated payload footprint so we warn transparently near OS/Play 4GB cap
-            val assetsDir = File(projectDir, "assets")
+            val assetsDir = resolveAssetsDir(projectDir)
             val totalAssetBytes = if (assetsDir.exists()) {
                 assetsDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
             } else 0L
@@ -795,22 +800,80 @@ class OfflineApkBuilder(
         }
     }
 
+    private fun resolveManifestFile(projectDir: File): File? {
+        return listOf(
+            File(projectDir, "AndroidManifest.xml"),
+            File(projectDir, "app/src/main/AndroidManifest.xml"),
+            File(projectDir, "src/main/AndroidManifest.xml"),
+        ).firstOrNull { it.exists() && it.isFile }
+    }
+
+    private fun resolveResRoot(projectDir: File): File {
+        return listOf(
+            File(projectDir, "res"),
+            File(projectDir, "app/src/main/res"),
+            File(projectDir, "src/main/res"),
+        ).firstOrNull { it.exists() && it.isDirectory }
+            ?: File(projectDir, "res")
+    }
+
+    private fun resolveAssetsDir(projectDir: File): File {
+        return listOf(
+            File(projectDir, "assets"),
+            File(projectDir, "app/src/main/assets"),
+            File(projectDir, "src/main/assets"),
+        ).firstOrNull { it.exists() && it.isDirectory }
+            ?: File(projectDir, "assets")
+    }
+
+    private fun resolveSourceRoots(projectDir: File): List<File> {
+        val gradleRoots = listOf(
+            File(projectDir, "app/src/main/java"),
+            File(projectDir, "app/src/main/kotlin"),
+            File(projectDir, "src/main/java"),
+            File(projectDir, "src/main/kotlin"),
+        ).filter { it.exists() && it.isDirectory }
+        if (gradleRoots.isNotEmpty()) return gradleRoots
+        return listOf(File(projectDir, "src")).filter { it.exists() && it.isDirectory }
+    }
+
+    private fun collectSourceFiles(roots: List<File>, ext: String): List<File> {
+        val seen = linkedMapOf<String, File>()
+        roots.forEach { root ->
+            collectFilesWithExt(root, ext).forEach { file ->
+                seen.putIfAbsent(file.canonicalPath, file)
+            }
+        }
+        return seen.values.toList()
+    }
+
     private fun collectClasspathJars(projectDir: File): List<File> {
-        val libsDir = File(projectDir, "libs")
-        if (!libsDir.exists() || !libsDir.isDirectory) return emptyList()
-        return libsDir.walkTopDown().filter { it.isFile && it.name.endsWith(".jar", ignoreCase = true) }.toList()
+        val jars = linkedMapOf<String, File>()
+        listOf("libs", "app/libs").forEach { dirName ->
+            val libsDir = File(projectDir, dirName)
+            if (libsDir.exists() && libsDir.isDirectory) {
+                libsDir.walkTopDown()
+                    .filter { it.isFile && it.name.endsWith(".jar", ignoreCase = true) }
+                    .forEach { jars.putIfAbsent(it.canonicalPath, it) }
+            }
+        }
+        return jars.values.toList()
     }
 
     private fun collectNativeLibs(projectDir: File): List<Pair<String, File>> {
         val collected = mutableListOf<Pair<String, File>>()
-        listOf("lib", "jniLibs").forEach { rootName ->
+        val seen = mutableSetOf<String>()
+        listOf("lib", "jniLibs", "app/src/main/jniLibs", "src/main/jniLibs").forEach { rootName ->
             val root = File(projectDir, rootName)
             if (root.exists() && root.isDirectory) {
                 root.walkTopDown()
                     .filter { it.isFile && it.name.endsWith(".so", ignoreCase = true) }
                     .forEach { so ->
                         val rel = so.relativeTo(root).invariantSeparatorsPath
-                        collected.add("lib/$rel" to so)
+                        val zipPath = "lib/$rel"
+                        if (seen.add(zipPath)) {
+                            collected.add(zipPath to so)
+                        }
                     }
             }
         }

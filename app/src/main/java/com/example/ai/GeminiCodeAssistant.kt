@@ -138,6 +138,9 @@ class GeminiCodeAssistant {
         modelId: String = GEMINI_MODEL_ID,
         provider: AiProvider = AiProvider.GEMINI,
         thinkingMode: AiThinkingMode = AiThinkingMode.FAST,
+        agentRole: AgentRole = AgentRole.GENERAL,
+        customSystemInstruction: String = "",
+        temperature: Float = 0.3f,
         projectName: String,
         packageName: String,
         projectLanguage: ProjectLanguage = ProjectLanguage.JAVA,
@@ -307,6 +310,9 @@ class GeminiCodeAssistant {
                     requestedModel = requestedModel,
                     resolvedKey = resolvedKey,
                     thinkingMode = thinkingMode,
+                    agentRole = agentRole,
+                    customSystemInstruction = customSystemInstruction,
+                    temperature = temperature,
                     projectLanguage = projectLanguage,
                     javaVersion = javaVersion,
                     minSdkVersion = minSdkVersion,
@@ -357,18 +363,25 @@ class GeminiCodeAssistant {
                     },
                 )
                 AiProvider.OPENAI, AiProvider.OPENROUTER -> {
-                    val effectiveLiveModels = if (provider == AiProvider.OPENROUTER && liveModelOptions.none { it.provider == AiProvider.OPENROUTER }) {
-                        withTimeoutOrNull(8_000L) {
-                            AiModelsCatalog.fetchOpenRouterPublicModels(resolvedKey).getOrDefault(emptyList())
-                        }.orEmpty()
-                    } else {
-                        liveModelOptions
+                    val effectiveLiveModels = when {
+                        provider == AiProvider.OPENROUTER && liveModelOptions.none { it.provider == AiProvider.OPENROUTER } ->
+                            withTimeoutOrNull(8_000L) {
+                                AiModelsCatalog.fetchOpenRouterPublicModels(resolvedKey).getOrDefault(emptyList())
+                            }.orEmpty()
+                        provider == AiProvider.OPENAI && liveModelOptions.none { it.provider == AiProvider.OPENAI } ->
+                            withTimeoutOrNull(7_000L) {
+                                AiModelsCatalog.fetchLiveModels(AiProvider.OPENAI, resolvedKey).getOrDefault(emptyList())
+                            }.orEmpty()
+                        else -> liveModelOptions
                     }
                     runOpenAiLoop(
                         provider = provider,
                         initialModel = requestedModel,
                         apiKey = resolvedKey,
                         thinkingMode = thinkingMode,
+                        agentRole = agentRole,
+                        customSystemInstruction = customSystemInstruction,
+                        temperature = temperature,
                         includeGitHubTools = includeGitHubTools,
                         liveModelOptions = effectiveLiveModels,
                         projectLanguage = projectLanguage,
@@ -416,53 +429,68 @@ class GeminiCodeAssistant {
                         },
                     )
                 }
-                AiProvider.CLAUDE -> runClaudeLoop(
-                    initialModel = requestedModel,
-                    apiKey = resolvedKey,
-                    thinkingMode = thinkingMode,
-                    projectLanguage = projectLanguage,
-                    javaVersion = javaVersion,
-                    minSdkVersion = minSdkVersion,
-                    imageAttachments = imageAttachments,
-                    priorHistory = priorHistory,
-                    promptWithContext = promptWithContext,
-                    steps = steps,
-                    accumulatedVisibleText = accumulatedVisibleText,
-                    addOrUpdateStep = ::addOrUpdateStep,
-                    onStreamText = { text, usedModel ->
-                        effectiveModelInUse = usedModel
-                        updateRunAssistantMessage(
-                            text = text,
-                            isStreaming = true,
-                            stepList = steps.toList(),
-                            codeBlocks = emptyList(),
-                            totalTokens = totalMessageTokens,
-                            modelUsed = usedModel,
-                            forceEmit = false,
-                        )
-                    },
-                    onFinalizeSuccess = { finalText, finalSteps, tokens, usedModel ->
-                        effectiveModelInUse = usedModel
-                        updateRunAssistantMessage(
-                            text = finalText,
-                            isStreaming = false,
-                            stepList = finalSteps,
-                            codeBlocks = extractCodeBlocks(finalText),
-                            totalTokens = tokens,
-                            modelUsed = usedModel,
-                            forceEmit = true,
-                        )
-                        if (shouldPublishToUi() && activeRunId == assistantMsgId) {
-                            _uiState.value = AiUiState.Idle
-                        }
-                    },
-                    toolExecutor = toolExecutor,
-                    onUsage = { usedModel, delta, toolCalls ->
-                        effectiveModelInUse = usedModel
-                        totalMessageTokens += delta.totalTokens
-                        onUsageRecorded(provider, usedModel, delta, toolCalls, false)
-                    },
-                )
+                AiProvider.CLAUDE -> {
+                    val effectiveLiveModels = if (liveModelOptions.none { it.provider == AiProvider.CLAUDE }) {
+                        withTimeoutOrNull(7_000L) {
+                            AiModelsCatalog.fetchLiveModels(AiProvider.CLAUDE, resolvedKey).getOrDefault(emptyList())
+                        }.orEmpty()
+                    } else {
+                        liveModelOptions
+                    }
+                    runClaudeLoop(
+                        initialModel = requestedModel,
+                        apiKey = resolvedKey,
+                        thinkingMode = thinkingMode,
+                        agentRole = agentRole,
+                        customSystemInstruction = customSystemInstruction,
+                        temperature = temperature,
+                        includeGitHubTools = includeGitHubTools,
+                        liveModelOptions = effectiveLiveModels,
+                        projectLanguage = projectLanguage,
+                        javaVersion = javaVersion,
+                        minSdkVersion = minSdkVersion,
+                        imageAttachments = imageAttachments,
+                        priorHistory = priorHistory,
+                        promptWithContext = promptWithContext,
+                        steps = steps,
+                        accumulatedVisibleText = accumulatedVisibleText,
+                        addOrUpdateStep = ::addOrUpdateStep,
+                        onModelAutoCorrected = onModelAutoCorrected,
+                        onStreamText = { text, usedModel ->
+                            effectiveModelInUse = usedModel
+                            updateRunAssistantMessage(
+                                text = text,
+                                isStreaming = true,
+                                stepList = steps.toList(),
+                                codeBlocks = emptyList(),
+                                totalTokens = totalMessageTokens,
+                                modelUsed = usedModel,
+                                forceEmit = false,
+                            )
+                        },
+                        onFinalizeSuccess = { finalText, finalSteps, tokens, usedModel ->
+                            effectiveModelInUse = usedModel
+                            updateRunAssistantMessage(
+                                text = finalText,
+                                isStreaming = false,
+                                stepList = finalSteps,
+                                codeBlocks = extractCodeBlocks(finalText),
+                                totalTokens = tokens,
+                                modelUsed = usedModel,
+                                forceEmit = true,
+                            )
+                            if (shouldPublishToUi() && activeRunId == assistantMsgId) {
+                                _uiState.value = AiUiState.Idle
+                            }
+                        },
+                        toolExecutor = toolExecutor,
+                        onUsage = { usedModel, delta, toolCalls ->
+                            effectiveModelInUse = usedModel
+                            totalMessageTokens += delta.totalTokens
+                            onUsageRecorded(provider, usedModel, delta, toolCalls, false)
+                        },
+                    )
+                }
             }
             onMessagesChanged(runMessages)
         } catch (e: TimeoutCancellationException) {
@@ -580,6 +608,9 @@ class GeminiCodeAssistant {
         requestedModel: String,
         resolvedKey: String,
         thinkingMode: AiThinkingMode,
+        agentRole: AgentRole = AgentRole.GENERAL,
+        customSystemInstruction: String = "",
+        temperature: Float = 0.3f,
         projectLanguage: ProjectLanguage,
         javaVersion: JavaVersionOption,
         minSdkVersion: Int,
@@ -598,7 +629,14 @@ class GeminiCodeAssistant {
         toolExecutor: ProjectToolExecutor,
         onUsage: (String, TokenUsageDelta, Int) -> Unit,
     ) {
-        val systemText = buildSystemInstruction(requestedModel, projectLanguage, javaVersion, minSdkVersion)
+        val systemText = buildSystemInstruction(
+            modelId = requestedModel,
+            projectLanguage = projectLanguage,
+            javaVersion = javaVersion,
+            minSdkVersion = minSdkVersion,
+            agentRole = agentRole,
+            customSystemInstruction = customSystemInstruction,
+        )
 
         suspend fun runFirebasePath() {
             firebaseAiClient.runAgentLoop(
@@ -630,6 +668,9 @@ class GeminiCodeAssistant {
                 initialModel = startModel,
                 apiKey = resolvedKey,
                 thinkingMode = thinkingMode,
+                agentRole = agentRole,
+                customSystemInstruction = customSystemInstruction,
+                temperature = temperature,
                 projectLanguage = projectLanguage,
                 javaVersion = javaVersion,
                 minSdkVersion = minSdkVersion,
@@ -723,6 +764,9 @@ class GeminiCodeAssistant {
         initialModel: String,
         apiKey: String,
         thinkingMode: AiThinkingMode,
+        agentRole: AgentRole = AgentRole.GENERAL,
+        customSystemInstruction: String = "",
+        temperature: Float = 0.3f,
         projectLanguage: ProjectLanguage,
         javaVersion: JavaVersionOption,
         minSdkVersion: Int,
@@ -776,6 +820,9 @@ class GeminiCodeAssistant {
                         primaryModelId = activeModel,
                         apiKey = apiKey,
                         thinkingMode = thinkingMode,
+                        agentRole = agentRole,
+                        customSystemInstruction = customSystemInstruction,
+                        temperature = temperature,
                         projectLanguage = projectLanguage,
                         javaVersion = javaVersion,
                         minSdkVersion = minSdkVersion,
@@ -1051,6 +1098,9 @@ class GeminiCodeAssistant {
         initialModel: String,
         apiKey: String,
         thinkingMode: AiThinkingMode,
+        agentRole: AgentRole = AgentRole.GENERAL,
+        customSystemInstruction: String = "",
+        temperature: Float = 0.3f,
         includeGitHubTools: Boolean = true,
         liveModelOptions: List<AiModelOption> = emptyList(),
         projectLanguage: ProjectLanguage,
@@ -1068,20 +1118,38 @@ class GeminiCodeAssistant {
         toolExecutor: ProjectToolExecutor,
         onUsage: (String, TokenUsageDelta, Int) -> Unit,
     ) {
-        var activeModel = if (provider == AiProvider.OPENROUTER && liveModelOptions.isNotEmpty()) {
-            val resolved = AiModelsCatalog.resolveOpenRouterModelId(initialModel, liveModelOptions)
-            if (!resolved.equals(initialModel, ignoreCase = true)) {
-                onModelAutoCorrected(initialModel, resolved)
+        var activeModel = when {
+            provider == AiProvider.OPENROUTER && liveModelOptions.isNotEmpty() -> {
+                val resolved = AiModelsCatalog.resolveOpenRouterModelId(initialModel, liveModelOptions)
+                if (!resolved.equals(initialModel, ignoreCase = true)) {
+                    onModelAutoCorrected(initialModel, resolved)
+                }
+                resolved
             }
-            resolved
-        } else {
-            initialModel
+            provider == AiProvider.OPENAI && liveModelOptions.isNotEmpty() -> {
+                val resolved = AiModelsCatalog.resolveOpenAiModelId(initialModel, liveModelOptions)
+                if (!resolved.equals(initialModel, ignoreCase = true)) {
+                    onModelAutoCorrected(initialModel, resolved)
+                }
+                resolved
+            }
+            else -> initialModel
         }
         val openAiMessages = JSONArray().apply {
             put(
                 JSONObject()
                     .put("role", "system")
-                    .put("content", buildSystemInstruction(activeModel, projectLanguage, javaVersion, minSdkVersion)),
+                    .put(
+                        "content",
+                        buildSystemInstruction(
+                            modelId = activeModel,
+                            projectLanguage = projectLanguage,
+                            javaVersion = javaVersion,
+                            minSdkVersion = minSdkVersion,
+                            agentRole = agentRole,
+                            customSystemInstruction = customSystemInstruction,
+                        ),
+                    ),
             )
             priorHistory.forEach { msg ->
                 put(JSONObject().put("role", if (msg.isUser) "user" else "assistant").put("content", msg.text))
@@ -1106,7 +1174,7 @@ class GeminiCodeAssistant {
             }
         }
 
-        val knownModels = (AiModelsCatalog.builtInOpenRouterModels + liveModelOptions)
+        val knownModels = (AiModelsCatalog.builtInOpenRouterModels + AiModelsCatalog.modelsFor(AiProvider.OPENAI) + liveModelOptions)
             .associateBy { it.id.lowercase() }
         val learnedCapabilities = mutableMapOf<String, OpenAiModelCapabilities>()
 
@@ -1118,14 +1186,31 @@ class GeminiCodeAssistant {
             textBeforeTurn: String,
             turnText: StringBuilder,
         ): ExternalTurnOutcome {
-            val meta = knownModels[candidate.lowercase()]
-            val baseline = learnedCapabilities[candidate.lowercase()] ?: OpenAiModelCapabilities(
-                useNativeTools = if (provider == AiProvider.OPENROUTER) meta?.supportsTools ?: true else true,
-                foldSystem = if (provider == AiProvider.OPENROUTER) {
-                    meta?.supportsSystemPrompt == false || candidate.lowercase().contains("gemma")
-                } else {
-                    false
+            val lower = candidate.lowercase()
+            val tail = lower.substringAfter('/')
+            val meta = knownModels[lower]
+            val isDirectOpenAi = provider == AiProvider.OPENAI
+            val baseline = learnedCapabilities[lower] ?: OpenAiModelCapabilities(
+                useNativeTools = when {
+                    isDirectOpenAi && (tail == "chatgpt-4o-latest" || tail.startsWith("o1-mini") || tail.startsWith("o1-preview")) -> false
+                    provider == AiProvider.OPENROUTER -> meta?.supportsTools ?: true
+                    else -> meta?.supportsTools ?: true
                 },
+                includeStreamOptions = true,
+                includeTemperature = when {
+                    isDirectOpenAi && (tail.startsWith("o1") || tail.startsWith("o3") || tail.startsWith("o4") || tail.startsWith("gpt-5") || tail.startsWith("gpt-6")) -> false
+                    else -> true
+                },
+                foldSystem = when {
+                    isDirectOpenAi && (tail.startsWith("o1-mini") || tail.startsWith("o1-preview")) -> true
+                    provider == AiProvider.OPENROUTER -> meta?.supportsSystemPrompt == false || lower.contains("gemma")
+                    else -> false
+                },
+                stripImages = when {
+                    tail.startsWith("o1-mini") || tail.startsWith("gpt-3.5") || tail == "gpt-4" || tail.startsWith("gpt-4-0") -> true
+                    else -> false
+                },
+                useResponsesApi = isDirectOpenAi && ProviderApiClient.isResponsesOnlyOpenAiModel(candidate),
             )
             var cap = if (!allowToolsThisCall) baseline.copy(useNativeTools = false) else baseline
 
@@ -1139,12 +1224,12 @@ class GeminiCodeAssistant {
 
                 val onConnected = {
                     activeModel = candidate
-                    learnedCapabilities[candidate.lowercase()] = cap
+                    learnedCapabilities[lower] = cap
                     addOrUpdateStep(
                         AgentStep(
                             id = thinkStepId,
                             title = "Streaming from $candidate",
-                            detail = "${thinkingMode.badge} • Connected...",
+                            detail = "${thinkingMode.badge} • ${if (cap.useResponsesApi) "Responses API" else "Connected"}...",
                             status = AgentStepStatus.RUNNING,
                         ),
                     )
@@ -1168,8 +1253,8 @@ class GeminiCodeAssistant {
                 }
 
                 try {
-                    val outcome = if (provider == AiProvider.OPENROUTER) {
-                        ProviderApiClient.streamOpenRouter(
+                    val outcome = when {
+                        provider == AiProvider.OPENROUTER -> ProviderApiClient.streamOpenRouter(
                             apiKey = apiKey,
                             modelId = candidate,
                             messages = openAiMessages,
@@ -1179,6 +1264,7 @@ class GeminiCodeAssistant {
                             allowTextToolCalls = allowTextToolFallback,
                             includeStreamOptions = cap.includeStreamOptions,
                             includeTemperature = cap.includeTemperature,
+                            temperature = temperature,
                             allowOpenRouterDataCollectionFallback = cap.allowDataCollectionFallback,
                             foldSystemIntoUser = cap.foldSystem,
                             stripImages = cap.stripImages,
@@ -1186,33 +1272,55 @@ class GeminiCodeAssistant {
                             onReasoningDelta = onReasoning,
                             onTextDelta = onDelta,
                         )
-                    } else {
-                        ProviderApiClient.streamOpenAi(
+                        cap.useResponsesApi -> ProviderApiClient.streamOpenAiResponses(
                             apiKey = apiKey,
                             modelId = candidate,
                             messages = openAiMessages,
                             thinkingMode = thinkingMode,
                             includeGitHubTools = includeGitHubTools,
                             includeTools = cap.useNativeTools,
+                            allowTextToolCalls = allowTextToolFallback,
                             includeTemperature = cap.includeTemperature,
+                            temperature = temperature,
+                            stripImages = cap.stripImages,
                             onConnected = onConnected,
+                            onReasoningDelta = onReasoning,
+                            onTextDelta = onDelta,
+                        )
+                        else -> ProviderApiClient.streamOpenAi(
+                            apiKey = apiKey,
+                            modelId = candidate,
+                            messages = openAiMessages,
+                            thinkingMode = thinkingMode,
+                            includeGitHubTools = includeGitHubTools,
+                            includeTools = cap.useNativeTools,
+                            allowTextToolCalls = allowTextToolFallback,
+                            includeStreamOptions = cap.includeStreamOptions,
+                            includeTemperature = cap.includeTemperature,
+                            foldSystemIntoUser = cap.foldSystem,
+                            stripImages = cap.stripImages,
+                            temperature = temperature,
+                            onConnected = onConnected,
+                            onReasoningDelta = onReasoning,
                             onTextDelta = onDelta,
                         )
                     }
-                    learnedCapabilities[candidate.lowercase()] = cap
+                    learnedCapabilities[lower] = cap
                     return outcome
                 } catch (e: GeminiApiException) {
-                    if (provider == AiProvider.OPENROUTER && adaptAttempt < 7) {
+                    if (adaptAttempt < 7) {
                         val nextCap = nextOpenRouterAdaptation(
                             current = cap,
                             httpCode = e.httpCode,
                             errorMessage = e.message.orEmpty(),
                             hasImages = imageAttachments.isNotEmpty(),
+                            isDirectOpenAi = isDirectOpenAi,
                         )
                         if (nextCap != null) {
                             cap = nextCap
-                            learnedCapabilities[candidate.lowercase()] = cap
+                            learnedCapabilities[lower] = cap
                             val adaptDetail = when {
+                                nextCap.useResponsesApi && !baseline.useResponsesApi -> "Switching $candidate to OpenAI Responses API (/v1/responses)..."
                                 !nextCap.useNativeTools && baseline.useNativeTools -> "Switching $candidate to text-mode tool calls..."
                                 nextCap.allowDataCollectionFallback -> "Retrying $candidate with OpenRouter provider routing..."
                                 nextCap.foldSystem -> "Folding system prompt for $candidate..."
@@ -1276,7 +1384,7 @@ class GeminiCodeAssistant {
                     invokeOpenAiCompatibleCandidate(
                         candidate = candidate,
                         allowToolsThisCall = true,
-                        allowTextToolFallback = provider == AiProvider.OPENROUTER,
+                        allowTextToolFallback = true,
                         thinkStepId = thinkStepId,
                         textBeforeTurn = textBeforeTurn,
                         turnText = turnText,
@@ -1416,6 +1524,11 @@ class GeminiCodeAssistant {
         initialModel: String,
         apiKey: String,
         thinkingMode: AiThinkingMode,
+        agentRole: AgentRole = AgentRole.GENERAL,
+        customSystemInstruction: String = "",
+        temperature: Float = 0.3f,
+        includeGitHubTools: Boolean = true,
+        liveModelOptions: List<AiModelOption> = emptyList(),
         projectLanguage: ProjectLanguage,
         javaVersion: JavaVersionOption,
         minSdkVersion: Int,
@@ -1425,13 +1538,29 @@ class GeminiCodeAssistant {
         steps: MutableList<AgentStep>,
         accumulatedVisibleText: StringBuilder,
         addOrUpdateStep: (AgentStep) -> Unit,
+        onModelAutoCorrected: (failedModel: String, workingModel: String) -> Unit = { _, _ -> },
         onStreamText: (String, String) -> Unit,
         onFinalizeSuccess: (String, List<AgentStep>, Long, String) -> Unit,
         toolExecutor: ProjectToolExecutor,
         onUsage: (String, TokenUsageDelta, Int) -> Unit,
     ) {
-        var activeModel = initialModel
-        val systemText = buildSystemInstruction(activeModel, projectLanguage, javaVersion, minSdkVersion)
+        var activeModel = if (liveModelOptions.isNotEmpty()) {
+            val resolved = AiModelsCatalog.resolveClaudeModelId(initialModel, liveModelOptions)
+            if (!resolved.equals(initialModel, ignoreCase = true)) {
+                onModelAutoCorrected(initialModel, resolved)
+            }
+            resolved
+        } else {
+            initialModel
+        }
+        val systemText = buildSystemInstruction(
+            modelId = activeModel,
+            projectLanguage = projectLanguage,
+            javaVersion = javaVersion,
+            minSdkVersion = minSdkVersion,
+            agentRole = agentRole,
+            customSystemInstruction = customSystemInstruction,
+        )
         val claudeMessages = JSONArray().apply {
             priorHistory.forEach { msg ->
                 put(JSONObject().put("role", if (msg.isUser) "user" else "assistant").put("content", msg.text))
@@ -1456,6 +1585,103 @@ class GeminiCodeAssistant {
                     }
                 }
                 put(JSONObject().put("role", "user").put("content", contentBlocks))
+            }
+        }
+
+        val learnedClaudeCaps = mutableMapOf<String, ClaudeModelCapabilities>()
+
+        suspend fun invokeClaudeCandidate(
+            candidate: String,
+            thinkStepId: String,
+            textBeforeTurn: String,
+            turnText: StringBuilder,
+        ): ExternalTurnOutcome {
+            val lower = candidate.lowercase()
+            val defaultMax = if (lower.startsWith("claude-3-opus") || lower.startsWith("claude-3-sonnet") || lower.startsWith("claude-3-haiku") || lower.startsWith("claude-2")) {
+                4096
+            } else {
+                8192
+            }
+            var cap = learnedClaudeCaps[lower] ?: ClaudeModelCapabilities(maxTokens = defaultMax)
+            var adaptAttempt = 0
+
+            while (true) {
+                coroutineContext.ensureActive()
+                adaptAttempt++
+                turnText.clear()
+                accumulatedVisibleText.clear()
+                accumulatedVisibleText.append(textBeforeTurn)
+
+                try {
+                    val outcome = ProviderApiClient.streamClaude(
+                        apiKey = apiKey,
+                        modelId = candidate,
+                        systemInstruction = systemText,
+                        messages = claudeMessages,
+                        thinkingMode = thinkingMode,
+                        maxTokens = cap.maxTokens,
+                        includeTools = cap.useNativeTools,
+                        allowTextToolCalls = true,
+                        includeGitHubTools = includeGitHubTools,
+                        includeSystem = cap.includeSystem,
+                        includeTemperature = cap.includeTemperature,
+                        temperature = temperature,
+                        stripImages = cap.stripImages,
+                        onConnected = {
+                            activeModel = candidate
+                            learnedClaudeCaps[lower] = cap
+                            addOrUpdateStep(
+                                AgentStep(
+                                    id = thinkStepId,
+                                    title = "Streaming from $candidate",
+                                    detail = "${thinkingMode.badge} • Connected...",
+                                    status = AgentStepStatus.RUNNING,
+                                ),
+                            )
+                        },
+                        onTextDelta = { delta ->
+                            turnText.append(delta)
+                            accumulatedVisibleText.clear()
+                            accumulatedVisibleText.append(textBeforeTurn)
+                            accumulatedVisibleText.append(turnText)
+                            onStreamText(accumulatedVisibleText.toString(), candidate)
+                        },
+                    )
+                    learnedClaudeCaps[lower] = cap
+                    return outcome
+                } catch (e: GeminiApiException) {
+                    if (adaptAttempt < 6) {
+                        val nextCap = nextClaudeAdaptation(
+                            current = cap,
+                            httpCode = e.httpCode,
+                            errorMessage = e.message.orEmpty(),
+                            hasImages = imageAttachments.isNotEmpty(),
+                        )
+                        if (nextCap != null) {
+                            cap = nextCap
+                            learnedClaudeCaps[lower] = cap
+                            addOrUpdateStep(
+                                AgentStep(
+                                    id = thinkStepId,
+                                    title = "Adapting $candidate (${e.httpCode})",
+                                    detail = when {
+                                        !nextCap.useNativeTools -> "Switching $candidate to text-mode tool calls..."
+                                        !nextCap.includeSystem -> "Folding system prompt for $candidate..."
+                                        nextCap.maxTokens < 8192 -> "Adjusting max_tokens to ${nextCap.maxTokens}..."
+                                        else -> "Adapting Claude request parameters..."
+                                    },
+                                    status = AgentStepStatus.RUNNING,
+                                ),
+                            )
+                            continue
+                        }
+                    }
+                    throw e
+                } catch (e: SocketTimeoutException) {
+                    throw e
+                } catch (e: IOException) {
+                    throw GeminiApiException(502, e.message ?: "Anthropic stream connection dropped")
+                }
             }
         }
 
@@ -1486,40 +1712,30 @@ class GeminiCodeAssistant {
                 callExternalWithRetryAndFailover(
                     provider = AiProvider.CLAUDE,
                     primaryModelId = activeModel,
+                    liveModels = liveModelOptions,
+                    onModelAutoCorrected = onModelAutoCorrected,
                     onStatusUpdate = { title, detail ->
                         addOrUpdateStep(AgentStep(id = thinkStepId, title = title, detail = detail, status = AgentStepStatus.RUNNING))
                     },
                 ) { candidate ->
-                    ProviderApiClient.streamClaude(
-                        apiKey = apiKey,
-                        modelId = candidate,
-                        systemInstruction = systemText,
-                        messages = claudeMessages,
-                        thinkingMode = thinkingMode,
-                        onConnected = {
-                            activeModel = candidate
-                            addOrUpdateStep(
-                                AgentStep(
-                                    id = thinkStepId,
-                                    title = "Streaming from $candidate",
-                                    detail = "${thinkingMode.badge} • Connected...",
-                                    status = AgentStepStatus.RUNNING,
-                                ),
-                            )
-                        },
-                        onTextDelta = { delta ->
-                            turnText.append(delta)
-                            accumulatedVisibleText.clear()
-                            accumulatedVisibleText.append(textBeforeTurn)
-                            accumulatedVisibleText.append(turnText)
-                            onStreamText(accumulatedVisibleText.toString(), candidate)
-                        },
+                    invokeClaudeCandidate(
+                        candidate = candidate,
+                        thinkStepId = thinkStepId,
+                        textBeforeTurn = textBeforeTurn,
+                        turnText = turnText,
                     )
                 }
             }
 
             activeModel = usedModel
-            if (turnText.isEmpty()) accumulatedVisibleText.setLength(turnPrefixLen)
+            accumulatedVisibleText.clear()
+            accumulatedVisibleText.append(textBeforeTurn)
+            if (outcome.text.isNotBlank()) {
+                accumulatedVisibleText.append(outcome.text)
+                onStreamText(accumulatedVisibleText.toString(), activeModel)
+            } else if (turnText.isEmpty()) {
+                accumulatedVisibleText.setLength(turnPrefixLen)
+            }
             totalTokens += outcome.usage.totalTokens
             onUsage(activeModel, outcome.usage, outcome.claudeToolUses.size)
 
@@ -1667,7 +1883,8 @@ class GeminiCodeAssistant {
                         continue
                     }
                     val canFailover = shouldFailoverHttpStatus(e.httpCode) ||
-                        (provider == AiProvider.OPENROUTER && e.httpCode in listOf(400, 402, 404, 422))
+                        e.httpCode in listOf(400, 404, 422) ||
+                        (provider == AiProvider.OPENROUTER && e.httpCode == 402)
                     if (canFailover && hasNextCandidate) {
                         val nextModel = candidates[index + 1]
                         onStatusUpdate(
@@ -1707,6 +1924,9 @@ class GeminiCodeAssistant {
         primaryModelId: String,
         apiKey: String,
         thinkingMode: AiThinkingMode,
+        agentRole: AgentRole = AgentRole.GENERAL,
+        customSystemInstruction: String = "",
+        temperature: Float = 0.3f,
         projectLanguage: ProjectLanguage,
         javaVersion: JavaVersionOption,
         minSdkVersion: Int,
@@ -1759,6 +1979,9 @@ class GeminiCodeAssistant {
                     projectLanguage = projectLanguage,
                     javaVersion = javaVersion,
                     minSdkVersion = minSdkVersion,
+                    agentRole = agentRole,
+                    customSystemInstruction = customSystemInstruction,
+                    temperature = temperature,
                 )
                 try {
                     val outcome = withTimeout(ATTEMPT_TIMEOUT_MS) {
@@ -2462,14 +2685,24 @@ class GeminiCodeAssistant {
         projectLanguage: ProjectLanguage = ProjectLanguage.JAVA,
         javaVersion: JavaVersionOption = JavaVersionOption.JAVA_17,
         minSdkVersion: Int = 24,
+        agentRole: AgentRole = AgentRole.GENERAL,
+        customSystemInstruction: String = "",
     ): String {
         val langNote = if (projectLanguage == ProjectLanguage.KOTLIN) {
-            "Active project language: KOTLIN (.kt files in src/). Write clean Kotlin Android SDK code (`class MainActivity : Activity()`, `override fun onCreate(savedInstanceState: Bundle?)`, `val`/`var`, `fun`, lambdas `{ ... }`, `object : ...`, string templates). DroidForge compiles `.kt` via its built-in Kotlin-to-Java transpiler + ECJ + Multi-DEX."
+            "Active project language: KOTLIN (.kt files in src/). Write clean Kotlin Android SDK code (`class MainActivity : Activity()`, `override fun onCreate(savedInstanceState: Bundle?)`, `val`/`var`, `fun`, lambdas `{ ... }`, `object : ...`, string templates). Android Studio compiles `.kt` via its built-in Kotlin-to-Java transpiler + ECJ + Multi-DEX."
         } else {
             "Active project language: ${javaVersion.label} (.java files in src/). Every Java version 8 through 25 (8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25) is supported both offline (`ModernJavaTranspiler`) and in GitHub Cloud Builds (`var`, `\"\"\"` text blocks, `record`, `sealed`/`permits`, switch `->`/`yield`, pattern `instanceof`, `List.of`/`Set.of`/`Map.of`, `.repeat()`/`.lines()`, `IO.println`)."
         }
+        val roleSection = if (agentRole != AgentRole.GENERAL && agentRole.defaultSystemFocus.isNotBlank()) {
+            "\n\n=== Active Agent Role (${agentRole.label}) ===\n${agentRole.defaultSystemFocus}"
+        } else {
+            ""
+        }
+        val customSection = customSystemInstruction.trim().takeIf { it.isNotEmpty() }?.let {
+            "\n\n=== Custom User System Instructions ===\n$it"
+        }.orEmpty()
         return """
-            You are an autonomous coding agent powered by $modelId inside DroidForge Studio, an Android IDE (Java 8–25 & Kotlin), Multi-DEX APK/AAB builder, GitHub-connected workspace, and Live Interactive Android Emulator.
+            You are an autonomous coding agent powered by $modelId inside Android Studio (mobile/tablet IDE for Java 8–25 & Kotlin), Multi-DEX APK/AAB builder, GitHub-connected workspace, and Live Interactive Android Emulator.
             $langNote
             Target minSdkVersion: API $minSdkVersion (Android ${com.example.model.AndroidMinSdk.fromApiLevel(minSdkVersion).androidVersion}), targetSdkVersion: 35.
 
@@ -2479,15 +2712,15 @@ class GeminiCodeAssistant {
             - Batch independent tool calls together whenever possible.
             - Project & Build tools: list_files, read_file, write_file, edit_file, delete_file, search_files, build_apk, build_aab.
             - Full GitHub & Cloud CI tools: github_status, github_list_repos, github_create_repo, github_link_repo, github_list_branches, github_list_repo_files, github_read_file, github_upload_file, github_download_file, github_pull_changes, github_push_changes, github_trigger_cloud_build, github_list_workflow_runs, github_get_workflow_logs, github_rerun_workflow.
-            - Live Emulator execution: Custom `View` subclasses overriding `onDraw(Canvas)` / `draw(Canvas)`, `SurfaceView` (`SurfaceHolder` `lockCanvas`/`unlockCanvasAndPost`), `onTouchEvent(MotionEvent)` (including `getPointerCount`/`getPointerId`), and `Handler.postDelayed` 60fps loops, plus XML layouts (`res/layout/*.xml` including XML-inflated custom Views & `@+id/*` -> `R.id.*`), `LinearLayout`/`FrameLayout`/`GridLayout`, `Button`, `TextView`, `EditText`, and `AlertDialog` execute live inside the DroidForge VM Emulator!
-            - Offline & >5 GB App/Game Architecture: DroidForge supports Multi-DEX (`classes.dex`, `classes2.dex`...), `res/layout/*.xml`, `res/drawable/*`, `libs/*.jar`, native `.so` libraries under `lib/<abi>/` or `jniLibs/<abi>/`, and streaming 2-pass `.aab` signing (`build_aab`) + ZIP64 packaging. Remember Android OS `PackageInstaller` caps a single `.apk` at ~4 GB, whereas `.aab` bundles, Play Asset Delivery, Cloud Gradle CI (`github_trigger_cloud_build`), and runtime asset/JRE downloaders (e.g., PojavLauncher-style Minecraft Java Edition launchers with runtime OpenJDK + LWJGL + asset/version manifest fetchers & virtual controls) handle >5 GB payloads cleanly!
+            - Live Emulator execution: Custom `View` subclasses overriding `onDraw(Canvas)` / `draw(Canvas)`, `SurfaceView` (`SurfaceHolder` `lockCanvas`/`unlockCanvasAndPost`), `onTouchEvent(MotionEvent)` (including `getPointerCount`/`getPointerId`), and `Handler.postDelayed` 60fps loops, plus XML layouts (`res/layout/*.xml` including XML-inflated custom Views & `@+id/*` -> `R.id.*`), `LinearLayout`/`FrameLayout`/`GridLayout`, `Button`, `TextView`, `EditText`, and `AlertDialog` execute live inside the Android Studio VM Emulator!
+            - Offline & >5 GB App/Game Architecture: Supports Multi-DEX (`classes.dex`, `classes2.dex`...), `res/layout/*.xml`, `res/drawable/*`, `libs/*.jar`, native `.so` libraries under `lib/<abi>/` or `jniLibs/<abi>/`, and streaming 2-pass `.aab` signing (`build_aab`) + ZIP64 packaging. Both `src/`/`res/`/`AndroidManifest.xml` AND standard Gradle `app/src/main/...` layouts build locally.
             - Prefer classic Android SDK APIs (`android.app.Activity`, `android.view.*`, `android.widget.*`, `android.graphics.*`, `java.*`) unless building an external Gradle project for GitHub Cloud CI.
             - After modifying code or XML, call build_apk to verify compilation.
 
             Response formatting rules (CRITICAL):
             - Organize your explanation cleanly using short Markdown headings (`### Summary`, `### Changes Made`, `### Build Status`), concise bullet points (`- `), and backticked file paths or symbols (`` `MainActivity.kt` ``).
             - Keep paragraphs crisp and scannable on mobile screens.
-        """.trimIndent()
+        """.trimIndent() + roleSection + customSection
     }
 
     private fun shouldIncludeGitHubTools(
@@ -2519,8 +2752,11 @@ class GeminiCodeAssistant {
         projectLanguage: ProjectLanguage = ProjectLanguage.JAVA,
         javaVersion: JavaVersionOption = JavaVersionOption.JAVA_17,
         minSdkVersion: Int = 24,
+        agentRole: AgentRole = AgentRole.GENERAL,
+        customSystemInstruction: String = "",
+        temperature: Float = 0.3f,
     ): String {
-        val genConfig = JSONObject().put("temperature", 0.3)
+        val genConfig = JSONObject().put("temperature", temperature.coerceIn(0f, 1.5f).toDouble())
         if (includeThinkingConfig) {
             buildThinkingConfigJson(modelId, thinkingMode)?.let { cfg ->
                 genConfig.put("thinkingConfig", cfg)
@@ -2532,7 +2768,17 @@ class GeminiCodeAssistant {
                 JSONObject().put(
                     "parts",
                     JSONArray().put(
-                        JSONObject().put("text", buildSystemInstruction(modelId, projectLanguage, javaVersion, minSdkVersion)),
+                        JSONObject().put(
+                            "text",
+                            buildSystemInstruction(
+                                modelId = modelId,
+                                projectLanguage = projectLanguage,
+                                javaVersion = javaVersion,
+                                minSdkVersion = minSdkVersion,
+                                agentRole = agentRole,
+                                customSystemInstruction = customSystemInstruction,
+                            ),
+                        ),
                     ),
                 ),
             )
@@ -2691,6 +2937,15 @@ class GeminiCodeAssistant {
         val allowDataCollectionFallback: Boolean = false,
         val foldSystem: Boolean = false,
         val stripImages: Boolean = false,
+        val useResponsesApi: Boolean = false,
+    )
+
+    internal data class ClaudeModelCapabilities(
+        val maxTokens: Int = 8192,
+        val useNativeTools: Boolean = true,
+        val includeSystem: Boolean = true,
+        val includeTemperature: Boolean = false,
+        val stripImages: Boolean = false,
     )
 
     internal companion object {
@@ -2820,14 +3075,23 @@ class GeminiCodeAssistant {
             httpCode: Int,
             errorMessage: String,
             hasImages: Boolean,
+            isDirectOpenAi: Boolean = false,
         ): OpenAiModelCapabilities? {
             if (httpCode !in listOf(400, 404, 422)) return null
             val lower = errorMessage.lowercase()
 
-            val isDataPolicy = lower.contains("data policy") ||
-                lower.contains("privacy") ||
-                lower.contains("free model publication") ||
-                lower.contains("zdr")
+            if (isDirectOpenAi && !current.useResponsesApi &&
+                (lower.contains("v1/responses") || lower.contains("not a chat model") || lower.contains("responses api") || lower.contains("only supported in"))
+            ) {
+                return current.copy(useResponsesApi = true)
+            }
+
+            val isDataPolicy = !isDirectOpenAi && (
+                lower.contains("data policy") ||
+                    lower.contains("privacy") ||
+                    lower.contains("free model publication") ||
+                    lower.contains("zdr")
+                )
             if (isDataPolicy) {
                 return if (!current.allowDataCollectionFallback) {
                     current.copy(allowDataCollectionFallback = true)
@@ -2857,18 +3121,56 @@ class GeminiCodeAssistant {
                 return current.copy(includeStreamOptions = false)
             }
             if (current.includeTemperature &&
-                (lower.contains("temperature") || lower.contains("sampling"))
+                (lower.contains("temperature") || lower.contains("sampling") || lower.contains("unsupported value"))
             ) {
                 return current.copy(includeTemperature = false)
             }
 
             if (httpCode == 404 || lower.contains("no endpoints") || lower.contains("unsupported parameter") || lower.contains("invalid parameter")) {
+                if (isDirectOpenAi && httpCode == 404 && !current.useResponsesApi) return current.copy(useResponsesApi = true)
                 if (current.useNativeTools) return current.copy(useNativeTools = false)
                 if (current.includeStreamOptions) return current.copy(includeStreamOptions = false)
                 if (current.includeTemperature) return current.copy(includeTemperature = false)
-                if (!current.allowDataCollectionFallback) return current.copy(allowDataCollectionFallback = true)
+                if (!isDirectOpenAi && !current.allowDataCollectionFallback) return current.copy(allowDataCollectionFallback = true)
                 if (!current.foldSystem) return current.copy(foldSystem = true)
                 if (hasImages && !current.stripImages) return current.copy(stripImages = true)
+            }
+            return null
+        }
+
+        internal fun nextClaudeAdaptation(
+            current: ClaudeModelCapabilities,
+            httpCode: Int,
+            errorMessage: String,
+            hasImages: Boolean,
+        ): ClaudeModelCapabilities? {
+            if (httpCode !in listOf(400, 422)) return null
+            val lower = errorMessage.lowercase()
+
+            if (lower.contains("max_tokens")) {
+                val limitMatch = Regex("""(?:<=|maximum(?: of)?|at most|max(?:imum)?)\s*(\d+)""").find(lower)
+                val parsedLimit = limitMatch?.groupValues?.getOrNull(1)?.toIntOrNull()?.coerceIn(1024, 8192) ?: 4096
+                if (parsedLimit < current.maxTokens) {
+                    return current.copy(maxTokens = parsedLimit)
+                } else if (current.maxTokens > 4096) {
+                    return current.copy(maxTokens = 4096)
+                }
+            }
+            if (hasImages && !current.stripImages &&
+                (lower.contains("image") || lower.contains("vision") || lower.contains("media_type"))
+            ) {
+                return current.copy(stripImages = true)
+            }
+            if (current.useNativeTools &&
+                (lower.contains("tool") || lower.contains("input_schema"))
+            ) {
+                return current.copy(useNativeTools = false)
+            }
+            if (current.includeSystem && lower.contains("system")) {
+                return current.copy(includeSystem = false)
+            }
+            if (current.includeTemperature && lower.contains("temperature")) {
+                return current.copy(includeTemperature = false)
             }
             return null
         }

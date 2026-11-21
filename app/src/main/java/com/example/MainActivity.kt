@@ -40,7 +40,7 @@ import com.example.ai.configureAppCheck
 import com.example.ui.IdeViewModel
 import com.example.ui.screens.IdeWorkspaceScreen
 import com.example.ui.screens.ProjectsScreen
-import com.example.ui.theme.DroidForgeTheme
+import com.example.ui.theme.AndroidStudioTheme
 import com.example.ui.theme.JetBrainsMonoFontFamily
 
 class MainActivity : ComponentActivity() {
@@ -81,6 +81,10 @@ class MainActivity : ComponentActivity() {
             val aiMessages by viewModel.aiMessages.collectAsStateWithLifecycle()
             val pendingAiAttachments by viewModel.pendingAiAttachments.collectAsStateWithLifecycle()
             val aiState by viewModel.aiState.collectAsStateWithLifecycle()
+            val threadMessagesMap by viewModel.threadMessagesMap.collectAsStateWithLifecycle()
+            val threadUiStates by viewModel.threadUiStates.collectAsStateWithLifecycle()
+            val runningThreadIds by viewModel.runningThreadIds.collectAsStateWithLifecycle()
+            val terminalLines by viewModel.terminalLines.collectAsStateWithLifecycle()
 
             val githubToken by viewModel.githubToken.collectAsStateWithLifecycle()
             val githubUser by viewModel.githubUser.collectAsStateWithLifecycle()
@@ -96,7 +100,11 @@ class MainActivity : ComponentActivity() {
             val openAiPanelRequest by viewModel.openAiPanelRequest.collectAsStateWithLifecycle()
             val isGitHubBusy by viewModel.isGitHubBusy.collectAsStateWithLifecycle()
 
-            DroidForgeTheme(darkTheme = editorSettings.darkTheme) {
+            AndroidStudioTheme(
+                themePreset = editorSettings.themePreset,
+                accentPreset = editorSettings.accentPreset,
+                uiDensity = editorSettings.uiDensity,
+            ) {
                 val currentProject = activeProject
                 val loadingName = openingProjectName
                 Box(modifier = Modifier.fillMaxSize()) {
@@ -242,6 +250,22 @@ class MainActivity : ComponentActivity() {
                                 onAskAiToFixWorkflowRun = viewModel::askAiToFixWorkflowRun,
                                 onUpdateSettings = viewModel::updateEditorSettings,
                                 onBackToProjects = viewModel::closeProject,
+                                threadMessagesMap = threadMessagesMap,
+                                threadUiStates = threadUiStates,
+                                runningThreadIds = runningThreadIds,
+                                terminalLines = terminalLines,
+                                onLaunchRoleAgent = { role, prompt ->
+                                    viewModel.launchRoleAgent(role, prompt, selectAsActive = true)
+                                },
+                                onAskGeminiInThread = { threadId, prompt ->
+                                    viewModel.askGeminiInThread(threadId, prompt)
+                                },
+                                onUpdateThreadProviderModel = viewModel::updateThreadProviderAndModel,
+                                onUpdateThreadSystemAndTemp = viewModel::updateThreadSystemAndTemperature,
+                                onStopThread = viewModel::cancelThread,
+                                onRetryThread = viewModel::retryThreadPrompt,
+                                onClearThreadChat = viewModel::clearThreadChat,
+                                onRunTerminalCommand = viewModel::runTerminalCommand,
                             )
                         }
                     }
@@ -287,14 +311,14 @@ private fun StudioLaunchLoadingScreen() {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
                         imageVector = Icons.Default.Android,
-                        contentDescription = "Android Studio: For Android icon",
+                        contentDescription = "Android Studio icon",
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(44.dp),
                     )
                 }
             }
             Text(
-                text = "Android Studio: For Android",
+                text = "Android Studio",
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.onBackground,
