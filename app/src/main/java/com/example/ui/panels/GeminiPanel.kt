@@ -36,6 +36,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DeleteSweep
@@ -46,6 +47,8 @@ import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
@@ -57,6 +60,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -154,21 +159,18 @@ fun GeminiPanel(
     onClearChat: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    isMaximized: Boolean = false,
+    onToggleMaximize: (() -> Unit)? = null,
 ) {
     var promptInput by remember { mutableStateOf("") }
     var showKeysDialog by remember { mutableStateOf(false) }
     var showModelMenuDialog by remember { mutableStateOf(false) }
     var showUsageDialog by remember { mutableStateOf(false) }
     var showThreadTuneDialog by remember { mutableStateOf(false) }
+    var showHeaderMoreMenu by remember { mutableStateOf(false) }
     var renameThreadTarget by remember { mutableStateOf<ProjectChatThread?>(null) }
-    var isPanelReady by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val context = LocalContext.current
-
-    LaunchedEffect(Unit) {
-        kotlinx.coroutines.yield()
-        isPanelReady = true
-    }
 
     val activeThreadMeta = remember(chatThreads, activeThreadId) {
         chatThreads.find { it.id == activeThreadId }
@@ -191,16 +193,19 @@ fun GeminiPanel(
         ?: editorSettings.customSystemInstruction
 
     val isFirebaseReady = remember { FirebaseAiAgentClient.isFirebaseConfigured() }
-    val hasEffectiveKey = remember(effectiveProvider, providerApiKeys, isFirebaseReady) {
-        when (effectiveProvider) {
-            AiProvider.GEMINI -> isFirebaseReady ||
-                GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
-            AiProvider.OPENROUTER -> GeminiCodeAssistant.resolveOpenRouterApiKey(
-                providerApiKeys[AiProvider.OPENROUTER].orEmpty(),
-            ).isNotEmpty()
-            else -> providerApiKeys[effectiveProvider].orEmpty().isNotBlank()
-        }
+    val resolvedOpenRouterKey = remember(providerApiKeys) {
+        GeminiCodeAssistant.resolveOpenRouterApiKey(providerApiKeys[AiProvider.OPENROUTER].orEmpty())
     }
+    val hasDirectProviderKey = when (effectiveProvider) {
+        AiProvider.GEMINI -> isFirebaseReady ||
+            GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
+        AiProvider.OPENROUTER -> resolvedOpenRouterKey.isNotEmpty()
+        else -> providerApiKeys[effectiveProvider].orEmpty().isNotBlank()
+    }
+    val isUsingOpenRouterBridge = effectiveProvider in setOf(AiProvider.OPENAI, AiProvider.CLAUDE) &&
+        providerApiKeys[effectiveProvider].orEmpty().isBlank() &&
+        resolvedOpenRouterKey.isNotEmpty()
+    val hasEffectiveKey = hasDirectProviderKey || isUsingOpenRouterBridge
 
     LaunchedEffect(effectiveMessages.size, effectiveMessages.lastOrNull()?.steps?.size) {
         if (effectiveMessages.isNotEmpty()) {
@@ -219,33 +224,6 @@ fun GeminiPanel(
         tonalElevation = 2.dp,
         modifier = modifier.fillMaxSize(),
     ) {
-        if (!isPanelReady) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .testTag("gemini_panel_loading"),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.padding(24.dp),
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(32.dp), strokeWidth = 3.dp)
-                    Text(
-                        text = "Loading ${effectiveProvider.shortName} Agent...",
-                        style = MaterialTheme.typography.titleSmall,
-                    )
-                    Text(
-                        text = currentModelId,
-                        fontFamily = JetBrainsMonoFontFamily,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-            }
-            return@Surface
-        }
         Column(modifier = Modifier.fillMaxSize()) {
             // Top Header
             Row(
@@ -276,6 +254,7 @@ fun GeminiPanel(
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
                         )
                         if (isActiveThreadRunning) {
                             CircularProgressIndicator(
@@ -290,7 +269,11 @@ fun GeminiPanel(
                         )
                     }
                     Text(
-                        text = if (hasEffectiveKey) currentModelId else "$currentModelId • Key needed",
+                        text = when {
+                            isUsingOpenRouterBridge -> "$currentModelId • via OpenRouter"
+                            hasEffectiveKey -> currentModelId
+                            else -> "$currentModelId • Key needed"
+                        },
                         fontFamily = JetBrainsMonoFontFamily,
                         style = MaterialTheme.typography.labelSmall,
                         color = if (hasEffectiveKey) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
@@ -299,72 +282,124 @@ fun GeminiPanel(
                     )
                 }
                 IconButton(
-                    onClick = { showThreadTuneDialog = true },
-                    modifier = Modifier.testTag("thread_tune_button"),
-                ) {
-                    Icon(
-                        Icons.Default.Tune,
-                        contentDescription = "Tune temperature and system instructions",
-                        tint = if (effectiveSystemInstruction.isNotBlank()) {
-                            MaterialTheme.colorScheme.secondary
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
-                    )
-                }
-                IconButton(
-                    onClick = { showUsageDialog = true },
-                    modifier = Modifier.testTag("ai_usage_button"),
-                ) {
-                    Icon(Icons.Default.Analytics, contentDescription = "AI usage and tokens")
-                }
-                IconButton(
                     onClick = { showKeysDialog = true },
-                    modifier = Modifier.testTag("gemini_api_key_button"),
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("gemini_api_key_button"),
                 ) {
                     Icon(
                         Icons.Default.Key,
                         contentDescription = "Configure AI provider keys",
                         tint = if (hasEffectiveKey) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(19.dp),
                     )
                 }
                 if (onToggleSplitSideChat != null) {
                     IconButton(
                         onClick = onToggleSplitSideChat,
-                        modifier = Modifier.testTag("toggle_split_side_chat_button"),
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("toggle_split_side_chat_button"),
                     ) {
                         Icon(
                             Icons.Default.Forum,
                             contentDescription = "Toggle split side chat",
                             tint = if (showSplitSideChat) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(19.dp),
                         )
                     }
                 }
-                if (onOpenCustomization != null) {
+                if (onToggleMaximize != null) {
                     IconButton(
-                        onClick = onOpenCustomization,
-                        modifier = Modifier.testTag("ai_open_customization_button"),
+                        onClick = onToggleMaximize,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("gemini_maximize_button"),
                     ) {
-                        Icon(Icons.Default.Palette, contentDescription = "UI and AI Studio customization")
+                        Icon(
+                            imageVector = if (isMaximized) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
+                            contentDescription = if (isMaximized) "Restore AI panel" else "Maximize AI panel",
+                            modifier = Modifier.size(18.dp),
+                        )
                     }
                 }
-                if (effectiveMessages.isNotEmpty()) {
+                Box {
                     IconButton(
-                        onClick = {
-                            onClearThreadChat(activeThreadId)
-                            onClearChat()
-                        },
-                        modifier = Modifier.testTag("gemini_clear_button"),
+                        onClick = { showHeaderMoreMenu = true },
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("gemini_more_menu_button"),
                     ) {
-                        Icon(Icons.Default.DeleteSweep, contentDescription = "Clear active chat")
+                        Icon(Icons.Default.MoreVert, contentDescription = "More AI options", modifier = Modifier.size(19.dp))
+                    }
+                    DropdownMenu(
+                        expanded = showHeaderMoreMenu,
+                        onDismissRequest = { showHeaderMoreMenu = false },
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Tune Temp & System Prompt") },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.Tune,
+                                    contentDescription = null,
+                                    tint = if (effectiveSystemInstruction.isNotBlank()) {
+                                        MaterialTheme.colorScheme.secondary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                )
+                            },
+                            onClick = {
+                                showHeaderMoreMenu = false
+                                showThreadTuneDialog = true
+                            },
+                            modifier = Modifier.testTag("thread_tune_button"),
+                        )
+                        DropdownMenuItem(
+                            text = { Text("AI Usage & Tokens") },
+                            leadingIcon = { Icon(Icons.Default.Analytics, contentDescription = null) },
+                            onClick = {
+                                showHeaderMoreMenu = false
+                                showUsageDialog = true
+                            },
+                            modifier = Modifier.testTag("ai_usage_button"),
+                        )
+                        if (onOpenCustomization != null) {
+                            DropdownMenuItem(
+                                text = { Text("Customize UI & Studio") },
+                                leadingIcon = { Icon(Icons.Default.Palette, contentDescription = null) },
+                                onClick = {
+                                    showHeaderMoreMenu = false
+                                    onOpenCustomization()
+                                },
+                                modifier = Modifier.testTag("ai_open_customization_button"),
+                            )
+                        }
+                        if (effectiveMessages.isNotEmpty()) {
+                            DropdownMenuItem(
+                                text = { Text("Clear Active Chat") },
+                                leadingIcon = { Icon(Icons.Default.DeleteSweep, contentDescription = null) },
+                                onClick = {
+                                    showHeaderMoreMenu = false
+                                    onClearThreadChat(activeThreadId)
+                                    onClearChat()
+                                },
+                                modifier = Modifier.testTag("gemini_clear_button"),
+                            )
+                        }
                     }
                 }
-                IconButton(onClick = onClose, modifier = Modifier.testTag("gemini_close_button")) {
-                    Icon(Icons.Default.Close, contentDescription = "Close AI panel")
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("gemini_close_button"),
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = "Close AI panel", modifier = Modifier.size(19.dp))
                 }
             }
 
-            // Provider Switcher Bar (Gemini / ChatGPT / Claude) + Model Pill
+            // Provider Switcher Bar (Gemini / ChatGPT / Claude / OpenRouter) + Model Pill
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -377,10 +412,9 @@ fun GeminiPanel(
                     val ready = when (provider) {
                         AiProvider.GEMINI -> isFirebaseReady ||
                             GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
-                        AiProvider.OPENROUTER -> GeminiCodeAssistant.resolveOpenRouterApiKey(
-                            providerApiKeys[AiProvider.OPENROUTER].orEmpty(),
-                        ).isNotEmpty()
-                        else -> providerApiKeys[provider].orEmpty().isNotBlank()
+                        AiProvider.OPENROUTER -> resolvedOpenRouterKey.isNotEmpty()
+                        AiProvider.OPENAI, AiProvider.CLAUDE ->
+                            providerApiKeys[provider].orEmpty().isNotBlank() || resolvedOpenRouterKey.isNotEmpty()
                     }
                     FilterChip(
                         selected = effectiveProvider == provider,
@@ -1135,6 +1169,8 @@ fun SideChatSplitPane(
     onSendPromptToThread: ((String, String) -> Unit)? = null,
     onStopThread: (String) -> Unit = {},
     onRetryThread: (String) -> Unit = {},
+    isMaximized: Boolean = false,
+    onToggleMaximize: (() -> Unit)? = null,
 ) {
     var splitInput by remember(splitThread?.id) { mutableStateOf("") }
     var showSplitModelPicker by remember { mutableStateOf(false) }
@@ -1188,6 +1224,7 @@ fun SideChatSplitPane(
                                 style = MaterialTheme.typography.titleSmall,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
                             )
                             if (isSplitRunning) {
                                 CircularProgressIndicator(modifier = Modifier.size(11.dp), strokeWidth = 1.8.dp)
@@ -1205,10 +1242,34 @@ fun SideChatSplitPane(
                         }
                     }
                 }
-                IconButton(onClick = onCreateSideChat, modifier = Modifier.testTag("split_new_side_chat_button")) {
+                IconButton(
+                    onClick = onCreateSideChat,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("split_new_side_chat_button"),
+                ) {
                     Icon(Icons.Default.AddComment, contentDescription = "New side chat", modifier = Modifier.size(18.dp))
                 }
-                IconButton(onClick = onClose, modifier = Modifier.testTag("close_split_side_chat_button")) {
+                if (onToggleMaximize != null) {
+                    IconButton(
+                        onClick = onToggleMaximize,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("split_chat_maximize_button"),
+                    ) {
+                        Icon(
+                            imageVector = if (isMaximized) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
+                            contentDescription = if (isMaximized) "Restore side chat" else "Maximize side chat",
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("close_split_side_chat_button"),
+                ) {
                     Icon(Icons.Default.Close, contentDescription = "Close split side chat", modifier = Modifier.size(18.dp))
                 }
             }
@@ -1696,7 +1757,7 @@ private fun AgentStepsCard(
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                                     ) {
                                         Text(
                                             text = step.title,
@@ -1713,6 +1774,8 @@ private fun AgentStepsCard(
                                                 fontFamily = JetBrainsMonoFontFamily,
                                                 style = MaterialTheme.typography.labelSmall,
                                                 color = MaterialTheme.colorScheme.primary,
+                                                maxLines = 1,
+                                                softWrap = false,
                                             )
                                         }
                                     }

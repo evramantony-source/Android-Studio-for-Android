@@ -16,14 +16,18 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -108,7 +112,9 @@ import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Splitscreen
 import androidx.compose.material.icons.filled.UploadFile
@@ -117,6 +123,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -165,8 +172,19 @@ import com.example.ui.panels.ReleaseKeystoreDialog
 import com.example.ui.panels.SideChatSplitPane
 import com.example.ui.panels.UiCustomizationDialog
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
+
+private enum class MaximizedPane {
+    NONE,
+    FILES,
+    AI,
+    SIDE_CHAT,
+    EMULATOR,
+    BUILD,
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -294,8 +312,13 @@ fun IdeWorkspaceScreen(
     var showGeminiPanel by remember { mutableStateOf(false) }
     var showEmulatorPanel by remember { mutableStateOf(false) }
     var showSplitSideChat by remember { mutableStateOf(false) }
+    var maximizedPane by remember { mutableStateOf(MaximizedPane.NONE) }
     var phoneSplitMode by remember { mutableStateOf(true) }
     var showMoreMenu by remember { mutableStateOf(false) }
+
+    fun toggleMaximize(target: MaximizedPane) {
+        maximizedPane = if (maximizedPane == target) MaximizedPane.NONE else target
+    }
 
     // Draggable Window Dimensions (Tablets + Phones)
     var explorerWidthDp by remember { mutableFloatStateOf(230f) }
@@ -389,11 +412,15 @@ fun IdeWorkspaceScreen(
             showGitHubDialog = false
             showGeminiPanel = true
             showEmulatorPanel = false
+            if (maximizedPane != MaximizedPane.NONE && maximizedPane != MaximizedPane.AI) {
+                maximizedPane = MaximizedPane.NONE
+            }
         }
     }
 
     BackHandler {
         when {
+            maximizedPane != MaximizedPane.NONE -> maximizedPane = MaximizedPane.NONE
             drawerState.isOpen -> scope.launch { drawerState.close() }
             showEmulatorPanel -> showEmulatorPanel = false
             showGeminiPanel -> showGeminiPanel = false
@@ -453,10 +480,11 @@ fun IdeWorkspaceScreen(
 
         val mainScaffold: @Composable () -> Unit = {
             Scaffold(
-                contentWindowInsets = WindowInsets.safeDrawing,
+                contentWindowInsets = WindowInsets.systemBars.union(WindowInsets.displayCutout),
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 topBar = {
-                    TopAppBar(
+                    if (maximizedPane == MaximizedPane.NONE) {
+                        TopAppBar(
                         navigationIcon = {
                             IconButton(
                                 onClick = onBackToProjects,
@@ -646,13 +674,205 @@ fun IdeWorkspaceScreen(
                             containerColor = MaterialTheme.colorScheme.surface,
                         ),
                     )
+                    }
                 },
             ) { innerPadding ->
-                Row(
+                val isImeVisible = WindowInsets.ime.getBottom(density) > 0
+                Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(innerPadding),
+                        .padding(innerPadding)
+                        .consumeWindowInsets(innerPadding)
+                        .imePadding(),
                 ) {
+                    if (maximizedPane != MaximizedPane.NONE) {
+                        when (maximizedPane) {
+                            MaximizedPane.FILES -> ProjectExplorerPane(
+                                files = files,
+                                activeFile = activeFile,
+                                activeFilePath = activeFilePath,
+                                onSelectFile = { path ->
+                                    onSelectFile(path)
+                                    maximizedPane = MaximizedPane.NONE
+                                },
+                                onJumpToSymbolLine = { line ->
+                                    if (activeFile != null) {
+                                        onJumpToFileAndLine(activeFile.relativePath, line)
+                                        maximizedPane = MaximizedPane.NONE
+                                    }
+                                },
+                                onCreateFile = { showNewFileDialog = true },
+                                onImportFile = { importProjectFileLauncher.launch(arrayOf("*/*")) },
+                                onDeleteFile = onDeleteFile,
+                                isMaximized = true,
+                                onToggleMaximize = { maximizedPane = MaximizedPane.NONE },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+
+                            MaximizedPane.AI -> GeminiPanel(
+                                activeFileName = activeFile?.relativePath,
+                                activeProvider = activeProvider,
+                                thinkingMode = aiThinkingMode,
+                                providerApiKeys = providerApiKeys,
+                                providerModels = providerModels,
+                                liveModels = liveModels,
+                                isFetchingModels = isFetchingModels,
+                                aiUsageSummary = aiUsageSummary,
+                                chatThreads = chatThreads,
+                                activeThreadId = activeThreadId,
+                                diagnostics = lastBuildResult?.diagnostics.orEmpty(),
+                                messages = aiMessages,
+                                pendingAttachments = pendingAiAttachments,
+                                aiState = aiState,
+                                editorSettings = editorSettings,
+                                threadMessagesMap = threadMessagesMap,
+                                threadUiStates = threadUiStates,
+                                runningThreadIds = runningThreadIds,
+                                showSplitSideChat = showSplitSideChat,
+                                onToggleSplitSideChat = {
+                                    val next = !showSplitSideChat
+                                    showSplitSideChat = next
+                                    if (next && splitThread != null) {
+                                        maximizedPane = MaximizedPane.SIDE_CHAT
+                                    }
+                                },
+                                onSelectProvider = onSelectProvider,
+                                onSelectThinkingMode = onSelectThinkingMode,
+                                onSelectModel = onSelectModel,
+                                onSaveProviderConfig = onSaveProviderConfig,
+                                onRefreshLiveModels = onRefreshLiveModels,
+                                onResetAiUsage = onResetAiUsage,
+                                onSelectChatThread = onSelectChatThread,
+                                onCreateSideChat = onCreateSideChat,
+                                onRenameChatThread = onRenameChatThread,
+                                onDeleteChatThread = onDeleteChatThread,
+                                onLaunchRoleAgent = onLaunchRoleAgent,
+                                onUpdateThreadProviderModel = onUpdateThreadProviderModel,
+                                onUpdateThreadSystemAndTemp = onUpdateThreadSystemAndTemp,
+                                onSendPromptToThread = onAskGeminiInThread,
+                                onStopThread = onStopThread,
+                                onRetryThread = onRetryThread,
+                                onClearThreadChat = onClearThreadChat,
+                                onOpenCustomization = { showSettingsDialog = true },
+                                onPickPhoto = {
+                                    pickPhotoLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                                    )
+                                },
+                                onCaptureCamera = { launchCameraCapture() },
+                                onPickFile = { pickAiFileLauncher.launch(arrayOf("*/*")) },
+                                onRemoveAttachment = onRemoveAiAttachment,
+                                onSendPrompt = onAskGemini,
+                                onRetryGemini = onRetryGemini,
+                                onStopGemini = onStopGemini,
+                                onApplyCode = onApplyGeminiCode,
+                                onClearChat = onClearAiChat,
+                                onClose = {
+                                    maximizedPane = MaximizedPane.NONE
+                                    showGeminiPanel = false
+                                },
+                                isMaximized = true,
+                                onToggleMaximize = { maximizedPane = MaximizedPane.NONE },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+
+                            MaximizedPane.SIDE_CHAT -> SideChatSplitPane(
+                                threads = chatThreads,
+                                activeThreadId = activeThreadId,
+                                splitThread = splitThread,
+                                activeFileName = activeFile?.relativePath,
+                                onSelectSplitThread = onSetSplitSideThread,
+                                onCreateSideChat = {
+                                    onCreateSideChat("")
+                                    showSplitSideChat = true
+                                },
+                                onSwitchToMainInput = { targetId ->
+                                    onSelectChatThread(targetId)
+                                    showSplitSideChat = false
+                                    maximizedPane = MaximizedPane.AI
+                                },
+                                onApplyCode = onApplyGeminiCode,
+                                onClose = {
+                                    showSplitSideChat = false
+                                    maximizedPane = MaximizedPane.NONE
+                                },
+                                threadMessagesMap = threadMessagesMap,
+                                threadUiStates = threadUiStates,
+                                runningThreadIds = runningThreadIds,
+                                activeProvider = activeProvider,
+                                providerModels = providerModels,
+                                liveModels = liveModels,
+                                isFetchingModels = isFetchingModels,
+                                onSelectSplitProviderModel = onUpdateThreadProviderModel,
+                                onRefreshLiveModels = onRefreshLiveModels,
+                                onSendPromptToThread = onAskGeminiInThread,
+                                onStopThread = onStopThread,
+                                onRetryThread = onRetryThread,
+                                isMaximized = true,
+                                onToggleMaximize = { maximizedPane = MaximizedPane.NONE },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+
+                            MaximizedPane.EMULATOR -> EmulatorPanel(
+                                appName = project.name,
+                                packageName = project.packageName,
+                                files = files,
+                                builtApkPath = lastBuildResult?.apkPath,
+                                onInstallApk = { apkPath -> shareBuiltArtifact(apkPath) },
+                                onClose = {
+                                    maximizedPane = MaximizedPane.NONE
+                                    showEmulatorPanel = false
+                                },
+                                isMaximized = true,
+                                onToggleMaximize = { maximizedPane = MaximizedPane.NONE },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+
+                            MaximizedPane.BUILD -> BuildPanel(
+                                isBuilding = isBuilding,
+                                selectedVariant = selectedBuildVariant,
+                                releaseSigningConfig = releaseSigningConfig,
+                                logs = buildLogs,
+                                buildResult = lastBuildResult,
+                                onSelectVariant = onSelectBuildVariant,
+                                onTriggerBuild = { variant -> onBuildApk(variant) },
+                                onOpenKeystoreManager = { showKeystoreDialog = true },
+                                onOpenEmulator = {
+                                    maximizedPane = MaximizedPane.NONE
+                                    showEmulatorPanel = true
+                                    if (!isExpanded) showGeminiPanel = false
+                                },
+                                onDiagnosticClick = { diag ->
+                                    maximizedPane = MaximizedPane.NONE
+                                    onJumpToDiagnostic(diag)
+                                },
+                                onAskGeminiToFix = {
+                                    maximizedPane = MaximizedPane.NONE
+                                    showGeminiPanel = true
+                                    if (!isExpanded) showEmulatorPanel = false
+                                    onLaunchRoleAgent(
+                                        AgentRole.ERROR_FIXER,
+                                        "Inspect the build errors, edit the affected files directly, and re-run build_apk until the build succeeds.",
+                                    )
+                                },
+                                onExportArtifact = { launchExportArtifact() },
+                                onShareArtifact = { path -> shareBuiltArtifact(path) },
+                                onOpenGitHubCloudBuild = { showGitHubDialog = true },
+                                terminalLines = terminalLines,
+                                onRunTerminalCommand = onRunTerminalCommand,
+                                onClose = {
+                                    maximizedPane = MaximizedPane.NONE
+                                    showBuildPanel = false
+                                },
+                                isMaximized = true,
+                                onToggleMaximize = { maximizedPane = MaximizedPane.NONE },
+                                modifier = Modifier.fillMaxSize(),
+                            )
+
+                            MaximizedPane.NONE -> Unit
+                        }
+                    } else {
+                        Row(modifier = Modifier.fillMaxSize()) {
                     // Persistent Explorer Sidebar on Expanded Screens (Resizable)
                     if (isExpanded) {
                         ProjectExplorerPane(
@@ -668,6 +888,8 @@ fun IdeWorkspaceScreen(
                             onCreateFile = { showNewFileDialog = true },
                             onImportFile = { importProjectFileLauncher.launch(arrayOf("*/*")) },
                             onDeleteFile = onDeleteFile,
+                            isMaximized = false,
+                            onToggleMaximize = { toggleMaximize(MaximizedPane.FILES) },
                             modifier = Modifier
                                 .width(explorerWidthDp.dp)
                                 .fillMaxHeight(),
@@ -885,10 +1107,17 @@ fun IdeWorkspaceScreen(
 
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                        // Breadcrumbs Bar (Android Studio New UI)
-                        if (activeFile != null && editorSettings.showBreadcrumbs) {
-                            val symbols = remember(activeFile.relativePath, activeFile.content) {
-                                CodeStructureExtractor.extract(activeFile.content, activeFile.language)
+                        // Breadcrumbs Bar (Android Studio New UI) — hidden on phone when IME is open to save editor space
+                        if (activeFile != null && editorSettings.showBreadcrumbs && !(isImeVisible && !isExpanded)) {
+                            val symbols by produceState(
+                                initialValue = emptyList(),
+                                activeFile.relativePath,
+                                activeFile.content,
+                            ) {
+                                value = withContext(Dispatchers.Default) {
+                                    if (activeFile.isBinary) emptyList()
+                                    else CodeStructureExtractor.extract(activeFile.content, activeFile.language)
+                                }
                             }
                             EditorBreadcrumbBar(
                                 projectName = project.name,
@@ -980,8 +1209,7 @@ fun IdeWorkspaceScreen(
                             BoxWithConstraints(
                                 modifier = Modifier
                                     .weight(1f - phoneEditorFraction)
-                                    .fillMaxWidth()
-                                    .imePadding(),
+                                    .fillMaxWidth(),
                             ) {
                                 val totalHalfHeightPx = with(density) { (maxHeight / (1f - phoneEditorFraction)).toPx() }
                                     .coerceAtLeast(300f)
@@ -1006,6 +1234,8 @@ fun IdeWorkspaceScreen(
                                                 builtApkPath = lastBuildResult?.apkPath,
                                                 onInstallApk = { apkPath -> shareBuiltArtifact(apkPath) },
                                                 onClose = { showEmulatorPanel = false },
+                                                isMaximized = false,
+                                                onToggleMaximize = { toggleMaximize(MaximizedPane.EMULATOR) },
                                             )
                                         } else if (showGeminiPanel) {
                                             if (showSplitSideChat && splitThread != null) {
@@ -1037,6 +1267,8 @@ fun IdeWorkspaceScreen(
                                                     onSendPromptToThread = onAskGeminiInThread,
                                                     onStopThread = onStopThread,
                                                     onRetryThread = onRetryThread,
+                                                    isMaximized = false,
+                                                    onToggleMaximize = { toggleMaximize(MaximizedPane.SIDE_CHAT) },
                                                 )
                                             } else {
                                                 GeminiPanel(
@@ -1092,6 +1324,8 @@ fun IdeWorkspaceScreen(
                                                     onApplyCode = onApplyGeminiCode,
                                                     onClearChat = onClearAiChat,
                                                     onClose = { showGeminiPanel = false },
+                                                    isMaximized = false,
+                                                    onToggleMaximize = { toggleMaximize(MaximizedPane.AI) },
                                                 )
                                             }
                                         }
@@ -1136,6 +1370,8 @@ fun IdeWorkspaceScreen(
                                     terminalLines = terminalLines,
                                     onRunTerminalCommand = onRunTerminalCommand,
                                     onClose = { showBuildPanel = false },
+                                    isMaximized = false,
+                                    onToggleMaximize = { toggleMaximize(MaximizedPane.BUILD) },
                                     modifier = Modifier.height(buildPanelHeightDp.dp),
                                 )
                             }
@@ -1154,6 +1390,8 @@ fun IdeWorkspaceScreen(
                             builtApkPath = lastBuildResult?.apkPath,
                             onInstallApk = { apkPath -> shareBuiltArtifact(apkPath) },
                             onClose = { showEmulatorPanel = false },
+                            isMaximized = false,
+                            onToggleMaximize = { toggleMaximize(MaximizedPane.EMULATOR) },
                             modifier = Modifier
                                 .width(emulatorWidthDp.dp)
                                 .fillMaxHeight(),
@@ -1218,6 +1456,8 @@ fun IdeWorkspaceScreen(
                             onApplyCode = onApplyGeminiCode,
                             onClearChat = onClearAiChat,
                             onClose = { showGeminiPanel = false },
+                            isMaximized = false,
+                            onToggleMaximize = { toggleMaximize(MaximizedPane.AI) },
                             modifier = Modifier
                                 .width(aiPanelWidthDp.dp)
                                 .fillMaxHeight(),
@@ -1256,10 +1496,14 @@ fun IdeWorkspaceScreen(
                             onSendPromptToThread = onAskGeminiInThread,
                             onStopThread = onStopThread,
                             onRetryThread = onRetryThread,
+                            isMaximized = false,
+                            onToggleMaximize = { toggleMaximize(MaximizedPane.SIDE_CHAT) },
                             modifier = Modifier
                                 .width(splitChatWidthDp.dp)
                                 .fillMaxHeight(),
                         )
+                    }
+                        }
                     }
                 }
             }
@@ -1295,6 +1539,11 @@ fun IdeWorkspaceScreen(
                                 importProjectFileLauncher.launch(arrayOf("*/*"))
                             },
                             onDeleteFile = onDeleteFile,
+                            isMaximized = false,
+                            onToggleMaximize = {
+                                scope.launch { drawerState.close() }
+                                maximizedPane = MaximizedPane.FILES
+                            },
                             modifier = Modifier.fillMaxSize(),
                         )
                     }
@@ -1302,7 +1551,7 @@ fun IdeWorkspaceScreen(
                 content = mainScaffold,
             )
 
-            if (!phoneSplitMode && showEmulatorPanel) {
+            if (!phoneSplitMode && showEmulatorPanel && maximizedPane == MaximizedPane.NONE) {
                 val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
                 ModalBottomSheet(
                     onDismissRequest = { showEmulatorPanel = false },
@@ -1323,10 +1572,15 @@ fun IdeWorkspaceScreen(
                             builtApkPath = lastBuildResult?.apkPath,
                             onInstallApk = { apkPath -> shareBuiltArtifact(apkPath) },
                             onClose = { showEmulatorPanel = false },
+                            isMaximized = false,
+                            onToggleMaximize = {
+                                showEmulatorPanel = true
+                                maximizedPane = MaximizedPane.EMULATOR
+                            },
                         )
                     }
                 }
-            } else if (!phoneSplitMode && showGeminiPanel) {
+            } else if (!phoneSplitMode && showGeminiPanel && maximizedPane == MaximizedPane.NONE) {
                 val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
                 ModalBottomSheet(
                     onDismissRequest = { showGeminiPanel = false },
@@ -1393,6 +1647,11 @@ fun IdeWorkspaceScreen(
                             onApplyCode = onApplyGeminiCode,
                             onClearChat = onClearAiChat,
                             onClose = { showGeminiPanel = false },
+                            isMaximized = false,
+                            onToggleMaximize = {
+                                showGeminiPanel = true
+                                maximizedPane = MaximizedPane.AI
+                            },
                         )
                     }
                 }
@@ -1698,14 +1957,22 @@ private fun ProjectExplorerPane(
     onCreateFile: () -> Unit,
     onImportFile: () -> Unit,
     onDeleteFile: (String) -> Unit,
+    isMaximized: Boolean = false,
+    onToggleMaximize: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     var selectedTab by remember { mutableIntStateOf(0) }
-    val symbols = remember(activeFile?.relativePath, activeFile?.content) {
-        if (activeFile != null && !activeFile.isBinary) {
-            CodeStructureExtractor.extract(activeFile.content, activeFile.language)
-        } else {
-            emptyList()
+    val symbols by produceState(
+        initialValue = emptyList(),
+        activeFile?.relativePath,
+        activeFile?.content,
+    ) {
+        value = withContext(Dispatchers.Default) {
+            if (activeFile != null && !activeFile.isBinary) {
+                CodeStructureExtractor.extract(activeFile.content, activeFile.language)
+            } else {
+                emptyList()
+            }
         }
     }
 
@@ -1721,12 +1988,42 @@ private fun ProjectExplorerPane(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Text("Project", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                IconButton(onClick = onImportFile, modifier = Modifier.testTag("explorer_import_file_button")) {
-                    Icon(Icons.Default.UploadFile, contentDescription = "Upload or import file")
+                Text(
+                    "Project",
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(
+                    onClick = onImportFile,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("explorer_import_file_button"),
+                ) {
+                    Icon(Icons.Default.UploadFile, contentDescription = "Upload or import file", modifier = Modifier.size(19.dp))
                 }
-                IconButton(onClick = onCreateFile, modifier = Modifier.testTag("explorer_new_file_button")) {
-                    Icon(Icons.Default.CreateNewFolder, contentDescription = "New file")
+                IconButton(
+                    onClick = onCreateFile,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("explorer_new_file_button"),
+                ) {
+                    Icon(Icons.Default.CreateNewFolder, contentDescription = "New file", modifier = Modifier.size(19.dp))
+                }
+                if (onToggleMaximize != null) {
+                    IconButton(
+                        onClick = onToggleMaximize,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("explorer_maximize_button"),
+                    ) {
+                        Icon(
+                            imageVector = if (isMaximized) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
+                            contentDescription = if (isMaximized) "Restore project explorer" else "Maximize project explorer",
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
                 }
             }
             TabRow(

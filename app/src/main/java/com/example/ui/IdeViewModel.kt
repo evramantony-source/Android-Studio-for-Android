@@ -302,14 +302,10 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     init {
         assistantFor("main")
         viewModelScope.launch {
-            val startMs = System.currentTimeMillis()
             try {
                 _projects.value = repository.listProjects()
             } finally {
                 _isLoadingProjects.value = false
-                val elapsed = System.currentTimeMillis() - startMs
-                val remaining = (850L - elapsed).coerceAtLeast(0L)
-                if (remaining > 0L) delay(remaining)
                 _isBootLoading.value = false
             }
         }
@@ -1843,9 +1839,10 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
         val previousJob = aiJobs[threadId]
         val newJob = viewModelScope.launch {
             previousJob?.cancelAndJoin()
-            val freshKey = runCatching { repository.providerApiKeys.first()[provider].orEmpty() }
-                .getOrDefault("")
-                .ifBlank { apiKey }
+            val freshKeyMap = runCatching { repository.providerApiKeys.first() }.getOrDefault(emptyMap())
+            val freshKey = freshKeyMap[provider].orEmpty().ifBlank { apiKey }
+            val freshOrKey = freshKeyMap[AiProvider.OPENROUTER].orEmpty()
+                .ifBlank { providerApiKeys.value[AiProvider.OPENROUTER].orEmpty() }
             val freshModel = threadMeta?.modelId?.takeIf { it.isNotBlank() }?.let {
                 AiModelsCatalog.normalizeModelId(provider, it)
             } ?: AiModelsCatalog.normalizeModelId(
@@ -1853,7 +1850,8 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 runCatching { repository.providerModels.first()[provider] }.getOrNull() ?: modelId,
             )
             val executor = createToolExecutor(project.id, project.packageName)
-            val providerLiveModels = _liveModels.value.filter { it.provider == provider }
+            val allLive = _liveModels.value
+            val providerLiveModels = allLive.filter { it.provider == provider }
             assistant.askGemini(
                 userPrompt = prompt,
                 apiKey = freshKey,
@@ -1876,6 +1874,8 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 githubConnected = githubConnected,
                 verifiedLiveModelIds = verifiedIds,
                 liveModelOptions = providerLiveModels,
+                openRouterApiKey = freshOrKey,
+                allLiveModels = allLive,
                 shouldPublishToUi = { true },
                 onModelAutoCorrected = { failedModel, workingModel ->
                     viewModelScope.launch {

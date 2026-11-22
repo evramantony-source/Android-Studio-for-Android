@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,7 +31,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BatteryFull
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.InstallMobile
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ScreenRotation
@@ -103,6 +106,8 @@ fun EmulatorPanel(
     onInstallApk: (String) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    isMaximized: Boolean = false,
+    onToggleMaximize: (() -> Unit)? = null,
 ) {
     var profile by remember { mutableStateOf(EmulatorDeviceProfile.PIXEL_PRO) }
     var isLandscape by remember { mutableStateOf(false) }
@@ -376,6 +381,7 @@ fun EmulatorPanel(
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
                         )
                         val activeSessionBadge = liveSession
                         if (activeSessionBadge != null && vmSnapshot != null) {
@@ -393,6 +399,8 @@ fun EmulatorPanel(
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                                     fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                                 )
                             }
@@ -402,32 +410,60 @@ fun EmulatorPanel(
                         text = "${profile.label} • ${if (isLandscape) "Landscape" else "Portrait"}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 IconButton(
                     onClick = { isLandscape = !isLandscape },
-                    modifier = Modifier.testTag("emulator_rotate_button"),
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("emulator_rotate_button"),
                 ) {
-                    Icon(Icons.Default.ScreenRotation, contentDescription = "Rotate device")
+                    Icon(Icons.Default.ScreenRotation, contentDescription = "Rotate device", modifier = Modifier.size(19.dp))
                 }
                 IconButton(
                     onClick = { showLogcat = !showLogcat },
-                    modifier = Modifier.testTag("emulator_logcat_button"),
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("emulator_logcat_button"),
                 ) {
                     Icon(
                         Icons.Default.Terminal,
                         contentDescription = "Toggle emulator logcat",
                         tint = if (showLogcat) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(19.dp),
                     )
                 }
                 IconButton(
                     onClick = { restartNonce++ },
-                    modifier = Modifier.testTag("emulator_restart_button"),
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("emulator_restart_button"),
                 ) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Cold Boot (Reset app from start)")
+                    Icon(Icons.Default.Refresh, contentDescription = "Cold Boot (Reset app from start)", modifier = Modifier.size(19.dp))
                 }
-                IconButton(onClick = onClose, modifier = Modifier.testTag("emulator_close_button")) {
-                    Icon(Icons.Default.Close, contentDescription = "Close emulator")
+                if (onToggleMaximize != null) {
+                    IconButton(
+                        onClick = onToggleMaximize,
+                        modifier = Modifier
+                            .size(38.dp)
+                            .testTag("emulator_maximize_button"),
+                    ) {
+                        Icon(
+                            imageVector = if (isMaximized) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
+                            contentDescription = if (isMaximized) "Restore emulator size" else "Maximize emulator",
+                            modifier = Modifier.size(18.dp),
+                        )
+                    }
+                }
+                IconButton(
+                    onClick = onClose,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .testTag("emulator_close_button"),
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = "Close emulator", modifier = Modifier.size(19.dp))
                 }
             }
 
@@ -832,8 +868,9 @@ private fun RenderVmNode(
                             val childMod = when {
                                 insideVerticalScroll && child is VmViewNode.CustomCanvasView ->
                                     Modifier.fillMaxWidth().height(260.dp)
+                                child is VmViewNode.CustomCanvasView -> Modifier.fillMaxSize()
                                 insideVerticalScroll -> Modifier.fillMaxWidth()
-                                else -> Modifier.fillMaxSize()
+                                else -> Modifier
                             }
                             RenderVmNode(
                                 node = child,
@@ -942,18 +979,19 @@ private fun RenderVmNode(
                     session.dispatchClick(node.id)
                     onMutate()
                 },
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = node.backgroundColor?.let { Color(it) } ?: Color(0xFF0284C7),
                     contentColor = node.textColor?.let { Color(it) } ?: Color.White,
                 ),
                 shape = RoundedCornerShape((node.cornerRadiusPx / 2.5f).coerceIn(6f, 18f).dp),
-                modifier = modifier,
+                modifier = modifier.defaultMinSize(minWidth = 1.dp, minHeight = 32.dp),
             ) {
                 Text(
                     text = node.text.ifBlank { "Button" },
                     fontSize = 11.sp,
                     maxLines = 1,
+                    softWrap = false,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
@@ -1263,17 +1301,19 @@ private fun RenderEmulatorNode(
         is EmulatorNode.ButtonWidget -> {
             Button(
                 onClick = { onAction(node.actionKind, node.actionArg) },
+                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = node.backgroundColor ?: Color(0xFF0284C7),
                     contentColor = node.textColor ?: Color.White,
                 ),
                 shape = RoundedCornerShape(node.cornerRadiusDp.safeFinite(8f).coerceIn(0f, 24f).dp),
-                modifier = modifier,
+                modifier = modifier.defaultMinSize(minWidth = 1.dp, minHeight = 32.dp),
             ) {
                 Text(
                     text = node.label,
                     fontSize = 12.sp,
                     maxLines = 1,
+                    softWrap = false,
                     overflow = TextOverflow.Ellipsis,
                 )
             }

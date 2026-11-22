@@ -24,10 +24,12 @@ import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.CloseFullscreen
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Key
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
@@ -44,9 +46,9 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -84,6 +86,8 @@ fun BuildPanel(
     onOpenGitHubCloudBuild: () -> Unit = {},
     terminalLines: List<String> = emptyList(),
     onRunTerminalCommand: (String) -> Unit = {},
+    isMaximized: Boolean = false,
+    onToggleMaximize: (() -> Unit)? = null,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -98,11 +102,12 @@ fun BuildPanel(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 8.dp, end = 4.dp),
+                    .padding(start = 4.dp, end = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TabRow(
+                ScrollableTabRow(
                     selectedTabIndex = selectedTab,
+                    edgePadding = 4.dp,
                     containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
                     modifier = Modifier.weight(1f),
                 ) {
@@ -115,7 +120,7 @@ fun BuildPanel(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Text("Build Output")
+                                Text("Build Output", softWrap = false, maxLines = 1)
                             }
                         },
                         modifier = Modifier.testTag("build_output_tab"),
@@ -129,7 +134,7 @@ fun BuildPanel(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 Icon(Icons.Default.Archive, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Text("Package Inspector")
+                                Text("APK Inspector", softWrap = false, maxLines = 1)
                             }
                         },
                         modifier = Modifier.testTag("apk_inspector_tab"),
@@ -143,11 +148,22 @@ fun BuildPanel(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Text("Terminal")
+                                Text("Terminal", softWrap = false, maxLines = 1)
                             }
                         },
                         modifier = Modifier.testTag("build_terminal_tab"),
                     )
+                }
+                if (onToggleMaximize != null) {
+                    IconButton(
+                        onClick = onToggleMaximize,
+                        modifier = Modifier.testTag("build_maximize_button"),
+                    ) {
+                        Icon(
+                            imageVector = if (isMaximized) Icons.Default.CloseFullscreen else Icons.Default.OpenInFull,
+                            contentDescription = if (isMaximized) "Restore build panel" else "Expand build panel full screen",
+                        )
+                    }
                 }
                 IconButton(onClick = onClose, modifier = Modifier.testTag("close_build_panel")) {
                     Icon(Icons.Default.Close, contentDescription = "Close build panel")

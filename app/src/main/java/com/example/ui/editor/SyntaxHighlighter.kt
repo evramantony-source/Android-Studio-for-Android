@@ -1,5 +1,6 @@
 package com.example.ui.editor
 
+import android.util.LruCache
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -79,6 +80,17 @@ object SyntaxHighlighter {
     )
 
     private const val MAX_HIGHLIGHT_CHARS = 35_000
+    private const val MAX_CACHE_CODE_CHARS = 65_000
+
+    private data class CachedHighlight(
+        val source: String,
+        val colors: SyntaxColors,
+        val language: FileLanguage,
+        val filePath: String,
+        val result: AnnotatedString,
+    )
+
+    private val highlightCache = object : LruCache<String, CachedHighlight>(28) {}
 
     fun highlight(
         code: String,
@@ -94,6 +106,17 @@ object SyntaxHighlighter {
         if (language == FileLanguage.TEXT && !isGradle && !isYaml && !isMarkdown) {
             return AnnotatedString(code)
         }
+        val cacheKey = if (code.length <= MAX_CACHE_CODE_CHARS) {
+            "${language.name}|${colors.hashCode()}|$lowerPath|${code.hashCode()}|${code.length}"
+        } else {
+            null
+        }
+        if (cacheKey != null) {
+            val cached = synchronized(highlightCache) { highlightCache.get(cacheKey) }
+            if (cached != null && cached.language == language && cached.colors == colors && cached.filePath == lowerPath && cached.source == code) {
+                return cached.result
+            }
+        }
         val clipped = if (code.length > MAX_HIGHLIGHT_CHARS) code.substring(0, MAX_HIGHLIGHT_CHARS) else code
         val styledHead = when {
             isGradle -> highlightJvmLanguage(clipped, colors, GRADLE_KEYWORDS, KOTLIN_COMMON_TYPES)
@@ -105,11 +128,29 @@ object SyntaxHighlighter {
             language == FileLanguage.JSON -> highlightJson(clipped, colors)
             else -> AnnotatedString(clipped)
         }
-        if (code.length <= MAX_HIGHLIGHT_CHARS) return styledHead
-        return buildAnnotatedString {
-            append(styledHead)
-            append(code.substring(MAX_HIGHLIGHT_CHARS))
+        val result = if (code.length <= MAX_HIGHLIGHT_CHARS) {
+            styledHead
+        } else {
+            buildAnnotatedString {
+                append(styledHead)
+                append(code.substring(MAX_HIGHLIGHT_CHARS))
+            }
         }
+        if (cacheKey != null) {
+            synchronized(highlightCache) {
+                highlightCache.put(
+                    cacheKey,
+                    CachedHighlight(
+                        source = code,
+                        colors = colors,
+                        language = language,
+                        filePath = lowerPath,
+                        result = result,
+                    ),
+                )
+            }
+        }
+        return result
     }
 
     private fun highlightYamlOrToml(code: String, colors: SyntaxColors): AnnotatedString =

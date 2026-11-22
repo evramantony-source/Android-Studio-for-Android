@@ -275,6 +275,8 @@ internal object ProviderApiClient {
         foldSystemIntoUser: Boolean = false,
         stripImages: Boolean = false,
         temperature: Float = 0.3f,
+        maxTokens: Int? = null,
+        useStreaming: Boolean = true,
         onConnected: () -> Unit,
         onReasoningDelta: () -> Unit = {},
         onTextDelta: (String) -> Unit,
@@ -292,6 +294,8 @@ internal object ProviderApiClient {
         includeStreamOptions = includeStreamOptions,
         includeTemperature = includeTemperature,
         temperature = temperature,
+        maxTokens = maxTokens,
+        useStreaming = useStreaming,
         allowOpenRouterDataCollectionFallback = false,
         foldSystemIntoUser = foldSystemIntoUser,
         stripImages = stripImages,
@@ -311,6 +315,8 @@ internal object ProviderApiClient {
         includeStreamOptions: Boolean = true,
         includeTemperature: Boolean = true,
         temperature: Float = 0.3f,
+        maxTokens: Int? = 8192,
+        useStreaming: Boolean = true,
         allowOpenRouterDataCollectionFallback: Boolean = false,
         foldSystemIntoUser: Boolean = false,
         stripImages: Boolean = false,
@@ -334,6 +340,8 @@ internal object ProviderApiClient {
         includeStreamOptions = includeStreamOptions,
         includeTemperature = includeTemperature,
         temperature = temperature,
+        maxTokens = maxTokens,
+        useStreaming = useStreaming,
         allowOpenRouterDataCollectionFallback = allowOpenRouterDataCollectionFallback,
         foldSystemIntoUser = foldSystemIntoUser,
         stripImages = stripImages,
@@ -554,18 +562,24 @@ internal object ProviderApiClient {
         includeStreamOptions: Boolean = true,
         includeTemperature: Boolean = true,
         temperature: Float = 0.3f,
+        maxTokens: Int? = null,
+        useStreaming: Boolean = true,
         allowOpenRouterDataCollectionFallback: Boolean = false,
     ): JSONObject {
         val bodyObj = JSONObject()
             .put("model", modelId)
             .put("messages", adaptedMessages)
-            .put("stream", true)
+            .put("stream", useStreaming)
 
         if (includeTools && tools.length() > 0) {
             bodyObj.put("tools", tools)
         }
-        if (includeStreamOptions) {
+        if (useStreaming && includeStreamOptions) {
             bodyObj.put("stream_options", JSONObject().put("include_usage", true))
+        }
+        val effectiveMaxTokens = maxTokens ?: if (isOpenRouter) 8192 else null
+        if (effectiveMaxTokens != null && effectiveMaxTokens > 0) {
+            bodyObj.put("max_tokens", effectiveMaxTokens)
         }
 
         val lowerModel = modelId.lowercase()
@@ -573,7 +587,7 @@ internal object ProviderApiClient {
         val isFixedTempReasoning = tailModel.startsWith("o1") ||
             tailModel.startsWith("o3") ||
             tailModel.startsWith("o4") ||
-            (!isOpenRouter && (tailModel.startsWith("gpt-5") || tailModel.startsWith("gpt-6")))
+            (!isOpenRouter && tailModel.startsWith("gpt-5"))
         if (includeTemperature && !isFixedTempReasoning) {
             bodyObj.put("temperature", temperature.coerceIn(0f, 1.5f).toDouble())
         } else if (!isOpenRouter && isFixedTempReasoning && !tailModel.startsWith("o1")) {
@@ -610,6 +624,8 @@ internal object ProviderApiClient {
         includeStreamOptions: Boolean,
         includeTemperature: Boolean,
         temperature: Float,
+        maxTokens: Int?,
+        useStreaming: Boolean,
         allowOpenRouterDataCollectionFallback: Boolean,
         foldSystemIntoUser: Boolean,
         stripImages: Boolean,
@@ -660,6 +676,8 @@ internal object ProviderApiClient {
             includeStreamOptions = includeStreamOptions,
             includeTemperature = includeTemperature,
             temperature = temperature,
+            maxTokens = maxTokens,
+            useStreaming = useStreaming,
             allowOpenRouterDataCollectionFallback = allowOpenRouterDataCollectionFallback,
         )
 
@@ -672,7 +690,7 @@ internal object ProviderApiClient {
             doOutput = true
             setFixedLengthStreamingMode(bodyBytes.size)
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            setRequestProperty("Accept", "text/event-stream")
+            setRequestProperty("Accept", if (useStreaming) "text/event-stream" else "application/json")
             setRequestProperty("Accept-Encoding", "identity")
             setRequestProperty("Authorization", "Bearer $apiKey")
             extraHeaders.forEach { (header, value) ->
@@ -893,6 +911,8 @@ internal object ProviderApiClient {
         allowTextToolCalls: Boolean = true,
         includeTemperature: Boolean = true,
         temperature: Float = 0.3f,
+        maxOutputTokens: Int? = null,
+        useStreaming: Boolean = true,
         stripImages: Boolean = false,
         onConnected: () -> Unit,
         onReasoningDelta: () -> Unit = {},
@@ -989,7 +1009,11 @@ internal object ProviderApiClient {
         val bodyObj = JSONObject()
             .put("model", modelId)
             .put("input", inputItems)
-            .put("stream", true)
+            .put("stream", useStreaming)
+
+        if (maxOutputTokens != null && maxOutputTokens > 0) {
+            bodyObj.put("max_output_tokens", maxOutputTokens)
+        }
 
         val joinedInstructions = instructionsParts.joinToString("\n\n").trim()
         if (joinedInstructions.isNotEmpty()) {
@@ -1036,7 +1060,7 @@ internal object ProviderApiClient {
             doOutput = true
             setFixedLengthStreamingMode(bodyBytes.size)
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            setRequestProperty("Accept", "text/event-stream")
+            setRequestProperty("Accept", if (useStreaming) "text/event-stream" else "application/json")
             setRequestProperty("Accept-Encoding", "identity")
             setRequestProperty("Authorization", "Bearer $apiKey")
         }
@@ -1046,6 +1070,8 @@ internal object ProviderApiClient {
         }
 
         val textSb = StringBuilder()
+        val rawNonSseSb = StringBuilder()
+        var sawSseData = false
         var lastStreamedVisible = ""
         val fnCallIds = mutableMapOf<String, String>()
         val fnCallNames = mutableMapOf<String, String>()
@@ -1075,7 +1101,13 @@ internal object ProviderApiClient {
                 while (true) {
                     coroutineContext.ensureActive()
                     val line = reader.readLine() ?: break
-                    if (!line.startsWith("data:")) continue
+                    if (!line.startsWith("data:")) {
+                        if (!sawSseData && rawNonSseSb.length < 512_000 && !line.startsWith(":")) {
+                            rawNonSseSb.append(line).append('\n')
+                        }
+                        continue
+                    }
+                    sawSseData = true
                     val payload = line.removePrefix("data:").trim()
                     if (payload.isEmpty() || payload == "[DONE]") continue
 
@@ -1144,6 +1176,56 @@ internal object ProviderApiClient {
                                 totalTokens = u.optLong("total_tokens", inputTokens + outputTokens)
                             }
                         }
+                    }
+                }
+            }
+
+            // Fallback when non-streaming JSON is requested or returned by /v1/responses.
+            if (!sawSseData && rawNonSseSb.isNotEmpty()) {
+                val rawJson = rawNonSseSb.toString().trim()
+                val root = runCatching { JSONObject(rawJson) }.getOrNull()
+                if (root != null) {
+                    root.optJSONObject("error")?.let { err ->
+                        val parsedCode = err.optInt("code", 502).let { if (it in 400..599) it else 502 }
+                        val parsedMsg = GeminiCodeAssistant.extractApiErrorMessage(rawJson)
+                            .ifBlank { err.optString("message", "Responses API error") }
+                        throw GeminiApiException(parsedCode, parsedMsg)
+                    }
+                    finishReason = root.optString("status").takeIf { it.isNotBlank() } ?: finishReason
+                    root.optJSONObject("usage")?.let { u ->
+                        inputTokens = u.optLong("input_tokens", inputTokens)
+                        outputTokens = u.optLong("output_tokens", outputTokens)
+                        totalTokens = u.optLong("total_tokens", inputTokens + outputTokens)
+                    }
+                    val outputArr = root.optJSONArray("output")
+                    if (outputArr != null) {
+                        for (idx in 0 until outputArr.length()) {
+                            val item = outputArr.optJSONObject(idx) ?: continue
+                            when (item.optString("type")) {
+                                "message" -> {
+                                    val contentArr = item.optJSONArray("content") ?: continue
+                                    for (cIdx in 0 until contentArr.length()) {
+                                        val cObj = contentArr.optJSONObject(cIdx) ?: continue
+                                        val cType = cObj.optString("type")
+                                        if (cType == "output_text" || cType == "text") {
+                                            val t = cObj.optString("text", "")
+                                            if (t.isNotEmpty()) textSb.append(t)
+                                        }
+                                    }
+                                }
+                                "function_call" -> {
+                                    val itemId = item.optString("id").ifBlank { "item_${fnOrder.size}" }
+                                    if (itemId !in fnOrder) fnOrder.add(itemId)
+                                    fnCallIds[itemId] = item.optString("call_id").ifBlank { itemId }
+                                    val name = item.optString("name", "")
+                                    if (name.isNotBlank()) fnCallNames[itemId] = name
+                                    fnCallArgs[itemId] = StringBuilder(item.optString("arguments", "{}").ifBlank { "{}" })
+                                }
+                            }
+                        }
+                    }
+                    if (textSb.isNotEmpty()) {
+                        onTextDelta(stripThinkBlocks(textSb.toString()))
                     }
                 }
             }
@@ -1239,29 +1321,70 @@ internal object ProviderApiClient {
             }
         }
 
-        if (foldedSystemPrefix.isNotBlank()) {
-            val firstUserIdx = (0 until out.length()).firstOrNull { out.optJSONObject(it)?.optString("role") == "user" }
-            if (firstUserIdx != null) {
-                val first = out.getJSONObject(firstUserIdx)
-                val c = first.opt("content")
-                if (c is JSONArray) {
-                    val updated = JSONArray().apply {
-                        put(JSONObject().put("type", "text").put("text", "Instructions:\n$foldedSystemPrefix\n\nUser request:"))
-                        for (k in 0 until c.length()) put(c.get(k))
-                    }
-                    first.put("content", updated)
-                } else {
-                    first.put("content", "Instructions:\n$foldedSystemPrefix\n\nUser request:\n${c ?: ""}")
+        val normalized = mutableListOf<JSONObject>()
+        fun contentAsBlocksArray(contentAny: Any?): JSONArray {
+            return when (contentAny) {
+                is JSONArray -> JSONArray(contentAny.toString())
+                else -> {
+                    val str = contentAny?.toString().orEmpty()
+                    if (str.isBlank() || str == "null") JSONArray()
+                    else JSONArray().put(JSONObject().put("type", "text").put("text", str))
                 }
-            } else {
-                val fallbackArr = JSONArray().apply {
-                    put(JSONObject().put("role", "user").put("content", foldedSystemPrefix))
-                    for (k in 0 until out.length()) put(out.get(k))
-                }
-                return fallbackArr
             }
         }
-        return out
+        fun isContentBlank(contentAny: Any?): Boolean {
+            return when (contentAny) {
+                null, JSONObject.NULL -> true
+                is JSONArray -> contentAny.length() == 0
+                else -> {
+                    val s = contentAny.toString()
+                    s.isBlank() || s == "null"
+                }
+            }
+        }
+
+        for (k in 0 until out.length()) {
+            val msg = out.getJSONObject(k)
+            val role = if (msg.optString("role") == "assistant") "assistant" else "user"
+            val contentAny = msg.opt("content")
+            if (isContentBlank(contentAny)) continue
+
+            if (normalized.isNotEmpty() && normalized.last().optString("role") == role) {
+                val prev = normalized.last()
+                val prevContent = prev.opt("content")
+                if (prevContent is String && contentAny is String) {
+                    prev.put("content", "${prevContent.trimEnd()}\n\n$contentAny")
+                } else {
+                    val mergedBlocks = contentAsBlocksArray(prevContent)
+                    val incomingBlocks = contentAsBlocksArray(contentAny)
+                    for (bIdx in 0 until incomingBlocks.length()) {
+                        mergedBlocks.put(incomingBlocks.get(bIdx))
+                    }
+                    prev.put("content", mergedBlocks)
+                }
+            } else {
+                normalized.add(JSONObject().put("role", role).put("content", contentAny))
+            }
+        }
+
+        if (normalized.isEmpty()) {
+            normalized.add(JSONObject().put("role", "user").put("content", foldedSystemPrefix.ifBlank { "Hello" }))
+        } else if (normalized.first().optString("role") != "user") {
+            normalized.add(0, JSONObject().put("role", "user").put("content", foldedSystemPrefix.ifBlank { "Context & instructions:" }))
+        } else if (foldedSystemPrefix.isNotBlank()) {
+            val first = normalized.first()
+            val c = first.opt("content")
+            if (c is JSONArray) {
+                val updated = JSONArray().apply {
+                    put(JSONObject().put("type", "text").put("text", "Instructions:\n$foldedSystemPrefix\n\nUser request:"))
+                    for (k in 0 until c.length()) put(c.get(k))
+                }
+                first.put("content", updated)
+            } else {
+                first.put("content", "Instructions:\n$foldedSystemPrefix\n\nUser request:\n${c ?: ""}")
+            }
+        }
+        return JSONArray().apply { normalized.forEach { put(it) } }
     }
 
     suspend fun streamClaude(
@@ -1277,6 +1400,7 @@ internal object ProviderApiClient {
         includeSystem: Boolean = true,
         includeTemperature: Boolean = false,
         temperature: Float = 0.3f,
+        useStreaming: Boolean = true,
         stripImages: Boolean = false,
         onConnected: () -> Unit,
         onTextDelta: (String) -> Unit,
@@ -1314,7 +1438,7 @@ internal object ProviderApiClient {
             .put("model", modelId)
             .put("max_tokens", maxTokens)
             .put("messages", adaptedMessages)
-            .put("stream", true)
+            .put("stream", useStreaming)
 
         if (includeSystem && effectiveSystem.isNotBlank()) {
             bodyJson.put("system", effectiveSystem)
@@ -1336,7 +1460,7 @@ internal object ProviderApiClient {
             doOutput = true
             setFixedLengthStreamingMode(bodyBytes.size)
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            setRequestProperty("Accept", "text/event-stream")
+            setRequestProperty("Accept", if (useStreaming) "text/event-stream" else "application/json")
             setRequestProperty("Accept-Encoding", "identity")
             setRequestProperty("x-api-key", apiKey)
             setRequestProperty("anthropic-version", "2023-06-01")
@@ -1347,6 +1471,8 @@ internal object ProviderApiClient {
         }
 
         val textSb = StringBuilder()
+        val rawNonSseSb = StringBuilder()
+        var sawSseData = false
         var lastStreamedVisible = ""
         val toolIds = mutableMapOf<Int, String>()
         val toolNames = mutableMapOf<Int, String>()
@@ -1377,13 +1503,20 @@ internal object ProviderApiClient {
                 while (true) {
                     coroutineContext.ensureActive()
                     val line = reader.readLine() ?: break
-                    if (!line.startsWith("data:")) continue
+                    if (!line.startsWith("data:")) {
+                        if (!sawSseData && rawNonSseSb.length < 512_000 && !line.startsWith(":") && !line.startsWith("event:")) {
+                            rawNonSseSb.append(line).append('\n')
+                        }
+                        continue
+                    }
+                    sawSseData = true
                     val payload = line.removePrefix("data:").trim()
                     if (payload.isEmpty() || payload == "[DONE]") continue
 
                     val root = runCatching { JSONObject(payload) }.getOrNull() ?: continue
                     val eventType = root.optString("type", "")
                     when (eventType) {
+                        "ping" -> Unit
                         "error" -> {
                             val err = root.optJSONObject("error")
                             throw GeminiApiException(status, err?.optString("message") ?: "Claude streaming error")
@@ -1432,6 +1565,7 @@ internal object ProviderApiClient {
                                         toolJsonBuilders.getOrPut(idx) { StringBuilder() }.append(partial)
                                     }
                                 }
+                                "thinking_delta", "signature_delta" -> Unit
                             }
                         }
                         "message_delta" -> {
@@ -1442,6 +1576,50 @@ internal object ProviderApiClient {
                             if (usage != null) {
                                 outputTokens = usage.optLong("output_tokens", outputTokens)
                             }
+                        }
+                    }
+                }
+            }
+
+            if (!sawSseData && rawNonSseSb.isNotEmpty()) {
+                val rawJson = rawNonSseSb.toString().trim()
+                val root = runCatching { JSONObject(rawJson) }.getOrNull()
+                if (root != null) {
+                    if (root.optString("type") == "error" || root.has("error")) {
+                        val parsedMsg = GeminiCodeAssistant.extractApiErrorMessage(rawJson)
+                            .ifBlank { root.optJSONObject("error")?.optString("message").orEmpty() }
+                            .ifBlank { "Claude API error" }
+                        throw GeminiApiException(502, parsedMsg)
+                    }
+                    stopReason = root.optString("stop_reason").takeIf { it.isNotBlank() && it != "null" } ?: stopReason
+                    root.optJSONObject("usage")?.let { u ->
+                        inputTokens = u.optLong("input_tokens", inputTokens)
+                        outputTokens = u.optLong("output_tokens", outputTokens)
+                    }
+                    val contentArr = root.optJSONArray("content")
+                    if (contentArr != null) {
+                        for (cIdx in 0 until contentArr.length()) {
+                            val block = contentArr.optJSONObject(cIdx) ?: continue
+                            val bType = block.optString("type")
+                            blockTypes[cIdx] = bType
+                            when (bType) {
+                                "text" -> {
+                                    val t = block.optString("text", "")
+                                    if (t.isNotEmpty()) {
+                                        textSb.append(t)
+                                        blockTexts.getOrPut(cIdx) { StringBuilder() }.append(t)
+                                    }
+                                }
+                                "tool_use" -> {
+                                    toolIds[cIdx] = block.optString("id", "tool_$cIdx")
+                                    toolNames[cIdx] = block.optString("name", "")
+                                    val inp = block.optJSONObject("input")?.toString() ?: "{}"
+                                    toolJsonBuilders[cIdx] = StringBuilder(inp)
+                                }
+                            }
+                        }
+                        if (textSb.isNotEmpty()) {
+                            onTextDelta(stripThinkBlocks(textSb.toString()))
                         }
                     }
                 }

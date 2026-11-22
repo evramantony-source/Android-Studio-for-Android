@@ -46,13 +46,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.BuildDiagnostic
@@ -110,7 +114,9 @@ fun CodeEditor(
         horizontalScroll.scrollTo(0)
     }
 
-    val lines = remember(textValue.text) { textValue.text.split('\n') }
+    val lineCount = remember(textValue.text) {
+        if (textValue.text.isEmpty()) 1 else textValue.text.count { it == '\n' } + 1
+    }
     val errorLineNumbers = remember(diagnostics, filePath) {
         diagnostics
             .filter { it.filePath == filePath && it.severity == DiagnosticSeverity.ERROR }
@@ -123,7 +129,7 @@ fun CodeEditor(
     }
 
     val lineHeightSp = (settings.fontSizeSp + 7).sp
-    val lineHeightDp = (settings.fontSizeSp + 7).dp
+    var gutterLayout by remember(filePath) { mutableStateOf<TextLayoutResult?>(null) }
 
     // Handle clicking a build error diagnostic to jump to line
     LaunchedEffect(jumpToLineRequest) {
@@ -131,8 +137,11 @@ fun CodeEditor(
             val targetLine = jumpToLineRequest.second.coerceAtLeast(1)
             val offset = lineStartOffset(textValue.text, targetLine)
             textValue = textValue.copy(selection = TextRange(offset))
-            val approxY = ((targetLine - 3).coerceAtLeast(0)) * (settings.fontSizeSp + 7)
-            verticalScroll.animateScrollTo(approxY * 2)
+            val approxY = gutterLayout?.let { layout ->
+                val idx = (targetLine - 1).coerceIn(0, (layout.lineCount - 1).coerceAtLeast(0))
+                layout.getLineTop(idx).toInt()
+            } ?: (((targetLine - 3).coerceAtLeast(0)) * (settings.fontSizeSp + 7) * 2)
+            verticalScroll.animateScrollTo(approxY.coerceAtLeast(0))
             onJumpHandled()
         }
     }
@@ -282,7 +291,7 @@ fun CodeEditor(
                     OutlinedTextField(
                         value = goToLineInput,
                         onValueChange = { goToLineInput = it.filter { ch -> ch.isDigit() } },
-                        placeholder = { Text("Line (1-${lines.size})", style = MaterialTheme.typography.bodyMedium) },
+                        placeholder = { Text("Line (1-$lineCount)", style = MaterialTheme.typography.bodyMedium) },
                         singleLine = true,
                         textStyle = MaterialTheme.typography.labelMedium,
                         modifier = Modifier
@@ -291,7 +300,7 @@ fun CodeEditor(
                     )
                     TextButton(
                         onClick = {
-                            val target = goToLineInput.toIntOrNull()?.coerceIn(1, lines.size) ?: return@TextButton
+                            val target = goToLineInput.toIntOrNull()?.coerceIn(1, lineCount) ?: return@TextButton
                             val offset = lineStartOffset(textValue.text, target)
                             textValue = textValue.copy(selection = TextRange(offset))
                             showGoToLineBar = false
@@ -319,6 +328,16 @@ fun CodeEditor(
             CodeSyntaxVisualTransformation(language, syntaxColors, filePath)
         }
 
+        val errorDotColor = MaterialTheme.colorScheme.error
+        val lineNumbersText = remember(lineCount) {
+            buildString(lineCount * 4) {
+                for (n in 1..lineCount) {
+                    if (n > 1) append('\n')
+                    append(n)
+                }
+            }
+        }
+
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -326,59 +345,63 @@ fun CodeEditor(
                 .verticalScroll(verticalScroll),
         ) {
             Row(modifier = Modifier.fillMaxWidth()) {
-                // Line Number Gutter (optional via settings.showLineNumbers)
+                // Fast O(1) Line Number Gutter + drawBehind active/error highlights
                 if (settings.showLineNumbers) {
-                    Column(
+                    Box(
                         modifier = Modifier
                             .width(48.dp)
                             .background(syntaxColors.gutterBackground)
-                            .padding(vertical = 12.dp),
-                        horizontalAlignment = Alignment.End,
-                    ) {
-                        lines.forEachIndexed { index, _ ->
-                            val lineNum = index + 1
-                            val isError = lineNum in errorLineNumbers
-                            val isActive = lineNum == currentLine
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(lineHeightDp)
-                                    .background(
-                                        when {
-                                            isError -> syntaxColors.errorLineBackground
-                                            isActive -> syntaxColors.activeLineBackground
-                                            else -> syntaxColors.gutterBackground
-                                        },
-                                    )
-                                    .padding(horizontal = 6.dp),
-                                contentAlignment = Alignment.CenterEnd,
-                            ) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                ) {
-                                    if (isError) {
-                                        Box(
-                                            modifier = Modifier
-                                                .size(6.dp)
-                                                .clip(CircleShape)
-                                                .background(MaterialTheme.colorScheme.error),
-                                        )
+                            .drawBehind {
+                                val topPadPx = 12.dp.toPx()
+                                val layout = gutterLayout
+                                val fallbackLinePx = lineHeightSp.toPx()
+                                fun bandForLine(lineNum: Int): Pair<Float, Float> {
+                                    val idx = lineNum - 1
+                                    if (layout != null && idx in 0 until layout.lineCount) {
+                                        val t = topPadPx + layout.getLineTop(idx)
+                                        val b = topPadPx + layout.getLineBottom(idx)
+                                        return t to (b - t)
                                     }
-                                    Text(
-                                        text = "$lineNum",
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        fontSize = (settings.fontSizeSp - 2).coerceAtLeast(9).sp,
-                                        color = when {
-                                            isError -> MaterialTheme.colorScheme.error
-                                            isActive -> MaterialTheme.colorScheme.primary
-                                            else -> syntaxColors.gutterText
-                                        },
-                                        fontWeight = if (isActive || isError) FontWeight.SemiBold else FontWeight.Normal,
+                                    return (topPadPx + idx * fallbackLinePx) to fallbackLinePx
+                                }
+                                if (currentLine in 1..lineCount) {
+                                    val (y, h) = bandForLine(currentLine)
+                                    drawRect(
+                                        color = syntaxColors.activeLineBackground,
+                                        topLeft = Offset(0f, y),
+                                        size = Size(size.width, h),
                                     )
                                 }
+                                errorLineNumbers.forEach { errLine ->
+                                    if (errLine in 1..lineCount) {
+                                        val (y, h) = bandForLine(errLine)
+                                        drawRect(
+                                            color = syntaxColors.errorLineBackground,
+                                            topLeft = Offset(0f, y),
+                                            size = Size(size.width, h),
+                                        )
+                                        drawCircle(
+                                            color = errorDotColor,
+                                            radius = 3.dp.toPx(),
+                                            center = Offset(7.dp.toPx(), y + h / 2f),
+                                        )
+                                    }
+                                }
                             }
-                        }
+                            .padding(horizontal = 6.dp, vertical = 12.dp),
+                    ) {
+                        Text(
+                            text = lineNumbersText,
+                            style = TextStyle(
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontSize = (settings.fontSizeSp - 2).coerceAtLeast(9).sp,
+                                lineHeight = lineHeightSp,
+                                color = syntaxColors.gutterText,
+                                textAlign = TextAlign.End,
+                            ),
+                            onTextLayout = { gutterLayout = it },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
 
@@ -436,7 +459,7 @@ fun CodeEditor(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(
-                            text = "${language.name} • ${lines.size} lines",
+                            text = "${language.name} • $lineCount lines",
                             fontFamily = JetBrainsMonoFontFamily,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,

@@ -4,8 +4,6 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.animation.Crossfade
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -108,14 +106,11 @@ class MainActivity : ComponentActivity() {
                 val currentProject = activeProject
                 val loadingName = openingProjectName
                 Box(modifier = Modifier.fillMaxSize()) {
-                    Crossfade(
-                        targetState = isBootLoading,
-                        animationSpec = tween(durationMillis = 280),
-                        label = "studio_boot_crossfade",
-                    ) { booting ->
-                        if (booting) {
+                    when {
+                        isBootLoading -> {
                             StudioLaunchLoadingScreen()
-                        } else if (currentProject == null) {
+                        }
+                        currentProject == null -> {
                             ProjectsScreen(
                                 projects = projects,
                                 isLoadingProjects = isLoadingProjects,
@@ -149,7 +144,8 @@ class MainActivity : ComponentActivity() {
                                 onRefreshGitHubRepos = viewModel::refreshGitHubRepos,
                                 onCloneGitHubRepo = viewModel::cloneGitHubRepoAsProject,
                             )
-                        } else {
+                        }
+                        else -> {
                             IdeWorkspaceScreen(
                                 project = currentProject,
                                 files = projectFiles,

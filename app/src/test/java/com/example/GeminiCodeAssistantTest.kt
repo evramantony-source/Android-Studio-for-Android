@@ -196,13 +196,15 @@ class GeminiCodeAssistantTest {
         assertTrue(hydrogenChain.contains("gemini-2.5-flash"))
         assertTrue(hydrogenChain.contains("gemini-2.0-flash"))
 
-        val openAiChain = AiModelsCatalog.fallbackChain(AiProvider.OPENAI, "gpt-6-astra")
-        assertEquals("gpt-6-astra", openAiChain.first())
+        val openAiChain = AiModelsCatalog.fallbackChain(AiProvider.OPENAI, "gpt-5")
+        assertEquals("gpt-5", openAiChain.first())
         assertTrue(openAiChain.contains("gpt-4o"))
 
-        val claudeChain = AiModelsCatalog.fallbackChain(AiProvider.CLAUDE, "claude-opus-5-5")
-        assertEquals("claude-opus-5-5", claudeChain.first())
+        val claudeChain = AiModelsCatalog.fallbackChain(AiProvider.CLAUDE, "claude-opus-4-6")
+        assertEquals("claude-opus-4-6", claudeChain.first())
         assertTrue(claudeChain.contains("claude-sonnet-4-5"))
+        assertEquals("gpt-5", AiModelsCatalog.normalizeModelId(AiProvider.OPENAI, "gpt-6-astra"))
+        assertEquals("claude-opus-4-6", AiModelsCatalog.normalizeModelId(AiProvider.CLAUDE, "claude-opus-5-5"))
     }
 
     @Test
@@ -275,12 +277,12 @@ class GeminiCodeAssistantTest {
         assertTrue(gemini.any { it.id == "gemini-3-pro-preview" })
         assertTrue(gemini.any { it.id == "gemini-3-flash-preview" })
         assertTrue(gemini.any { it.id == "gemini-2.5-pro" })
-        assertTrue(openai.any { it.id == "gpt-6-astra" })
         assertTrue(openai.any { it.id == "gpt-5" })
         assertTrue(openai.any { it.id == "gpt-4.1" })
         assertTrue(openai.any { it.id == "o4-mini" })
         assertTrue(openai.any { it.id == "o3-pro" })
-        assertTrue(claude.any { it.id == "claude-opus-5-5" })
+        assertTrue(claude.any { it.id == "claude-opus-4-6" })
+        assertTrue(claude.any { it.id == "claude-sonnet-4-6" })
         assertTrue(claude.any { it.id == "claude-sonnet-4-5" })
         assertTrue(claude.any { it.id == "claude-3-7-sonnet-latest" })
         assertTrue(claude.any { it.id == "claude-3-haiku-20240307" })
@@ -819,13 +821,14 @@ class GeminiCodeAssistantTest {
             )
             if (state != null) history.add(state)
         }
-        assertEquals(6, history.size)
+        assertEquals(7, history.size)
         assertFalse(history[0].useNativeTools)
         assertFalse(history[1].includeStreamOptions)
-        assertFalse(history[2].includeTemperature)
-        assertTrue(history[3].allowDataCollectionFallback)
-        assertTrue(history[4].foldSystem)
-        assertTrue(history[5].stripImages)
+        assertFalse(history[2].useStreaming)
+        assertFalse(history[3].includeTemperature)
+        assertTrue(history[4].allowDataCollectionFallback)
+        assertTrue(history[5].foldSystem)
+        assertTrue(history[6].stripImages)
 
         // 3. Request builder honors data_collection override and omits temperature when adapted off
         val reqBody = com.example.ai.ProviderApiClient.buildOpenAiCompatibleRequestBody(
@@ -937,5 +940,109 @@ class GeminiCodeAssistantTest {
         } finally {
             dir.deleteRecursively()
         }
+    }
+
+    @Test
+    fun openRouterSlugMappingHandlesOpenAiAndClaudeDateDotVersions() {
+        val liveOpenRouter = listOf(
+            com.example.ai.AiModelOption("anthropic/claude-sonnet-4.5", AiProvider.OPENROUTER, "Claude Sonnet 4.5", "Claude", "", isLiveFetched = true),
+            com.example.ai.AiModelOption("anthropic/claude-opus-4.6", AiProvider.OPENROUTER, "Claude Opus 4.6", "Claude", "", isLiveFetched = true),
+            com.example.ai.AiModelOption("openai/gpt-5", AiProvider.OPENROUTER, "GPT-5", "OpenAI", "", isLiveFetched = true),
+            com.example.ai.AiModelOption("openai/o4-mini", AiProvider.OPENROUTER, "o4-mini", "OpenAI", "", isLiveFetched = true),
+        )
+
+        assertEquals(
+            "anthropic/claude-sonnet-4.5",
+            AiModelsCatalog.toOpenRouterSlug(AiProvider.CLAUDE, "claude-sonnet-4-5", liveOpenRouter),
+        )
+        assertEquals(
+            "anthropic/claude-opus-4.6",
+            AiModelsCatalog.toOpenRouterSlug(AiProvider.CLAUDE, "claude-opus-4-6-latest", liveOpenRouter),
+        )
+        assertEquals(
+            "anthropic/claude-3.7-sonnet",
+            AiModelsCatalog.toOpenRouterSlug(AiProvider.CLAUDE, "claude-3-7-sonnet-20250219", liveOpenRouter),
+        )
+        assertEquals(
+            "openai/gpt-5",
+            AiModelsCatalog.toOpenRouterSlug(AiProvider.OPENAI, "gpt-5", liveOpenRouter),
+        )
+        assertEquals(
+            "openai/o4-mini",
+            AiModelsCatalog.toOpenRouterSlug(AiProvider.OPENAI, "o4-mini", liveOpenRouter),
+        )
+    }
+
+    @Test
+    fun buildAdaptedClaudeMessagesEnforcesAlternationMergesDuplicatesAndFoldsSystem() {
+        val raw = org.json.JSONArray().apply {
+            // Leading assistant message should become synthetic leading user before it, or merge cleanly
+            put(JSONObject().put("role", "assistant").put("content", "")) // blank skipped
+            put(JSONObject().put("role", "assistant").put("content", "Previous assistant greeting"))
+            put(JSONObject().put("role", "user").put("content", "First question"))
+            put(
+                JSONObject().put("role", "user").put(
+                    "content",
+                    org.json.JSONArray().put(JSONObject().put("type", "text").put("text", "Second question part")),
+                ),
+            )
+            put(JSONObject().put("role", "assistant").put("content", "Ack 1"))
+            put(JSONObject().put("role", "assistant").put("content", "Ack 2"))
+        }
+
+        val adapted = com.example.ai.ProviderApiClient.buildAdaptedClaudeMessages(
+            messages = raw,
+            stripImages = true,
+            convertToolsToTextHistory = false,
+            foldedSystemPrefix = "Strict Android IDE rules",
+        )
+
+        assertTrue(adapted.length() >= 3)
+        assertEquals("user", adapted.getJSONObject(0).getString("role"))
+        assertTrue(adapted.getJSONObject(0).get("content").toString().contains("Strict Android IDE rules"))
+
+        // Verify strict alternation (no consecutive user/user or assistant/assistant)
+        for (i in 1 until adapted.length()) {
+            val prevRole = adapted.getJSONObject(i - 1).getString("role")
+            val curRole = adapted.getJSONObject(i).getString("role")
+            assertTrue("Expected alternating roles at index $i, found $prevRole -> $curRole", prevRole != curRole)
+        }
+    }
+
+    @Test
+    fun openRouterCredit402AndNonStreamingAdaptationsStepDownSafely() {
+        val initial = GeminiCodeAssistant.OpenAiModelCapabilities(maxTokens = 8192, useStreaming = true)
+
+        val step1 = GeminiCodeAssistant.nextOpenRouterAdaptation(
+            current = initial,
+            httpCode = 402,
+            errorMessage = "Insufficient credits: affordable max_tokens is 2048",
+            hasImages = false,
+        )
+        assertEquals(2048, step1?.maxTokens)
+
+        val step2 = GeminiCodeAssistant.nextOpenRouterAdaptation(
+            current = step1!!,
+            httpCode = 402,
+            errorMessage = "Insufficient credits",
+            hasImages = false,
+        )
+        assertEquals(1024, step2?.maxTokens)
+
+        val noStream = GeminiCodeAssistant.nextOpenRouterAdaptation(
+            current = initial,
+            httpCode = 400,
+            errorMessage = "SSE stream error: unsupported parameter stream",
+            hasImages = false,
+        )
+        assertFalse(noStream?.useStreaming ?: true)
+
+        val claudeNoStream = GeminiCodeAssistant.nextClaudeAdaptation(
+            current = GeminiCodeAssistant.ClaudeModelCapabilities(useStreaming = true),
+            httpCode = 400,
+            errorMessage = "streaming disabled for this endpoint",
+            hasImages = false,
+        )
+        assertFalse(claudeNoStream?.useStreaming ?: true)
     }
 }

@@ -306,31 +306,7 @@ object AiModelsCatalog {
     )
 
     val builtInOpenAiModels: List<AiModelOption> = listOf(
-        // GPT-6 & GPT-5 Generations
-        AiModelOption(
-            id = "gpt-6-astra",
-            provider = AiProvider.OPENAI,
-            label = "GPT-6 Astra",
-            badge = "GPT-6",
-            description = "OpenAI's latest frontier model for multimodal & agentic software building.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gpt-6.1-sol",
-            provider = AiProvider.OPENAI,
-            label = "GPT-6.1 Sol",
-            badge = "GPT-6",
-            description = "Balanced GPT-6.1 model for rapid full-project code generation.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gpt-6.1-terra",
-            provider = AiProvider.OPENAI,
-            label = "GPT-6.1 Terra",
-            badge = "GPT-6",
-            description = "High-efficiency GPT-6.1 variant for everyday engineering tasks.",
-            contextWindow = "1M ctx",
-        ),
+        // GPT-5 Series
         AiModelOption(
             id = "gpt-5.1",
             provider = AiProvider.OPENAI,
@@ -516,54 +492,21 @@ object AiModelsCatalog {
     )
 
     val builtInClaudeModels: List<AiModelOption> = listOf(
-        // Claude 5.x Generation
-        AiModelOption(
-            id = "claude-opus-5-5",
-            provider = AiProvider.CLAUDE,
-            label = "Claude Opus 5.5",
-            badge = "Claude 5",
-            description = "Flagship Claude 5.5 powerhouse for deep autonomous software engineering.",
-            contextWindow = "200K ctx",
-        ),
-        AiModelOption(
-            id = "claude-sonnet-5-5",
-            provider = AiProvider.CLAUDE,
-            label = "Claude Sonnet 5.5",
-            badge = "Claude 5",
-            description = "Balanced Claude 5.5 model combining speed with top coding precision.",
-            contextWindow = "200K ctx",
-        ),
-        AiModelOption(
-            id = "claude-haiku-5-5",
-            provider = AiProvider.CLAUDE,
-            label = "Claude Haiku 5.5",
-            badge = "Claude 5",
-            description = "Near-instant Claude 5.5 model for rapid edits & tight token budgets.",
-            contextWindow = "200K ctx",
-        ),
-        AiModelOption(
-            id = "claude-fable-5-2",
-            provider = AiProvider.CLAUDE,
-            label = "Claude Fable 5.2",
-            badge = "Claude 5",
-            description = "High-capacity long-horizon Claude model for demanding workflows.",
-            contextWindow = "200K ctx",
-        ),
         // Claude 4.6 / 4.5 / 4.1 / 4.0 Generation (Verified Anthropic IDs)
-        AiModelOption(
-            id = "claude-opus-4-6",
-            provider = AiProvider.CLAUDE,
-            label = "Claude Opus 4.6",
-            badge = "Claude 4.6",
-            description = "Flagship Anthropic Claude Opus 4.6 for multi-file Android engineering.",
-            contextWindow = "200K ctx",
-        ),
         AiModelOption(
             id = "claude-sonnet-4-6",
             provider = AiProvider.CLAUDE,
             label = "Claude Sonnet 4.6",
             badge = "Claude 4.6",
             description = "Fast, flagship Claude Sonnet 4.6 coding agent.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
+            id = "claude-opus-4-6",
+            provider = AiProvider.CLAUDE,
+            label = "Claude Opus 4.6",
+            badge = "Claude 4.6",
+            description = "Flagship Anthropic Claude Opus 4.6 for multi-file Android engineering.",
             contextWindow = "200K ctx",
         ),
         AiModelOption(
@@ -821,6 +764,22 @@ object AiModelsCatalog {
             contextWindow = "1M ctx",
         ),
         AiModelOption(
+            id = "anthropic/claude-sonnet-4.6",
+            provider = AiProvider.OPENROUTER,
+            label = "Claude Sonnet 4.6 (OR)",
+            badge = "Claude",
+            description = "Anthropic Claude Sonnet 4.6 routed via OpenRouter.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
+            id = "anthropic/claude-opus-4.6",
+            provider = AiProvider.OPENROUTER,
+            label = "Claude Opus 4.6 (OR)",
+            badge = "Claude",
+            description = "Anthropic Claude Opus 4.6 routed via OpenRouter.",
+            contextWindow = "200K ctx",
+        ),
+        AiModelOption(
             id = "anthropic/claude-opus-4.5",
             provider = AiProvider.OPENROUTER,
             label = "Claude Opus 4.5 (OR)",
@@ -1001,7 +960,67 @@ object AiModelsCatalog {
     fun normalizeModelId(provider: AiProvider, rawModelId: String?): String {
         val cleaned = rawModelId.orEmpty().trim().removePrefix("models/")
         if (cleaned.isEmpty()) return provider.defaultModelId
-        return cleaned
+        val lower = cleaned.lowercase()
+        return when (provider) {
+            AiProvider.OPENAI -> when (lower) {
+                "gpt-6-astra" -> "gpt-5"
+                "gpt-6.1-sol", "gpt-6.1-terra" -> "gpt-5.1"
+                else -> cleaned
+            }
+            AiProvider.CLAUDE -> when (lower) {
+                "claude-opus-5-5" -> "claude-opus-4-6"
+                "claude-sonnet-5-5" -> "claude-sonnet-4-6"
+                "claude-haiku-5-5" -> "claude-haiku-4-5"
+                "claude-fable-5-2" -> "claude-sonnet-4-5"
+                else -> cleaned
+            }
+            else -> cleaned
+        }
+    }
+
+    fun toOpenRouterSlug(
+        provider: AiProvider,
+        rawModelId: String,
+        liveOpenRouterModels: List<AiModelOption> = emptyList(),
+    ): String {
+        val normalized = normalizeModelId(provider, rawModelId)
+        if (normalized.contains('/')) return normalized
+        val liveOr = liveOpenRouterModels.filter { it.provider == AiProvider.OPENROUTER }
+        return when (provider) {
+            AiProvider.OPENAI -> {
+                val candidate = "openai/$normalized"
+                liveOr.firstOrNull { it.id.equals(candidate, ignoreCase = true) }?.id
+                    ?: liveOr.firstOrNull {
+                        val id = it.id.lowercase()
+                        id.startsWith("openai/") && id.removePrefix("openai/").startsWith(normalized.lowercase())
+                    }?.id
+                    ?: candidate
+            }
+            AiProvider.CLAUDE -> {
+                val stripped = normalized
+                    .lowercase()
+                    .removeSuffix("-latest")
+                    .replace(Regex("-20\\d{6}$"), "")
+                val dotSlug = stripped
+                    .replace(Regex("-(\\d+)-(\\d+)(-|$)")) { m -> "-${m.groupValues[1]}.${m.groupValues[2]}${m.groupValues[3]}" }
+                val candidates = listOf(
+                    "anthropic/$dotSlug",
+                    "anthropic/$stripped",
+                    "anthropic/$normalized",
+                ).distinct()
+                candidates.firstNotNullOfOrNull { cand ->
+                    liveOr.firstOrNull { it.id.equals(cand, ignoreCase = true) }?.id
+                } ?: liveOr.firstOrNull {
+                    val id = it.id.lowercase()
+                    id.startsWith("anthropic/") && (id.contains(dotSlug) || id.contains(stripped))
+                }?.id ?: candidates.first()
+            }
+            AiProvider.GEMINI -> {
+                val candidate = "google/$normalized"
+                liveOr.firstOrNull { it.id.equals(candidate, ignoreCase = true) }?.id ?: candidate
+            }
+            AiProvider.OPENROUTER -> normalized
+        }
     }
 
     fun isOpenRouterMetaRouter(modelId: String): Boolean {
@@ -1213,11 +1232,13 @@ object AiModelsCatalog {
                     ),
                 ).take(6)
                 prioritizedLive + listOf(
+                    "claude-sonnet-4-6",
                     "claude-sonnet-4-5",
+                    "claude-haiku-4-5",
                     "claude-sonnet-4-20250514",
                     "claude-3-7-sonnet-latest",
-                    "claude-haiku-4-5",
                     "claude-3-5-sonnet-latest",
+                    "claude-3-haiku-20240307",
                 )
             }
             AiProvider.OPENROUTER -> {
@@ -1243,7 +1264,7 @@ object AiModelsCatalog {
                         ),
                     )
                     .map { it.id }
-                    .take(4)
+                    .take(6)
 
                 if (isFreeOpenRouterModel(cleanPrimary)) {
                     // Try capable named free models first; keep openrouter/free as last-resort free fallback and NEVER enter paid models.
@@ -1256,7 +1277,29 @@ object AiModelsCatalog {
                     }
                     fallbackFree + listOf("openrouter/free")
                 } else {
-                    val paidPool = if (livePaid.isNotEmpty()) {
+                    val primaryVendor = cleanPrimary.lowercase().substringBefore('/', "")
+                    val vendorSamePaid = if (primaryVendor == "anthropic" || primaryVendor == "openai") {
+                        livePaid.filter { it.lowercase().startsWith("$primaryVendor/") } +
+                            when (primaryVendor) {
+                                "anthropic" -> listOf(
+                                    "anthropic/claude-sonnet-4.5",
+                                    "anthropic/claude-sonnet-4",
+                                    "anthropic/claude-haiku-4.5",
+                                    "anthropic/claude-3.7-sonnet",
+                                    "anthropic/claude-3.5-sonnet",
+                                )
+                                "openai" -> listOf(
+                                    "openai/gpt-5-mini",
+                                    "openai/gpt-4.1",
+                                    "openai/gpt-4o",
+                                    "openai/gpt-4o-mini",
+                                )
+                                else -> emptyList()
+                            }
+                    } else {
+                        emptyList()
+                    }
+                    val paidPool = (vendorSamePaid + if (livePaid.isNotEmpty()) {
                         livePaid
                     } else {
                         listOf(
@@ -1264,7 +1307,7 @@ object AiModelsCatalog {
                             "openai/gpt-4o-mini",
                             "anthropic/claude-3.7-sonnet",
                         )
-                    }
+                    }).distinct()
                     val freePool = if (liveFree.isNotEmpty()) {
                         liveFree.take(4)
                     } else {

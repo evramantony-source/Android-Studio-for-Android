@@ -1465,7 +1465,26 @@ class LiveVmSession internal constructor(
                     else recv.substring(s)
                 }
                 "charAt" -> recv.getOrNull(toInt(args.getOrNull(0))) ?: '\u0000'
+                "indexOf" -> {
+                    val needle = args.getOrNull(0)?.toString().orEmpty()
+                    val from = if (args.size >= 2) toInt(args[1]) else 0
+                    recv.indexOf(needle, from)
+                }
+                "lastIndexOf" -> {
+                    val needle = args.getOrNull(0)?.toString().orEmpty()
+                    if (args.size >= 2) recv.lastIndexOf(needle, toInt(args[1])) else recv.lastIndexOf(needle)
+                }
                 "replace" -> recv.replace(args.getOrNull(0)?.toString().orEmpty(), args.getOrNull(1)?.toString().orEmpty())
+                "replaceAll" -> {
+                    val regex = args.getOrNull(0)?.toString().orEmpty()
+                    val repl = args.getOrNull(1)?.toString().orEmpty()
+                    runCatching { recv.replace(Regex(regex), repl) }.getOrDefault(recv)
+                }
+                "matches" -> {
+                    val regex = args.getOrNull(0)?.toString().orEmpty()
+                    runCatching { Regex(regex).matches(recv) }.getOrDefault(false)
+                }
+                "toString" -> recv
                 "split" -> {
                     val sep = args.getOrNull(0)?.toString() ?: ","
                     runCatching { recv.split(Regex(sep)).toTypedArray() }
@@ -1582,7 +1601,7 @@ class LiveVmSession internal constructor(
                 else -> null
             }
             is VmObject -> invokeAndroidObjectMethod(recv, name, args)
-            else -> null
+            else -> if (name == "toString") recv.toString() else null
         }
     }
 
@@ -2453,12 +2472,12 @@ private class JavaVmParser(src: String) {
 
     fun parseFile(): List<VmClass> {
         while (!at(TokKind.EOF)) {
-            if (peek().text == "package" || peek().text == "import") {
-                while (!at(TokKind.EOF) && peek().text != ";") advance()
+            if (atIdent("package") || atIdent("import")) {
+                while (!at(TokKind.EOF) && !atSym(";")) advance()
                 match(";")
                 continue
             }
-            if (peek().text == "@") {
+            if (atSym("@")) {
                 skipAnnotation()
                 continue
             }
@@ -2473,9 +2492,9 @@ private class JavaVmParser(src: String) {
 
     private fun skipModifiersAndAnnotations() {
         while (!at(TokKind.EOF)) {
-            if (peek().text == "@") {
+            if (atSym("@")) {
                 skipAnnotation()
-            } else if (peek().text in MODIFIERS) {
+            } else if (peek().kind == TokKind.IDENT && peek().text in MODIFIERS) {
                 advance()
             } else {
                 break
@@ -2492,9 +2511,11 @@ private class JavaVmParser(src: String) {
         if (match("(")) {
             var depth = 1
             while (!at(TokKind.EOF) && depth > 0) {
-                val t = advance().text
-                if (t == "(") depth++
-                else if (t == ")") depth--
+                val tok = advance()
+                if (tok.kind == TokKind.SYMBOL) {
+                    if (tok.text == "(") depth++
+                    else if (tok.text == ")") depth--
+                }
             }
         }
     }
@@ -2502,37 +2523,41 @@ private class JavaVmParser(src: String) {
     private fun isClassStart(): Boolean {
         var i = pos
         while (i < tokens.size) {
-            val t = tokens[i].text
-            if (t == "@") {
+            val tok = tokens[i]
+            val t = tok.text
+            if (tok.kind == TokKind.SYMBOL && t == "@") {
                 i++
                 if (i < tokens.size && tokens[i].kind == TokKind.IDENT) i++
-                while (i < tokens.size && tokens[i].text == ".") {
+                while (i < tokens.size && tokens[i].kind == TokKind.SYMBOL && tokens[i].text == ".") {
                     i += 2
                 }
-                if (i < tokens.size && tokens[i].text == "(") {
+                if (i < tokens.size && tokens[i].kind == TokKind.SYMBOL && tokens[i].text == "(") {
                     var d = 1
                     i++
                     while (i < tokens.size && d > 0) {
-                        if (tokens[i].text == "(") d++ else if (tokens[i].text == ")") d--
+                        val inner = tokens[i]
+                        if (inner.kind == TokKind.SYMBOL) {
+                            if (inner.text == "(") d++ else if (inner.text == ")") d--
+                        }
                         i++
                     }
                 }
                 continue
             }
-            if (t in MODIFIERS) {
+            if (tok.kind == TokKind.IDENT && t in MODIFIERS) {
                 i++
                 continue
             }
-            return t == "class" || t == "interface" || t == "enum"
+            return tok.kind == TokKind.IDENT && (t == "class" || t == "interface" || t == "enum")
         }
         return false
     }
 
     private fun parseClass(): VmClass {
         skipModifiersAndAnnotations()
-        if (peek().text == "class" || peek().text == "interface" || peek().text == "enum") advance()
+        if (atIdent("class") || atIdent("interface") || atIdent("enum")) advance()
         val className = if (at(TokKind.IDENT)) advance().text else "Anonymous"
-        if (peek().text == "<") skipBalanced("<", ">")
+        if (atSym("<")) skipBalanced("<", ">")
         var superName: String? = null
         if (match("extends")) {
             superName = parseTypeName().substringAfterLast('.')
@@ -2546,69 +2571,69 @@ private class JavaVmParser(src: String) {
         val methods = mutableListOf<VmMethod>()
 
         match("{")
-        while (!at(TokKind.EOF) && peek().text != "}") {
+        while (!at(TokKind.EOF) && !atSym("}")) {
             if (match(";")) continue
             if (isClassStart()) {
                 parseClass()
                 continue
             }
-            if (peek().text == "static" && tokens.getOrNull(pos + 1)?.text == "{") {
+            if (atIdent("static") && tokens.getOrNull(pos + 1)?.let { it.kind == TokKind.SYMBOL && it.text == "{" } == true) {
                 advance()
                 parseBlock()
                 continue
             }
-            if (peek().text == "{") {
+            if (atSym("{")) {
                 parseBlock()
                 continue
             }
             var isStatic = false
-            while (peek().text in MODIFIERS || peek().text == "@") {
-                if (peek().text == "@") skipAnnotation()
+            while ((peek().kind == TokKind.IDENT && peek().text in MODIFIERS) || atSym("@")) {
+                if (atSym("@")) skipAnnotation()
                 else {
                     if (peek().text == "static") isStatic = true
                     advance()
                 }
             }
-            if (peek().text == "<") skipBalanced("<", ">")
+            if (atSym("<")) skipBalanced("<", ">")
 
             // Constructor check: Ident(...)
-            if (at(TokKind.IDENT) && peek().text == className && tokens.getOrNull(pos + 1)?.text == "(") {
+            if (at(TokKind.IDENT) && peek().text == className && tokens.getOrNull(pos + 1)?.let { it.kind == TokKind.SYMBOL && it.text == "(" } == true) {
                 advance()
                 val params = parseParamList()
                 if (match("throws")) {
                     parseTypeName(); while (match(",")) parseTypeName()
                 }
-                val body = if (peek().text == "{") parseBlock() else { match(";"); emptyList() }
+                val body = if (atSym("{")) parseBlock() else { match(";"); emptyList() }
                 ctors.add(VmMethod(className, className, params, body, false))
                 continue
             }
 
             val memberType = parseTypeName()
             if (!at(TokKind.IDENT)) {
-                while (!at(TokKind.EOF) && peek().text != ";" && peek().text != "}") advance()
+                while (!at(TokKind.EOF) && !atSym(";") && !atSym("}")) advance()
                 match(";")
                 continue
             }
             val memberName = advance().text
-            if (peek().text == "(") {
+            if (atSym("(")) {
                 val params = parseParamList()
                 if (match("throws")) {
                     parseTypeName(); while (match(",")) parseTypeName()
                 }
-                val body = if (peek().text == "{") parseBlock() else { match(";"); emptyList() }
+                val body = if (atSym("{")) parseBlock() else { match(";"); emptyList() }
                 methods.add(VmMethod(memberName, memberType, params, body, isStatic))
             } else {
                 // One or more field declarations separated by commas
                 while (true) {
                     val init = if (match("=")) {
-                        if (peek().text == "{") parseArrayInit() else parseExpr()
+                        if (atSym("{")) parseArrayInit() else parseExpr()
                     } else null
                     fields.add(VmField(memberType, memberName, isStatic, init))
                     if (!match(",")) break
                     if (at(TokKind.IDENT)) {
                         val nextName = advance().text
                         val nextInit = if (match("=")) {
-                            if (peek().text == "{") parseArrayInit() else parseExpr()
+                            if (atSym("{")) parseArrayInit() else parseExpr()
                         } else null
                         fields.add(VmField(memberType, nextName, isStatic, nextInit))
                     }
@@ -2626,9 +2651,9 @@ private class JavaVmParser(src: String) {
     private fun parseParamList(): List<Pair<String, String>> {
         val params = mutableListOf<Pair<String, String>>()
         match("(")
-        while (!at(TokKind.EOF) && peek().text != ")") {
-            while (peek().text in MODIFIERS || peek().text == "@") {
-                if (peek().text == "@") skipAnnotation() else advance()
+        while (!at(TokKind.EOF) && !atSym(")")) {
+            while ((peek().kind == TokKind.IDENT && peek().text in MODIFIERS) || atSym("@")) {
+                if (atSym("@")) skipAnnotation() else advance()
             }
             val pType = parseTypeName()
             match("...")
@@ -2648,7 +2673,7 @@ private class JavaVmParser(src: String) {
             sb.append('.')
             if (at(TokKind.IDENT)) sb.append(advance().text)
         }
-        if (peek().text == "<") skipBalanced("<", ">")
+        if (atSym("<")) skipBalanced("<", ">")
         while (match("[")) {
             match("]")
             sb.append("[]")
@@ -2665,7 +2690,7 @@ private class JavaVmParser(src: String) {
         }
         parseDepth++
         try {
-            while (!at(TokKind.EOF) && peek().text != "}") {
+            while (!at(TokKind.EOF) && !atSym("}")) {
                 val before = pos
                 out.add(parseStmt())
                 if (pos == before) advance()
@@ -2679,17 +2704,17 @@ private class JavaVmParser(src: String) {
 
     private fun parseStmt(): VmStmt {
         if (parseDepth >= maxParseDepth) {
-            if (!at(TokKind.EOF) && peek().text != "}") advance()
+            if (!at(TokKind.EOF) && !atSym("}")) advance()
             return VmStmt.Empty
         }
         parseDepth++
         try {
-        return when (peek().text) {
+        return when (peekNonLiteralText()) {
             "{" -> VmStmt.Block(parseBlock())
             ";" -> { advance(); VmStmt.Empty }
             "return" -> {
                 advance()
-                val e = if (peek().text != ";") parseExpr() else null
+                val e = if (!atSym(";")) parseExpr() else null
                 match(";")
                 VmStmt.Return(e)
             }
@@ -2740,7 +2765,7 @@ private class JavaVmParser(src: String) {
             }
             "throw" -> {
                 advance()
-                if (peek().text != ";") parseExpr()
+                if (!atSym(";")) parseExpr()
                 match(";")
                 VmStmt.Empty
             }
@@ -2765,7 +2790,7 @@ private class JavaVmParser(src: String) {
         // Check enhanced for: for (Type name : iterable)
         val saved = pos
         if (looksLikeForEach()) {
-            while (peek().text in MODIFIERS) advance()
+            while (peek().kind == TokKind.IDENT && peek().text in MODIFIERS) advance()
             parseTypeName()
             val vName = advance().text
             match(":")
@@ -2776,7 +2801,7 @@ private class JavaVmParser(src: String) {
         }
         pos = saved
         val init: VmStmt? = when {
-            peek().text == ";" -> { advance(); null }
+            atSym(";") -> { advance(); null }
             looksLikeVarDecl() -> parseVarDeclStmt(consumeSemi = true)
             else -> {
                 val e = parseExpr()
@@ -2784,10 +2809,10 @@ private class JavaVmParser(src: String) {
                 VmStmt.ExprStmt(e)
             }
         }
-        val cond = if (peek().text != ";") parseExpr() else null
+        val cond = if (!atSym(";")) parseExpr() else null
         match(";")
         val updates = mutableListOf<VmExpr>()
-        while (!at(TokKind.EOF) && peek().text != ")") {
+        while (!at(TokKind.EOF) && !atSym(")")) {
             updates.add(parseExpr())
             if (!match(",")) break
         }
@@ -2798,19 +2823,26 @@ private class JavaVmParser(src: String) {
 
     private fun looksLikeForEach(): Boolean {
         var i = pos
-        while (i < tokens.size && tokens[i].text in MODIFIERS) i++
+        while (i < tokens.size && tokens[i].kind == TokKind.IDENT && tokens[i].text in MODIFIERS) i++
         if (i >= tokens.size || tokens[i].kind != TokKind.IDENT) return false
         i++
-        while (i < tokens.size && tokens[i].text == ".") i += 2
-        if (i < tokens.size && tokens[i].text == "<") {
+        while (i < tokens.size && tokens[i].kind == TokKind.SYMBOL && tokens[i].text == ".") i += 2
+        if (i < tokens.size && tokens[i].kind == TokKind.SYMBOL && tokens[i].text == "<") {
             var d = 1; i++
             while (i < tokens.size && d > 0) {
-                if (tokens[i].text == "<") d++ else if (tokens[i].text == ">") d--
+                val tok = tokens[i]
+                if (tok.kind == TokKind.SYMBOL) {
+                    if (tok.text == "<") d++ else if (tok.text == ">") d--
+                }
                 i++
             }
         }
-        while (i + 1 < tokens.size && tokens[i].text == "[" && tokens[i + 1].text == "]") i += 2
-        if (i < tokens.size && tokens[i].kind == TokKind.IDENT && tokens.getOrNull(i + 1)?.text == ":") {
+        while (i + 1 < tokens.size && tokens[i].kind == TokKind.SYMBOL && tokens[i].text == "[" &&
+            tokens[i + 1].kind == TokKind.SYMBOL && tokens[i + 1].text == "]"
+        ) i += 2
+        if (i < tokens.size && tokens[i].kind == TokKind.IDENT &&
+            tokens.getOrNull(i + 1)?.let { it.kind == TokKind.SYMBOL && it.text == ":" } == true
+        ) {
             return true
         }
         return false
@@ -2823,9 +2855,9 @@ private class JavaVmParser(src: String) {
         match(")")
         match("{")
         val arms = mutableListOf<VmStmt.SwitchArm>()
-        while (!at(TokKind.EOF) && peek().text != "}") {
+        while (!at(TokKind.EOF) && !atSym("}")) {
             val labels = mutableListOf<VmExpr>()
-            while (peek().text == "case" || peek().text == "default") {
+            while (atIdent("case") || atIdent("default")) {
                 if (match("case")) {
                     labels.add(parseExpr())
                     while (match(",")) labels.add(parseExpr())
@@ -2838,7 +2870,7 @@ private class JavaVmParser(src: String) {
                 }
             }
             val stmts = mutableListOf<VmStmt>()
-            while (!at(TokKind.EOF) && peek().text != "}" && peek().text != "case" && peek().text != "default") {
+            while (!at(TokKind.EOF) && !atSym("}") && !atIdent("case") && !atIdent("default")) {
                 stmts.add(parseStmt())
             }
             arms.add(VmStmt.SwitchArm(labels, stmts))
@@ -2849,39 +2881,44 @@ private class JavaVmParser(src: String) {
 
     private fun looksLikeVarDecl(): Boolean {
         var i = pos
-        while (i < tokens.size && tokens[i].text in MODIFIERS) i++
+        while (i < tokens.size && tokens[i].kind == TokKind.IDENT && tokens[i].text in MODIFIERS) i++
         if (i >= tokens.size || tokens[i].kind != TokKind.IDENT) return false
         val first = tokens[i].text
         if (first in KEYWORDS_NON_TYPE) return false
         i++
-        while (i < tokens.size && tokens[i].text == ".") {
+        while (i < tokens.size && tokens[i].kind == TokKind.SYMBOL && tokens[i].text == ".") {
             i++
             if (i < tokens.size && tokens[i].kind == TokKind.IDENT) i++ else return false
         }
-        if (i < tokens.size && tokens[i].text == "<") {
+        if (i < tokens.size && tokens[i].kind == TokKind.SYMBOL && tokens[i].text == "<") {
             var d = 1; i++
             while (i < tokens.size && d > 0) {
-                if (tokens[i].text == "<") d++ else if (tokens[i].text == ">") d--
+                val tok = tokens[i]
+                if (tok.kind == TokKind.SYMBOL) {
+                    if (tok.text == "<") d++ else if (tok.text == ">") d--
+                }
                 i++
             }
         }
-        while (i + 1 < tokens.size && tokens[i].text == "[" && tokens[i + 1].text == "]") i += 2
+        while (i + 1 < tokens.size && tokens[i].kind == TokKind.SYMBOL && tokens[i].text == "[" &&
+            tokens[i + 1].kind == TokKind.SYMBOL && tokens[i + 1].text == "]"
+        ) i += 2
         if (i >= tokens.size || tokens[i].kind != TokKind.IDENT) return false
         val varName = tokens[i].text
         if (varName in KEYWORDS_ALL) return false
-        val after = tokens.getOrNull(i + 1)?.text
-        return after == "=" || after == ";" || after == ","
+        val after = tokens.getOrNull(i + 1) ?: return false
+        return after.kind == TokKind.SYMBOL && (after.text == "=" || after.text == ";" || after.text == ",")
     }
 
     private fun parseVarDeclStmt(consumeSemi: Boolean): VmStmt.VarDecl {
-        while (peek().text in MODIFIERS) advance()
+        while (peek().kind == TokKind.IDENT && peek().text in MODIFIERS) advance()
         val type = parseTypeName()
         val decls = mutableListOf<Pair<String, VmExpr?>>()
         while (true) {
             val name = if (at(TokKind.IDENT)) advance().text else break
             while (match("[")) match("]")
             val init = if (match("=")) {
-                if (peek().text == "{") parseArrayInit() else parseExpr()
+                if (atSym("{")) parseArrayInit() else parseExpr()
             } else null
             decls.add(name to init)
             if (!match(",")) break
@@ -2905,11 +2942,11 @@ private class JavaVmParser(src: String) {
 
     private fun parseAssignment(): VmExpr {
         val lhs = parseTernary()
-        val op = peek().text
-        if (op in ASSIGN_OPS) {
+        val tok = peek()
+        if (tok.kind == TokKind.SYMBOL && tok.text in ASSIGN_OPS) {
             advance()
             val rhs = parseAssignment()
-            return VmExpr.Assign(lhs, op, rhs)
+            return VmExpr.Assign(lhs, tok.text, rhs)
         }
         return lhs
     }
@@ -2957,7 +2994,7 @@ private class JavaVmParser(src: String) {
 
     private fun parseEquality(): VmExpr {
         var left = parseRelational()
-        while (peek().text == "==" || peek().text == "!=") {
+        while (atSym("==") || atSym("!=")) {
             val op = advance().text
             left = VmExpr.Binary(op, left, parseRelational())
         }
@@ -2967,9 +3004,8 @@ private class JavaVmParser(src: String) {
     private fun parseRelational(): VmExpr {
         var left = parseShift()
         while (true) {
-            val op = peek().text
-            if (op == "<" || op == "<=" || op == ">" || op == ">=") {
-                advance()
+            if (atSym("<") || atSym("<=") || atSym(">") || atSym(">=")) {
+                val op = advance().text
                 left = VmExpr.Binary(op, left, parseShift())
             } else if (match("instanceof")) {
                 val tName = parseTypeName().substringAfterLast('.')
@@ -2983,7 +3019,7 @@ private class JavaVmParser(src: String) {
 
     private fun parseShift(): VmExpr {
         var left = parseAdd()
-        while (peek().text in listOf("<<", ">>", ">>>")) {
+        while (peek().kind == TokKind.SYMBOL && peek().text in listOf("<<", ">>", ">>>")) {
             val op = advance().text
             left = VmExpr.Binary(op, left, parseAdd())
         }
@@ -2992,7 +3028,7 @@ private class JavaVmParser(src: String) {
 
     private fun parseAdd(): VmExpr {
         var left = parseMul()
-        while (peek().text == "+" || peek().text == "-") {
+        while (atSym("+") || atSym("-")) {
             val op = advance().text
             left = VmExpr.Binary(op, left, parseMul())
         }
@@ -3001,7 +3037,7 @@ private class JavaVmParser(src: String) {
 
     private fun parseMul(): VmExpr {
         var left = parseUnary()
-        while (peek().text == "*" || peek().text == "/" || peek().text == "%") {
+        while (atSym("*") || atSym("/") || atSym("%")) {
             val op = advance().text
             left = VmExpr.Binary(op, left, parseUnary())
         }
@@ -3009,12 +3045,12 @@ private class JavaVmParser(src: String) {
     }
 
     private fun parseUnary(): VmExpr {
-        val op = peek().text
-        if (op == "!" || op == "-" || op == "+" || op == "~" || op == "++" || op == "--") {
+        val tok = peek()
+        if (tok.kind == TokKind.SYMBOL && tok.text in UNARY_OPS) {
             advance()
-            return VmExpr.Unary(op, parseUnary())
+            return VmExpr.Unary(tok.text, parseUnary())
         }
-        if (peek().text == "(" && looksLikeCast()) {
+        if (atSym("(") && looksLikeCast()) {
             advance()
             val targetType = parseTypeName().substringAfterLast('.')
             match(")")
@@ -3024,32 +3060,39 @@ private class JavaVmParser(src: String) {
     }
 
     private fun looksLikeCast(): Boolean {
-        if (peek().text != "(") return false
+        if (!atSym("(")) return false
         var i = pos + 1
         if (i >= tokens.size || tokens[i].kind != TokKind.IDENT) return false
         val first = tokens[i].text
         if (first in PRIMITIVE_TYPES) {
             i++
-            while (i + 1 < tokens.size && tokens[i].text == "[" && tokens[i + 1].text == "]") i += 2
-            return tokens.getOrNull(i)?.text == ")"
+            while (i + 1 < tokens.size && tokens[i].kind == TokKind.SYMBOL && tokens[i].text == "[" &&
+                tokens[i + 1].kind == TokKind.SYMBOL && tokens[i + 1].text == "]"
+            ) i += 2
+            return tokens.getOrNull(i)?.let { it.kind == TokKind.SYMBOL && it.text == ")" } == true
         }
         // Simple Reference cast like (TextView) findViewById(...)
-        while (i < tokens.size && tokens[i].text == ".") i += 2
+        while (i < tokens.size && tokens[i].kind == TokKind.SYMBOL && tokens[i].text == ".") i += 2
         if (i < tokens.size && tokens[i].kind == TokKind.IDENT) i++ else return false
-        while (i + 1 < tokens.size && tokens[i].text == "[" && tokens[i + 1].text == "]") i += 2
-        if (tokens.getOrNull(i)?.text != ")") return false
+        while (i + 1 < tokens.size && tokens[i].kind == TokKind.SYMBOL && tokens[i].text == "[" &&
+            tokens[i + 1].kind == TokKind.SYMBOL && tokens[i + 1].text == "]"
+        ) i += 2
+        val closeTok = tokens.getOrNull(i)
+        if (closeTok?.kind != TokKind.SYMBOL || closeTok.text != ")") return false
         val afterClose = tokens.getOrNull(i + 1) ?: return false
-        return afterClose.kind == TokKind.IDENT || afterClose.text == "(" || afterClose.text == "this" || afterClose.kind == TokKind.INT
+        return afterClose.kind == TokKind.IDENT ||
+            afterClose.kind == TokKind.INT ||
+            (afterClose.kind == TokKind.SYMBOL && afterClose.text == "(")
     }
 
     private fun parsePostfix(): VmExpr {
         var expr = parsePrimary()
         while (true) {
-            when (peek().text) {
+            when (peekSymText()) {
                 "." -> {
                     advance()
                     val name = if (at(TokKind.IDENT)) advance().text else ""
-                    if (peek().text == "(") {
+                    if (atSym("(")) {
                         val args = parseArgList()
                         expr = VmExpr.Call(expr, name, args)
                     } else {
@@ -3079,62 +3122,66 @@ private class JavaVmParser(src: String) {
 
     private fun parsePrimary(): VmExpr {
         val tok = peek()
+        // Always handle literal tokens by TokKind first so literal text (like "-" or "(") can never look like syntax.
+        when (tok.kind) {
+            TokKind.INT -> { advance(); return VmExpr.Literal(parseIntToken(tok.text)) }
+            TokKind.LONG -> { advance(); return VmExpr.Literal(parseLongToken(tok.text)) }
+            TokKind.FLOAT -> { advance(); return VmExpr.Literal(tok.text.dropLast(1).toFloatOrNull() ?: 0f) }
+            TokKind.DOUBLE -> { advance(); return VmExpr.Literal(tok.text.removeSuffix("d").removeSuffix("D").toDoubleOrNull() ?: 0.0) }
+            TokKind.STRING -> { advance(); return VmExpr.Literal(tok.text) }
+            TokKind.CHAR -> { advance(); return VmExpr.Literal(tok.text.firstOrNull() ?: '\u0000') }
+            else -> Unit
+        }
         // Lambda? (params) -> body
-        if (tok.text == "(" && looksLikeLambda()) {
+        if (atSym("(") && looksLikeLambda()) {
             return parseLambda()
         }
-        if (tok.kind == TokKind.IDENT && tokens.getOrNull(pos + 1)?.text == "->") {
+        if (tok.kind == TokKind.IDENT && tokens.getOrNull(pos + 1)?.let { it.kind == TokKind.SYMBOL && it.text == "->" } == true) {
             val pName = advance().text
             advance() // ->
-            val body = if (peek().text == "{") VmStmt.Block(parseBlock()) else VmStmt.Return(parseExpr())
+            val body = if (atSym("{")) VmStmt.Block(parseBlock()) else VmStmt.Return(parseExpr())
             return VmExpr.Lambda(listOf(pName), body)
         }
-        return when {
-            tok.kind == TokKind.INT -> { advance(); VmExpr.Literal(parseIntToken(tok.text)) }
-            tok.kind == TokKind.LONG -> { advance(); VmExpr.Literal(parseLongToken(tok.text)) }
-            tok.kind == TokKind.FLOAT -> { advance(); VmExpr.Literal(tok.text.dropLast(1).toFloatOrNull() ?: 0f) }
-            tok.kind == TokKind.DOUBLE -> { advance(); VmExpr.Literal(tok.text.removeSuffix("d").removeSuffix("D").toDoubleOrNull() ?: 0.0) }
-            tok.kind == TokKind.STRING -> { advance(); VmExpr.Literal(tok.text) }
-            tok.kind == TokKind.CHAR -> { advance(); VmExpr.Literal(tok.text.firstOrNull() ?: '\u0000') }
-            tok.text == "true" -> { advance(); VmExpr.Literal(true) }
-            tok.text == "false" -> { advance(); VmExpr.Literal(false) }
-            tok.text == "null" -> { advance(); VmExpr.Literal(null) }
-            tok.text == "this" -> { advance(); VmExpr.This }
-            tok.text == "new" -> parseNewExpr()
-            tok.text == "(" -> {
-                advance()
-                val e = parseExpr()
-                match(")")
-                e
-            }
-            tok.kind == TokKind.IDENT -> {
-                advance()
-                VmExpr.Ident(tok.text)
-            }
-            else -> {
-                advance()
-                VmExpr.Literal(null)
+        if (tok.kind == TokKind.IDENT) {
+            return when (tok.text) {
+                "true" -> { advance(); VmExpr.Literal(true) }
+                "false" -> { advance(); VmExpr.Literal(false) }
+                "null" -> { advance(); VmExpr.Literal(null) }
+                "this" -> { advance(); VmExpr.This }
+                "new" -> parseNewExpr()
+                else -> { advance(); VmExpr.Ident(tok.text) }
             }
         }
+        if (atSym("(")) {
+            advance()
+            val e = parseExpr()
+            match(")")
+            return e
+        }
+        advance()
+        return VmExpr.Literal(null)
     }
 
     private fun looksLikeLambda(): Boolean {
         var i = pos + 1
         var depth = 1
         while (i < tokens.size && depth > 0) {
-            if (tokens[i].text == "(") depth++
-            else if (tokens[i].text == ")") depth--
+            val tok = tokens[i]
+            if (tok.kind == TokKind.SYMBOL) {
+                if (tok.text == "(") depth++
+                else if (tok.text == ")") depth--
+            }
             i++
         }
-        return tokens.getOrNull(i)?.text == "->"
+        return tokens.getOrNull(i)?.let { it.kind == TokKind.SYMBOL && it.text == "->" } == true
     }
 
     private fun parseLambda(): VmExpr.Lambda {
         match("(")
         val params = mutableListOf<String>()
-        while (!at(TokKind.EOF) && peek().text != ")") {
+        while (!at(TokKind.EOF) && !atSym(")")) {
             val first = if (at(TokKind.IDENT)) advance().text else break
-            if (at(TokKind.IDENT) && peek().text != "," && peek().text != ")") {
+            if (at(TokKind.IDENT) && !atSym(",") && !atSym(")")) {
                 params.add(advance().text)
             } else {
                 params.add(first)
@@ -3143,7 +3190,7 @@ private class JavaVmParser(src: String) {
         }
         match(")")
         match("->")
-        val body = if (peek().text == "{") VmStmt.Block(parseBlock()) else VmStmt.Return(parseExpr())
+        val body = if (atSym("{")) VmStmt.Block(parseBlock()) else VmStmt.Return(parseExpr())
         return VmExpr.Lambda(params, body)
     }
 
@@ -3155,21 +3202,21 @@ private class JavaVmParser(src: String) {
             typeSb.append('.')
             if (at(TokKind.IDENT)) typeSb.append(advance().text)
         }
-        if (peek().text == "<") skipBalanced("<", ">")
+        if (atSym("<")) skipBalanced("<", ">")
         val typeName = typeSb.toString()
 
-        if (peek().text == "[") {
+        if (atSym("[")) {
             val dims = mutableListOf<VmExpr>()
             while (match("[")) {
-                if (peek().text != "]") dims.add(parseExpr())
+                if (!atSym("]")) dims.add(parseExpr())
                 match("]")
             }
-            val init = if (peek().text == "{") parseArrayInit() else null
+            val init = if (atSym("{")) parseArrayInit() else null
             return VmExpr.NewArray(typeName, dims, init)
         }
-        val args = if (peek().text == "(") parseArgList() else emptyList()
+        val args = if (atSym("(")) parseArgList() else emptyList()
         var anonMethods: List<VmMethod>? = null
-        if (peek().text == "{") {
+        if (atSym("{")) {
             val dummyCls = parseAnonymousClassBody()
             anonMethods = dummyCls
         }
@@ -3179,24 +3226,24 @@ private class JavaVmParser(src: String) {
     private fun parseAnonymousClassBody(): List<VmMethod> {
         val methods = mutableListOf<VmMethod>()
         match("{")
-        while (!at(TokKind.EOF) && peek().text != "}") {
+        while (!at(TokKind.EOF) && !atSym("}")) {
             if (match(";")) continue
-            while (peek().text in MODIFIERS || peek().text == "@") {
-                if (peek().text == "@") skipAnnotation() else advance()
+            while ((peek().kind == TokKind.IDENT && peek().text in MODIFIERS) || atSym("@")) {
+                if (atSym("@")) skipAnnotation() else advance()
             }
             val rType = parseTypeName()
             if (!at(TokKind.IDENT)) {
-                while (!at(TokKind.EOF) && peek().text != ";" && peek().text != "}") advance()
+                while (!at(TokKind.EOF) && !atSym(";") && !atSym("}")) advance()
                 match(";")
                 continue
             }
             val mName = advance().text
-            if (peek().text == "(") {
+            if (atSym("(")) {
                 val params = parseParamList()
-                val body = if (peek().text == "{") parseBlock() else { match(";"); emptyList() }
+                val body = if (atSym("{")) parseBlock() else { match(";"); emptyList() }
                 methods.add(VmMethod(mName, rType, params, body, false))
             } else {
-                while (!at(TokKind.EOF) && peek().text != ";" && peek().text != "}") advance()
+                while (!at(TokKind.EOF) && !atSym(";") && !atSym("}")) advance()
                 match(";")
             }
         }
@@ -3207,8 +3254,8 @@ private class JavaVmParser(src: String) {
     private fun parseArrayInit(): VmExpr.ArrayInit {
         match("{")
         val elems = mutableListOf<VmExpr>()
-        while (!at(TokKind.EOF) && peek().text != "}") {
-            val el = if (peek().text == "{") parseArrayInit() else parseExpr()
+        while (!at(TokKind.EOF) && !atSym("}")) {
+            val el = if (atSym("{")) parseArrayInit() else parseExpr()
             elems.add(el)
             if (!match(",")) break
         }
@@ -3219,7 +3266,7 @@ private class JavaVmParser(src: String) {
     private fun parseArgList(): List<VmExpr> {
         val args = mutableListOf<VmExpr>()
         match("(")
-        while (!at(TokKind.EOF) && peek().text != ")") {
+        while (!at(TokKind.EOF) && !atSym(")")) {
             args.add(parseExpr())
             if (!match(",")) break
         }
@@ -3248,11 +3295,13 @@ private class JavaVmParser(src: String) {
     private fun skipBalanced(open: String, close: String) {
         var depth = 0
         while (!at(TokKind.EOF)) {
-            val t = advance().text
-            if (t == open) depth++
-            else if (t == close) {
-                depth--
-                if (depth == 0) break
+            val tok = advance()
+            if (tok.kind == TokKind.SYMBOL) {
+                if (tok.text == open) depth++
+                else if (tok.text == close) {
+                    depth--
+                    if (depth == 0) break
+                }
             }
         }
     }
@@ -3260,17 +3309,25 @@ private class JavaVmParser(src: String) {
     private fun skipBalancedFallback(close: String) {
         var depth = 1
         while (!at(TokKind.EOF) && depth > 0) {
-            val t = advance().text
-            if (t == "{") depth++
-            else if (t == close) depth--
+            val tok = advance()
+            if (tok.kind == TokKind.SYMBOL) {
+                if (tok.text == "{") depth++
+                else if (tok.text == close) depth--
+            }
         }
     }
 
     private fun peek(): Tok = tokens.getOrElse(pos) { Tok(TokKind.EOF, "") }
     private fun at(kind: TokKind): Boolean = peek().kind == kind
+    private fun atSym(sym: String): Boolean = peek().let { it.kind == TokKind.SYMBOL && it.text == sym }
+    private fun atIdent(ident: String): Boolean = peek().let { it.kind == TokKind.IDENT && it.text == ident }
+    private fun peekSymText(): String = peek().let { if (it.kind == TokKind.SYMBOL) it.text else "" }
+    private fun peekNonLiteralText(): String =
+        peek().let { if (it.kind == TokKind.SYMBOL || it.kind == TokKind.IDENT) it.text else "" }
     private fun advance(): Tok = tokens.getOrElse(pos++) { Tok(TokKind.EOF, "") }
     private fun match(sym: String): Boolean {
-        if (peek().text == sym) {
+        val tok = peek()
+        if ((tok.kind == TokKind.SYMBOL || tok.kind == TokKind.IDENT) && tok.text == sym) {
             pos++
             return true
         }
@@ -3290,6 +3347,7 @@ private class JavaVmParser(src: String) {
         )
         private val KEYWORDS_ALL = MODIFIERS + KEYWORDS_NON_TYPE
         private val ASSIGN_OPS = setOf("=", "+=", "-=", "*=", "/=", "%=")
+        private val UNARY_OPS = setOf("!", "-", "+", "~", "++", "--")
 
         private fun tokenize(src: String): List<Tok> {
             val out = mutableListOf<Tok>()

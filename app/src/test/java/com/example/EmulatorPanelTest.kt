@@ -395,4 +395,102 @@ class EmulatorPanelTest {
         composeTestRule.waitForIdle()
         composeTestRule.onNodeWithText("0").assertIsDisplayed()
     }
+
+    @Test
+    fun calculatorFourColumnGridButtonsRenderWithoutOverflowCrashAndWorkInNarrowEmulator() {
+        val calcFiles = toProjectFiles(
+            TemplateProvider.generateFiles(
+                template = ProjectTemplate.CALCULATOR,
+                appName = "QuickCalc",
+                packageName = "com.example.quickcalc",
+                language = ProjectLanguage.JAVA,
+            ),
+        )
+
+        val session = EmulatorEngine.createLiveSession("QuickCalc", "com.example.quickcalc", calcFiles)
+        assertNotNull(session)
+        assertTrue(session!!.start())
+        val snap = session.buildSnapshot()
+        assertNotNull(snap)
+        fun collectTexts(node: com.example.emulator.VmViewNode): List<String> = when (node) {
+            is com.example.emulator.VmViewNode.Container -> node.children.flatMap(::collectTexts)
+            is com.example.emulator.VmViewNode.ButtonView -> listOf(node.text)
+            is com.example.emulator.VmViewNode.Text -> listOf(node.text)
+            else -> emptyList()
+        }
+        val texts = collectTexts(snap!!)
+        assertTrue("Expected '-' and '=' in calculator VM snapshot, got: $texts", texts.contains("-") && texts.contains("="))
+
+        composeTestRule.setContent {
+            DroidForgeTheme(darkTheme = true) {
+                Box(modifier = Modifier.size(300.dp, 620.dp)) {
+                    EmulatorPanel(
+                        appName = "QuickCalc",
+                        packageName = "com.example.quickcalc",
+                        files = calcFiles,
+                        builtApkPath = null,
+                        onInstallApk = {},
+                        onClose = {},
+                    )
+                }
+            }
+        }
+
+        composeTestRule.waitUntil(timeoutMillis = 8_000) {
+            composeTestRule.onAllNodes(androidx.compose.ui.test.hasText("=")).fetchSemanticsNodes().isNotEmpty()
+        }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithText("7").assertIsDisplayed().performClick()
+        composeTestRule.onNodeWithText("+").assertIsDisplayed().performClick()
+        composeTestRule.onNodeWithText("2").assertIsDisplayed().performClick()
+        composeTestRule.onNodeWithText("=").assertIsDisplayed().performClick()
+        composeTestRule.waitForIdle()
+        // Both the display TextView and the keypad "9" button now show "9".
+        assertEquals(
+            2,
+            composeTestRule.onAllNodes(androidx.compose.ui.test.hasText("9")).fetchSemanticsNodes().size,
+        )
+
+        composeTestRule.onNodeWithText("+").assertIsDisplayed().performClick()
+        composeTestRule.onNodeWithText("8").assertIsDisplayed().performClick()
+        composeTestRule.onNodeWithText("=").assertIsDisplayed().performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("17").assertIsDisplayed()
+    }
+
+    @Test
+    fun emulatorMaximizeButtonInvokesToggleCallback() {
+        val files = toProjectFiles(
+            TemplateProvider.generateFiles(
+                template = ProjectTemplate.COUNTER_APP,
+                appName = "Counter App",
+                packageName = "com.example.counter",
+                language = ProjectLanguage.JAVA,
+            ),
+        )
+        var maximized = false
+
+        composeTestRule.setContent {
+            DroidForgeTheme(darkTheme = true) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    EmulatorPanel(
+                        appName = "Counter App",
+                        packageName = "com.example.counter",
+                        files = files,
+                        builtApkPath = null,
+                        onInstallApk = {},
+                        onClose = {},
+                        isMaximized = maximized,
+                        onToggleMaximize = { maximized = !maximized },
+                    )
+                }
+            }
+        }
+
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithTag("emulator_maximize_button").assertIsDisplayed().performClick()
+        composeTestRule.waitForIdle()
+        assertTrue(maximized)
+    }
 }

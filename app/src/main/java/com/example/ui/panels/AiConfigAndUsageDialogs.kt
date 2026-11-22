@@ -117,6 +117,8 @@ fun ProviderKeysDialog(
                         .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
+                    val hasOpenRouterBridge = hasBuiltInOpenRouter ||
+                        GeminiCodeAssistant.resolveOpenRouterApiKey(keyInputs[AiProvider.OPENROUTER].orEmpty()).isNotEmpty()
                     AiProvider.entries.forEach { provider ->
                         val hasCustomGemini = provider == AiProvider.GEMINI &&
                             GeminiCodeAssistant.resolveApiKey(keyInputs[provider].orEmpty()).isNotEmpty()
@@ -124,7 +126,7 @@ fun ProviderKeysDialog(
                         val configured = when (provider) {
                             AiProvider.GEMINI -> hasBuiltInFirebase || hasCustomGemini
                             AiProvider.OPENROUTER -> hasBuiltInOpenRouter || hasCustomOpenRouter
-                            else -> keyInputs[provider].orEmpty().isNotBlank()
+                            AiProvider.OPENAI, AiProvider.CLAUDE -> hasCustomOpenRouter || hasOpenRouterBridge
                         }
                         FilterChip(
                             selected = selectedProvider == provider,
@@ -137,6 +139,7 @@ fun ProviderKeysDialog(
                                     provider == AiProvider.GEMINI && hasBuiltInFirebase && hasCustomGemini -> "${provider.shortName} • Custom + Built-in"
                                     provider == AiProvider.GEMINI && hasBuiltInFirebase -> "${provider.shortName} • Built-in"
                                     provider == AiProvider.OPENROUTER && hasBuiltInOpenRouter && !hasCustomOpenRouter -> "${provider.shortName} • Built-in"
+                                    (provider == AiProvider.OPENAI || provider == AiProvider.CLAUDE) && !hasCustomOpenRouter && hasOpenRouterBridge -> "${provider.shortName} • via OR"
                                     configured -> "${provider.shortName} • Ready"
                                     else -> provider.shortName
                                 }
@@ -162,13 +165,13 @@ fun ProviderKeysDialog(
                         selectedProvider == AiProvider.GEMINI ->
                             "This APK was built without google-services.json. Tap 'Get Key' for a free Google AI Studio API key (AIza...) below, or set GOOGLE_SERVICES_JSON in GitHub Secrets for zero-key Firebase AI."
                         selectedProvider == AiProvider.OPENROUTER && hasBuiltInOpenRouter ->
-                            "Built-in OpenRouter key is bundled (works on all APK builds without Firebase App Check). Optionally paste your own sk-or-v1-... key below."
+                            "Built-in OpenRouter key is bundled (works on all APK builds without Firebase App Check). Also powers ChatGPT & Claude models automatically when direct keys are unset."
                         selectedProvider == AiProvider.OPENROUTER ->
                             "OpenRouter key (sk-or-v1-...) works on any APK build without Firebase App Check and gives access to free & paid coding models (Qwen3 Coder, DeepSeek, Gemini, Claude, GPT)."
                         selectedProvider == AiProvider.OPENAI ->
-                            "OpenAI API key (sk-...) for GPT-6, GPT-5, GPT-4.5, GPT-4.1, GPT-4o, o4-mini, o3, and o1 models."
+                            "OpenAI API key (sk-...) for GPT-5, GPT-4.5, GPT-4.1, GPT-4o, o4-mini, o3, and o1 models. You can also paste an OpenRouter key (sk-or-v1-...) here or save it in OpenRouter to route ChatGPT models automatically."
                         else ->
-                            "Anthropic API key (sk-ant-...) for Claude 5.5, 4.5, 4.1, 4, 3.7, 3.5, and 3.0 models."
+                            "Anthropic API key (sk-ant-...) for Claude 4.6, 4.5, 4.1, 4, 3.7, and 3.5 models. You can also paste an OpenRouter key (sk-or-v1-...) here or save it in OpenRouter to route Claude models automatically."
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = if (selectedProvider == AiProvider.GEMINI && hasBuiltInFirebase && appCheckDiag.hasProvisionedCertMismatch()) {
@@ -207,30 +210,48 @@ fun ProviderKeysDialog(
                 ) {
                     OutlinedButton(
                         onClick = {
-                            val effectiveKey = when (selectedProvider) {
-                                AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(activeKey)
-                                AiProvider.OPENROUTER -> GeminiCodeAssistant.resolveOpenRouterApiKey(activeKey)
-                                else -> activeKey.trim()
+                            val rawTrim = activeKey.trim()
+                            val openRouterFallbackKey = GeminiCodeAssistant.resolveOpenRouterApiKey(
+                                keyInputs[AiProvider.OPENROUTER].orEmpty(),
+                            )
+                            val verifyViaOpenRouter = (selectedProvider == AiProvider.OPENAI || selectedProvider == AiProvider.CLAUDE) &&
+                                (rawTrim.startsWith("sk-or-", ignoreCase = true) || (rawTrim.isEmpty() && openRouterFallbackKey.isNotEmpty()))
+                            val targetVerifyProvider = if (verifyViaOpenRouter) AiProvider.OPENROUTER else selectedProvider
+                            val effectiveKey = when (targetVerifyProvider) {
+                                AiProvider.GEMINI -> GeminiCodeAssistant.resolveApiKey(rawTrim)
+                                AiProvider.OPENROUTER -> if (rawTrim.startsWith("sk-or-", ignoreCase = true)) {
+                                    rawTrim
+                                } else {
+                                    GeminiCodeAssistant.resolveOpenRouterApiKey(
+                                        if (selectedProvider == AiProvider.OPENROUTER) rawTrim else openRouterFallbackKey,
+                                    )
+                                }
+                                else -> rawTrim
                             }
                             if (effectiveKey.isBlank()) {
-                                keyTestStatus = false to "Enter a ${selectedProvider.shortName} key first."
+                                keyTestStatus = false to "Enter a ${selectedProvider.shortName} or OpenRouter key first."
                                 return@OutlinedButton
                             }
                             isTestingKey = true
                             keyTestStatus = null
                             scope.launch {
-                                val res = AiModelsCatalog.fetchLiveModels(selectedProvider, effectiveKey)
+                                val res = AiModelsCatalog.fetchLiveModels(targetVerifyProvider, effectiveKey)
                                 isTestingKey = false
                                 keyTestStatus = res.fold(
                                     onSuccess = { list ->
-                                        val hasSelected = list.any { it.id.equals(currentModel, ignoreCase = true) }
-                                        val fallbackRec = list.firstOrNull { it.id == selectedProvider.defaultModelId }?.id ?: list.firstOrNull()?.id
-                                        val note = when {
-                                            hasSelected -> " (includes $currentModel)"
-                                            !fallbackRec.isNullOrBlank() -> " ($currentModel unavailable; Save auto-switches to $fallbackRec)"
-                                            else -> ""
+                                        if (verifyViaOpenRouter) {
+                                            val slug = AiModelsCatalog.toOpenRouterSlug(selectedProvider, currentModel, list)
+                                            true to "Verified via OpenRouter! ${list.size} models available (routes $currentModel → $slug)."
+                                        } else {
+                                            val hasSelected = list.any { it.id.equals(currentModel, ignoreCase = true) }
+                                            val fallbackRec = list.firstOrNull { it.id == selectedProvider.defaultModelId }?.id ?: list.firstOrNull()?.id
+                                            val note = when {
+                                                hasSelected -> " (includes $currentModel)"
+                                                !fallbackRec.isNullOrBlank() -> " ($currentModel unavailable; Save auto-switches to $fallbackRec)"
+                                                else -> ""
+                                            }
+                                            true to "Verified! Found ${list.size} live ${selectedProvider.shortName} model(s)$note."
                                         }
-                                        true to "Verified! Found ${list.size} live ${selectedProvider.shortName} model(s)$note."
                                     },
                                     onFailure = { err ->
                                         false to (err.localizedMessage ?: "Key verification failed.")
@@ -254,7 +275,8 @@ fun ProviderKeysDialog(
                     val getKeyUrl = when (selectedProvider) {
                         AiProvider.GEMINI -> "https://aistudio.google.com/apikey"
                         AiProvider.OPENROUTER -> "https://openrouter.ai/keys"
-                        else -> null
+                        AiProvider.OPENAI -> "https://platform.openai.com/api-keys"
+                        AiProvider.CLAUDE -> "https://console.anthropic.com/settings/keys"
                     }
                     if (getKeyUrl != null) {
                         AssistChip(
@@ -367,8 +389,8 @@ fun ModelMenuDialog(
     val filterOptions = remember(browsedProvider) {
         when (browsedProvider) {
             AiProvider.GEMINI -> listOf("All", "2.5 GA", "2.0", "Gemini 3", "Live")
-            AiProvider.OPENAI -> listOf("All", "GPT-6 / 5", "4.1 / 4o", "o-Series", "Live")
-            AiProvider.CLAUDE -> listOf("All", "Claude 5", "Claude 4", "Claude 3", "Live")
+            AiProvider.OPENAI -> listOf("All", "GPT-5 / 4o", "4.1 / o-Series", "Live")
+            AiProvider.CLAUDE -> listOf("All", "Claude 4.x", "Claude 3.x", "Live")
             AiProvider.OPENROUTER -> listOf("All", "Free", "Gemini", "Claude", "DeepSeek / Qwen", "Live")
         }
     }
@@ -402,12 +424,10 @@ fun ModelMenuDialog(
                 "2.5 GA" -> id.contains("2.5")
                 "2.0" -> id.contains("2.0") || id.contains("flash-latest")
                 "Gemini 3" -> id.contains("gemini-3")
-                "GPT-6 / 5" -> id.startsWith("gpt-6") || id.startsWith("gpt-5")
-                "4.1 / 4o" -> id.contains("4.1") || id.contains("4.5") || id.contains("4o") || id.startsWith("gpt-4") || id.startsWith("gpt-3.5")
-                "o-Series" -> id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4")
-                "Claude 5" -> id.contains("-5-") || id.contains("5.5") || id.contains("fable-5")
-                "Claude 4" -> id.contains("-4")
-                "Claude 3" -> id.contains("-3")
+                "GPT-5 / 4o" -> id.startsWith("gpt-5") || id.contains("4o") || id.contains("4.5")
+                "4.1 / o-Series" -> id.contains("4.1") || id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4") || id.contains("codex")
+                "Claude 4.x" -> id.contains("-4") || id.contains(".4")
+                "Claude 3.x" -> id.contains("-3")
                 else -> true
             }
             matchesQuery && matchesGen
