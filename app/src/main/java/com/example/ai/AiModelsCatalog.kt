@@ -195,112 +195,141 @@ data class AiUsageSummary(
 
 object AiModelsCatalog {
 
+    /**
+     * Gemini model IDs that Google has shut down or restricted to pre-existing users.
+     * Calling these returns HTTP 404/403, so they are remapped to the live replacement
+     * Google documents for each one. Keep this in sync with
+     * https://aistudio.google.com/docs/deprecations
+     */
+    val retiredGeminiModelRemap: Map<String, String> = mapOf(
+        // Shut down June 1, 2026.
+        "gemini-2.0-flash" to "gemini-3.6-flash",
+        "gemini-2.0-flash-lite" to "gemini-3.1-flash-lite",
+        "gemini-2.0-pro" to "gemini-3.8-flash",
+        // Deprecated: API access limited to users who already called them.
+        "gemini-2.5-flash" to "gemini-3.5-flash-lite",
+        "gemini-2.5-pro" to "gemini-3.8-flash",
+        // Shut down.
+        "gemini-3-pro-preview" to "gemini-3.1-pro-preview",
+        // Never existed as public endpoints.
+        "gemini-3.1-pro-preview-customtools" to "gemini-3.1-pro-preview",
+        "gemini-pro-latest" to "gemini-3.8-flash",
+        "gemini-flash-latest" to "gemini-3.8-flash",
+        "gemini-flash-lite-latest" to "gemini-3.5-flash-lite",
+        // Long retired generations.
+        "gemini-1.5-pro" to "gemini-3.8-flash",
+        "gemini-1.5-flash" to "gemini-3.6-flash",
+        "gemini-1.5-flash-8b" to "gemini-3.1-flash-lite",
+        "gemini-1.0-pro" to "gemini-3.6-flash",
+        "gemini-pro" to "gemini-3.8-flash",
+    )
+
+    /**
+     * Live, generally-available Gemini text models in the order we fail over through them.
+     * Every entry must be a model Google currently serves — a retired ID here causes the
+     * exact "404 model not found" cascade this list exists to prevent.
+     */
+    val geminiFailoverPool: List<String> = listOf(
+        "gemini-3.8-flash",
+        "gemini-4-hydrogen",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-4-argon",
+        "gemini-2.5-flash-lite",
+    )
+
     val builtInGeminiModels: List<AiModelOption> = listOf(
-        // Built-in Firebase AI Logic Models (No API Key Required)
+        // Gemini 4 series — current frontier, no shutdown date announced.
         AiModelOption(
-            id = "gemini-3.8-flash",
+            id = "gemini-4-hydrogen",
             provider = AiProvider.GEMINI,
-            label = "Gemini 3.8 Flash",
-            badge = "Built-in",
-            description = "Default Firebase AI Logic model — fast autonomous coding with no API key required.",
+            label = "Gemini 4 Hydrogen",
+            badge = "Recommended",
+            description = "Google's recommended model for new projects — fast, efficient everyday coding and agentic workflows.",
             contextWindow = "1M ctx",
         ),
         AiModelOption(
-            id = "gemini-3.5-flash-lite",
+            id = "gemini-4-carbon",
             provider = AiProvider.GEMINI,
-            label = "Gemini 3.5 Flash-Lite",
-            badge = "Built-in Lite",
-            description = "Ultra-fast Firebase AI Logic model for rapid edits & Q&A (no API key required).",
+            label = "Gemini 4 Carbon",
+            badge = "Max Reasoning",
+            description = "Strongest reasoning model, built for complex multi-file software engineering.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "gemini-4-neon",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 4 Neon",
+            badge = "Gemini 4",
+            description = "Frontier-level intelligence with fast end-to-end task completion.",
             contextWindow = "1M ctx",
         ),
         AiModelOption(
             id = "gemini-4-argon",
             provider = AiProvider.GEMINI,
             label = "Gemini 4 Argon",
-            badge = "Firebase Pro",
-            description = "Deep reasoning & complex architecture via Firebase AI Logic (Blaze plan).",
+            badge = "Gemini 4",
+            description = "Efficient Gemini 4 frontier reasoning model for deep architecture work.",
             contextWindow = "1M ctx",
         ),
-        // Gemini 2.5 Series (Custom Google AI Studio Key GA Models)
+        // Gemini 3 stable series.
         AiModelOption(
-            id = "gemini-2.5-flash",
+            id = "gemini-3.8-flash",
             provider = AiProvider.GEMINI,
-            label = "Gemini 2.5 Flash",
-            badge = "2.5 GA",
-            description = "Fast, reliable GA Gemini model for autonomous coding, builds & tool use.",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gemini-2.5-flash-lite",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 2.5 Flash-Lite",
-            badge = "2.5 Lite",
-            description = "High-quota ultra-fast responses for quick edits and fewer rate limits.",
+            label = "Gemini 3.8 Flash",
+            badge = "Default",
+            description = "Stable default — fast autonomous coding, builds and tool use. Works with Firebase AI Logic (no API key needed).",
             contextWindow = "1M ctx",
         ),
         AiModelOption(
-            id = "gemini-2.0-flash",
+            id = "gemini-3.6-flash",
             provider = AiProvider.GEMINI,
-            label = "Gemini 2.0 Flash",
-            badge = "2.0 GA",
-            description = "Rock-solid general-purpose model with high API availability.",
+            label = "Gemini 3.6 Flash",
+            badge = "Stable",
+            description = "Stable Flash model — reliable general-purpose coding with wide availability.",
             contextWindow = "1M ctx",
         ),
         AiModelOption(
-            id = "gemini-2.0-flash-lite",
+            id = "gemini-3.5-flash-lite",
             provider = AiProvider.GEMINI,
-            label = "Gemini 2.0 Flash-Lite",
-            badge = "2.0 Lite",
-            description = "Lightweight GA 2.0 variant for quick syntax fixes and Q&A.",
+            label = "Gemini 3.5 Flash-Lite",
+            badge = "Fastest",
+            description = "Fastest, most cost-effective stable model for high-throughput edits and Q&A.",
             contextWindow = "1M ctx",
         ),
         AiModelOption(
-            id = "gemini-flash-latest",
+            id = "gemini-3.1-flash-lite",
             provider = AiProvider.GEMINI,
-            label = "Gemini Flash Latest",
-            badge = "GA Alias",
-            description = "Google's rolling stable Flash alias for your API key.",
+            label = "Gemini 3.1 Flash-Lite",
+            badge = "Stable Lite",
+            description = "Frontier-class performance at a fraction of the cost — great for quick syntax fixes.",
             contextWindow = "1M ctx",
         ),
-        AiModelOption(
-            id = "gemini-2.5-pro",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 2.5 Pro",
-            badge = "2.5 Pro",
-            description = "High-accuracy multi-file engineering and deep thinking (tighter free quota).",
-            contextWindow = "1M ctx",
-        ),
-        // Gemini 3 Preview Series
-        AiModelOption(
-            id = "gemini-3-flash-preview",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3 Flash Preview",
-            badge = "Preview",
-            description = "Preview Gemini 3 Flash model (auto-falls back to 2.5 Flash if busy/unavailable).",
-            contextWindow = "1M ctx",
-        ),
-        AiModelOption(
-            id = "gemini-3-pro-preview",
-            provider = AiProvider.GEMINI,
-            label = "Gemini 3 Pro Preview",
-            badge = "Preview",
-            description = "Preview Gemini 3 Pro model with dynamic thinking levels.",
-            contextWindow = "1M ctx",
-        ),
+        // Gemini 3 preview series.
         AiModelOption(
             id = "gemini-3.1-pro-preview",
             provider = AiProvider.GEMINI,
             label = "Gemini 3.1 Pro Preview",
             badge = "Preview",
-            description = "Preview Gemini 3.1 Pro for complex multi-file Android engineering.",
+            description = "Preview Gemini 3.1 Pro for complex multi-file Android engineering with dynamic thinking.",
             contextWindow = "1M ctx",
         ),
         AiModelOption(
-            id = "gemini-3.1-pro-preview-customtools",
+            id = "gemini-3-flash-preview",
             provider = AiProvider.GEMINI,
-            label = "Gemini 3.1 Pro CustomTools",
+            label = "Gemini 3 Flash Preview",
             badge = "Preview",
-            description = "Agent-tuned Gemini 3.1 Pro optimized for custom file & build tool loops.",
+            description = "Preview Gemini 3 Flash model (auto-falls back to a stable model if busy).",
+            contextWindow = "1M ctx",
+        ),
+        // Legacy, still served until further notice.
+        AiModelOption(
+            id = "gemini-2.5-flash-lite",
+            provider = AiProvider.GEMINI,
+            label = "Gemini 2.5 Flash-Lite",
+            badge = "Legacy",
+            description = "Older high-quota model, still served by Google. Use a 3.x/4 model for new work.",
             contextWindow = "1M ctx",
         ),
     )
@@ -974,6 +1003,7 @@ object AiModelsCatalog {
                 "claude-fable-5-2" -> "claude-sonnet-4-5"
                 else -> cleaned
             }
+            AiProvider.GEMINI -> retiredGeminiModelRemap[lower] ?: cleaned
             else -> cleaned
         }
     }
@@ -1185,6 +1215,12 @@ object AiModelsCatalog {
             "1.5-",
             "-vision",
             "lyria",
+            // Newer non-text Gemini families that must never be used for coding turns.
+            "transcribe",
+            "omni",
+            "decision",
+            "antigravity",
+            "-translate",
         )
         return excludedTokens.none { id.contains(it) }
     }
@@ -1196,14 +1232,14 @@ object AiModelsCatalog {
     ): List<String> {
         val cleanPrimary = normalizeModelId(provider, primaryModelId)
         val pool = when (provider) {
-            AiProvider.GEMINI -> listOf(
-                "gemini-2.5-flash",
-                "gemini-2.5-flash-lite",
-                "gemini-2.0-flash",
-                "gemini-flash-latest",
-                "gemini-2.0-flash-lite",
-                "gemini-2.5-pro",
-            )
+            AiProvider.GEMINI -> {
+                val liveIds = liveModels
+                    .filter { it.provider == AiProvider.GEMINI && isCodingCapableGeminiModel(it.id) }
+                    .map { it.id }
+                // Verified-live models first, then the known-good GA pool. Never include a
+                // retired ID: that is what produced the 404 failover cascade.
+                (liveIds + geminiFailoverPool).filter { it.lowercase() !in retiredGeminiModelRemap }
+            }
             AiProvider.OPENAI -> {
                 val liveIds = liveModels.filter { it.provider == AiProvider.OPENAI }.map { it.id }
                 val prioritizedLive = liveIds.sortedWith(
@@ -1385,9 +1421,9 @@ object AiModelsCatalog {
                         provider = AiProvider.GEMINI,
                         label = item.optString("displayName").ifBlank { rawName },
                         badge = when {
-                            rawName.contains("2.5-flash") -> "2.5 GA"
-                            rawName.contains("2.0-flash") -> "2.0 GA"
+                            rawName.contains("gemini-4") -> "Gemini 4"
                             rawName.contains("gemini-3") -> "Gemini 3"
+                            rawName.contains("gemini-2") -> "Legacy"
                             else -> "Live"
                         },
                         description = item.optString("description").ifBlank { "Verified live on your Google AI Studio key." }.take(120),

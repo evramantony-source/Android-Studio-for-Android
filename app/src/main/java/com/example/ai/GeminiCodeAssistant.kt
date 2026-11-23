@@ -722,23 +722,17 @@ class GeminiCodeAssistant {
 
         val firebaseReady = FirebaseAiAgentClient.isFirebaseConfigured()
         val preferFirebaseFirst = firebaseReady && (
-            resolvedKey.isEmpty() ||
-                FirebaseAiAgentClient.isFirebaseAiLogicModel(requestedModel) ||
-                requestedModel.equals("gemini-4-hydrogen", ignoreCase = true)
+            resolvedKey.isEmpty() || FirebaseAiAgentClient.isFirebaseAiLogicModel(requestedModel)
             )
 
-        fun fallbackRestModelFor(model: String): String {
-            return if (FirebaseAiAgentClient.isFirebaseAiLogicModel(model) ||
-                model.equals("gemini-4-hydrogen", ignoreCase = true)
-            ) {
-                "gemini-2.5-flash"
-            } else {
-                model
-            }
-        }
+        // Rewrite retired model IDs (Google 404s / 403s them) to the live replacement before
+        // the REST call. Every Firebase AI Logic model is also a valid REST model, so no
+        // special-casing is needed beyond the retirement remap.
+        fun fallbackRestModelFor(model: String): String =
+            AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, model)
 
         if (!firebaseReady && resolvedKey.isEmpty()) {
-            val msg = "Built-in Firebase AI is not bundled in this APK build (google-services.json missing). Tap the Key icon above to add a Gemini API key, or add GOOGLE_SERVICES_JSON to GitHub Secrets."
+            val msg = "No Gemini access configured. Tap the Key icon above and paste a Google AI Studio API key (free at aistudio.google.com/apikey), or add a GOOGLE_SERVICES_JSON GitHub secret to bundle built-in Firebase AI."
             onFinalizeFailure(msg, AiUiState.Error(msg, isRetryable = false))
             return
         }
@@ -746,9 +740,6 @@ class GeminiCodeAssistant {
         if (preferFirebaseFirst) {
             try {
                 runFirebasePath()
-                if (requestedModel.equals("gemini-4-hydrogen", ignoreCase = true)) {
-                    onModelAutoCorrected(requestedModel, GEMINI_MODEL_ID)
-                }
                 return
             } catch (fbErr: Exception) {
                 if (fbErr is CancellationException && fbErr !is TimeoutCancellationException) throw fbErr
@@ -2174,7 +2165,10 @@ class GeminiCodeAssistant {
         primaryModelId: String,
         verifiedLiveModelIds: Set<String>,
     ): List<String> {
-        val baseChain = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, primaryModelId)
+        val baseChain = AiModelsCatalog.fallbackChain(
+            AiProvider.GEMINI,
+            AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, primaryModelId),
+        )
         val liveCoding = verifiedLiveModelIds.filter { AiModelsCatalog.isCodingCapableGeminiModel(it) }
         if (liveCoding.isEmpty()) return baseChain
 
@@ -2186,8 +2180,9 @@ class GeminiCodeAssistant {
         liveCoding
             .sortedWith(
                 compareBy<String>(
-                    { !it.contains("2.5-flash", ignoreCase = true) },
-                    { !it.contains("2.0-flash", ignoreCase = true) },
+                    { !it.contains("gemini-4", ignoreCase = true) },
+                    { !it.contains("gemini-3.8", ignoreCase = true) },
+                    { !it.contains("gemini-3", ignoreCase = true) },
                     { !it.contains("flash", ignoreCase = true) },
                     { it.contains("preview", ignoreCase = true) || it.contains("exp", ignoreCase = true) },
                 ).thenBy { it },
@@ -2290,14 +2285,11 @@ class GeminiCodeAssistant {
         val liveFlash = verifiedLiveModelIds.filter {
             AiModelsCatalog.isCodingCapableGeminiModel(it) && it.contains("flash", ignoreCase = true)
         }
-        val rescueModels = (liveFlash + listOf(
-            "gemini-2.5-flash",
-            "gemini-2.5-flash-lite",
-            "gemini-2.0-flash",
-            "gemini-flash-latest",
-            "gemini-2.0-flash-lite",
-            "gemini-2.5-pro",
-        )).distinct()
+        // Last-resort rescue chain. Built from the shared live pool so it can never be
+        // populated with models Google has retired.
+        val rescueModels = (liveFlash + AiModelsCatalog.geminiFailoverPool)
+            .filter { it.lowercase() !in AiModelsCatalog.retiredGeminiModelRemap }
+            .distinct()
 
         for ((idx, candidate) in rescueModels.withIndex()) {
             coroutineContext.ensureActive()

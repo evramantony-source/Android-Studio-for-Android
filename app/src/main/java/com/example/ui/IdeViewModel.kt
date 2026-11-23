@@ -315,13 +315,12 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
                 val savedGeminiKey = savedKeys[AiProvider.GEMINI].orEmpty()
                 val resolvedKey = GeminiCodeAssistant.resolveApiKey(savedGeminiKey)
                 val savedModel = repository.providerModels.first()[AiProvider.GEMINI].orEmpty()
-                val firebaseReady = com.example.ai.FirebaseAiAgentClient.isFirebaseConfigured()
 
-                if (savedModel.equals("gemini-4-hydrogen", ignoreCase = true) ||
-                    (!firebaseReady && resolvedKey.isNotBlank() && com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel(savedModel))
-                ) {
-                    val healed = if (firebaseReady) GEMINI_MODEL_ID else "gemini-2.5-flash"
-                    repository.saveProviderConfig(AiProvider.GEMINI, savedGeminiKey, healed)
+                // Upgrade a saved model that Google has since retired. Without this a stale
+                // preference (e.g. gemini-2.5-flash) makes every Gemini turn fail with 404.
+                val deRetired = AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, savedModel)
+                if (savedModel.isNotBlank() && !deRetired.equals(savedModel, ignoreCase = true)) {
+                    repository.saveProviderConfig(AiProvider.GEMINI, savedGeminiKey, deRetired)
                 }
 
                 if (resolvedKey.isNotBlank()) {
@@ -372,16 +371,21 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         if (fetched.isEmpty()) return
         val savedModel = repository.providerModels.first()[AiProvider.GEMINI].orEmpty()
-        if (com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel(savedModel)) return
+        // A Firebase AI Logic model is served without an API key, so leave it alone -- but only
+        // when Firebase is actually bundled. Otherwise it still has to be a model the key serves.
+        if (com.example.ai.FirebaseAiAgentClient.isFirebaseConfigured() &&
+            com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel(savedModel)
+        ) {
+            return
+        }
         val fetchedIds = fetched.map { it.id.lowercase() }.toSet()
         if (savedModel.lowercase() !in fetchedIds) {
-            val replacement = if (savedModel.equals("gemini-4-hydrogen", ignoreCase = true)) {
-                GEMINI_MODEL_ID
-            } else {
-                fetched.firstOrNull { it.id == "gemini-2.5-flash" }?.id
-                    ?: fetched.firstOrNull { AiModelsCatalog.isCodingCapableGeminiModel(it.id) }?.id
-                    ?: GEMINI_MODEL_ID
-            }
+            // Prefer a model this key has actually been verified to serve, walking our
+            // known-good pool in order before falling back to anything else live.
+            val replacement = AiModelsCatalog.geminiFailoverPool
+                .firstOrNull { pooled -> fetched.any { it.id.equals(pooled, ignoreCase = true) } }
+                ?: fetched.firstOrNull { AiModelsCatalog.isCodingCapableGeminiModel(it.id) }?.id
+                ?: GEMINI_MODEL_ID
             val keyToSave = explicitApiKey ?: repository.providerApiKeys.first()[AiProvider.GEMINI].orEmpty()
             repository.saveProviderConfig(AiProvider.GEMINI, keyToSave, replacement)
         }
@@ -861,13 +865,8 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     fun saveProviderConfig(provider: AiProvider, apiKey: String, modelId: String) {
         viewModelScope.launch {
             val cleanedKey = apiKey.trim()
-            val firebaseReady = com.example.ai.FirebaseAiAgentClient.isFirebaseConfigured()
-            val adjustedModel = if (
-                provider == AiProvider.GEMINI &&
-                (modelId.equals("gemini-4-hydrogen", ignoreCase = true) ||
-                    (!firebaseReady && cleanedKey.isNotEmpty() && com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel(modelId)))
-            ) {
-                if (firebaseReady) GEMINI_MODEL_ID else "gemini-2.5-flash"
+            val adjustedModel = if (provider == AiProvider.GEMINI && modelId.isNotBlank()) {
+                AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, modelId)
             } else {
                 modelId
             }

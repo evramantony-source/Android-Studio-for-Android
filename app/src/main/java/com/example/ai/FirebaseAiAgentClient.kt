@@ -681,13 +681,25 @@ internal class FirebaseAiAgentClient {
     }
 
     companion object {
+        // Models routed through Firebase AI Logic when no user API key is present.
+        // All of these are live Gemini endpoints; retired IDs must never appear here.
         private val FIREBASE_MODEL_IDS = setOf(
-            "gemini-3.8-flash",
-            "gemini-3.7-flash",
-            "gemini-3.6-flash",
-            "gemini-3.5-flash",
-            "gemini-3.5-flash-lite",
+            "gemini-4-hydrogen",
+            "gemini-4-carbon",
+            "gemini-4-neon",
             "gemini-4-argon",
+            "gemini-3.8-flash",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+        )
+
+        // Live models tried in order when the requested one is unavailable.
+        private val FIREBASE_FALLBACK_CHAIN = listOf(
+            "gemini-3.8-flash",
+            "gemini-4-hydrogen",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash-lite",
         )
 
         fun isFirebaseConfigured(): Boolean {
@@ -699,13 +711,15 @@ internal class FirebaseAiAgentClient {
         }
 
         fun buildFirebaseModelCandidates(requestedModel: String): List<String> {
-            val clean = requestedModel.trim().removePrefix("models/").lowercase()
+            // Resolve retired IDs first so a stale saved preference cannot 404 the whole chain.
+            val clean = AiModelsCatalog
+                .normalizeModelId(AiProvider.GEMINI, requestedModel)
+                .lowercase()
             val ordered = linkedSetOf<String>()
             if (clean in FIREBASE_MODEL_IDS) {
                 ordered.add(clean)
             }
-            ordered.add("gemini-3.8-flash")
-            ordered.add("gemini-3.5-flash-lite")
+            FIREBASE_FALLBACK_CHAIN.forEach { ordered.add(it) }
             return ordered.toList()
         }
     }

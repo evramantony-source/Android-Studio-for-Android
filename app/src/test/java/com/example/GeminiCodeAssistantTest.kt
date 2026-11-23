@@ -35,9 +35,43 @@ class GeminiCodeAssistantTest {
         assertEquals("gemini-4-hydrogen", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-4-hydrogen"))
         assertEquals("gemini-3.8-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-3.8-flash"))
         assertEquals("gemini-3.6-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "models/gemini-3.6-flash"))
-        assertEquals("gemini-2.5-pro", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-2.5-pro"))
+        assertEquals("gemini-3.5-flash-lite", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-3.5-flash-lite"))
         assertEquals("gemini-3.8-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, ""))
         assertEquals("gemini-3.8-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "   "))
+    }
+
+    @Test
+    fun normalizeModelId_remapsRetiredGeminiModelsToLiveReplacements() {
+        // These IDs are shut down or restricted to pre-existing users; calling them 404s.
+        assertEquals("gemini-3.5-flash-lite", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-2.5-flash"))
+        assertEquals("gemini-3.8-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-2.5-pro"))
+        assertEquals("gemini-3.6-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-2.0-flash"))
+        assertEquals("gemini-3.1-flash-lite", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-2.0-flash-lite"))
+        assertEquals("gemini-3.1-pro-preview", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "gemini-3-pro-preview"))
+        assertEquals("gemini-3.8-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "models/gemini-flash-latest"))
+        assertEquals("gemini-3.8-flash", AiModelsCatalog.normalizeModelId(AiProvider.GEMINI, "GEMINI-1.5-PRO"))
+    }
+
+    @Test
+    fun geminiFailoverPoolContainsNoRetiredModels() {
+        assertTrue(AiModelsCatalog.geminiFailoverPool.isNotEmpty())
+        AiModelsCatalog.geminiFailoverPool.forEach { id ->
+            assertFalse(
+                "Failover pool must not contain retired model $id",
+                AiModelsCatalog.retiredGeminiModelRemap.containsKey(id.lowercase()),
+            )
+            assertTrue(
+                "Failover pool entry $id must be usable for coding",
+                AiModelsCatalog.isCodingCapableGeminiModel(id),
+            )
+        }
+        // Every remap target must itself be a live model, or healing just moves the 404.
+        AiModelsCatalog.retiredGeminiModelRemap.values.forEach { target ->
+            assertFalse(
+                "Remap target $target is itself retired",
+                AiModelsCatalog.retiredGeminiModelRemap.containsKey(target.lowercase()),
+            )
+        }
     }
 
     @Test
@@ -187,14 +221,22 @@ class GeminiCodeAssistantTest {
     fun fallbackChain_startsWithSelectedModelAndIncludesReliableFallbacks() {
         val geminiChain = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, "gemini-3.1-pro-preview")
         assertEquals("gemini-3.1-pro-preview", geminiChain.first())
-        assertTrue(geminiChain.contains("gemini-2.5-flash"))
-        assertTrue(geminiChain.contains("gemini-2.0-flash"))
+        assertTrue(geminiChain.contains("gemini-3.8-flash"))
+        assertTrue(geminiChain.contains("gemini-3.5-flash-lite"))
         assertEquals(geminiChain.distinct().size, geminiChain.size)
+        // A chain containing a retired model is the 404 cascade we are guarding against.
+        geminiChain.forEach { assertFalse(AiModelsCatalog.retiredGeminiModelRemap.containsKey(it.lowercase())) }
 
         val hydrogenChain = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, "gemini-4-hydrogen")
         assertEquals("gemini-4-hydrogen", hydrogenChain.first())
-        assertTrue(hydrogenChain.contains("gemini-2.5-flash"))
-        assertTrue(hydrogenChain.contains("gemini-2.0-flash"))
+        assertTrue(hydrogenChain.contains("gemini-3.8-flash"))
+        assertTrue(hydrogenChain.contains("gemini-3.6-flash"))
+        hydrogenChain.forEach { assertFalse(AiModelsCatalog.retiredGeminiModelRemap.containsKey(it.lowercase())) }
+
+        // A retired primary is de-retired rather than tried and 404'd.
+        val retiredChain = AiModelsCatalog.fallbackChain(AiProvider.GEMINI, "gemini-2.5-flash")
+        assertEquals("gemini-3.5-flash-lite", retiredChain.first())
+        retiredChain.forEach { assertFalse(AiModelsCatalog.retiredGeminiModelRemap.containsKey(it.lowercase())) }
 
         val openAiChain = AiModelsCatalog.fallbackChain(AiProvider.OPENAI, "gpt-5")
         assertEquals("gpt-5", openAiChain.first())
@@ -270,13 +312,21 @@ class GeminiCodeAssistantTest {
         val gemini = com.example.ai.AiModelsCatalog.modelsFor(com.example.ai.AiProvider.GEMINI)
         val openai = com.example.ai.AiModelsCatalog.modelsFor(com.example.ai.AiProvider.OPENAI)
         val claude = com.example.ai.AiModelsCatalog.modelsFor(com.example.ai.AiProvider.CLAUDE)
-        assertTrue(gemini.any { it.id == "gemini-2.5-flash" })
-        assertTrue(gemini.any { it.id == "gemini-2.5-flash-lite" })
-        assertTrue(gemini.any { it.id == "gemini-2.0-flash" })
+        assertTrue(gemini.any { it.id == "gemini-4-hydrogen" })
+        assertTrue(gemini.any { it.id == "gemini-4-carbon" })
+        assertTrue(gemini.any { it.id == "gemini-3.8-flash" })
+        assertTrue(gemini.any { it.id == "gemini-3.6-flash" })
+        assertTrue(gemini.any { it.id == "gemini-3.5-flash-lite" })
+        assertTrue(gemini.any { it.id == "gemini-3.1-flash-lite" })
         assertTrue(gemini.any { it.id == "gemini-3.1-pro-preview" })
-        assertTrue(gemini.any { it.id == "gemini-3-pro-preview" })
         assertTrue(gemini.any { it.id == "gemini-3-flash-preview" })
-        assertTrue(gemini.any { it.id == "gemini-2.5-pro" })
+        // Retired models must not be offered in the picker at all.
+        gemini.forEach {
+            assertFalse(
+                "Catalog offers retired model ${it.id}",
+                AiModelsCatalog.retiredGeminiModelRemap.containsKey(it.id.lowercase()),
+            )
+        }
         assertTrue(openai.any { it.id == "gpt-5" })
         assertTrue(openai.any { it.id == "gpt-4.1" })
         assertTrue(openai.any { it.id == "o4-mini" })
@@ -411,12 +461,22 @@ class GeminiCodeAssistantTest {
         assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-1.5-pro"))
         assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-1.0-pro-vision"))
         assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("lyria-realtime-exp"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-3.5-transcribe"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-omni-1.2-flash"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-decision-1"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("antigravity-preview-09-2026"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-3.5-live-translate-preview"))
+        assertFalse(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-3.8-live"))
 
         assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-2.5-flash"))
         assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-2.5-flash-lite"))
         assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-2.0-flash"))
         assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-flash-latest"))
         assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-3-flash-preview"))
+        assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-3.8-flash"))
+        assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-3.5-flash-lite"))
+        assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-4-hydrogen"))
+        assertTrue(com.example.ai.AiModelsCatalog.isCodingCapableGeminiModel("gemini-4-carbon"))
     }
 
     @Test
