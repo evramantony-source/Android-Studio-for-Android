@@ -548,13 +548,30 @@ class GeminiCodeAssistantTest {
     fun firebaseAiCandidateChainPrioritizesBuiltInGemini38AndFlashLite() {
         assertTrue(com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel("gemini-3.8-flash"))
         assertTrue(com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel("gemini-3.5-flash-lite"))
+        assertTrue(com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel("gemini-4-hydrogen"))
         assertFalse(com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel("gemini-2.5-flash"))
 
         val defaultChain = com.example.ai.FirebaseAiAgentClient.buildFirebaseModelCandidates("gemini-3.8-flash")
-        assertEquals(listOf("gemini-3.8-flash", "gemini-3.5-flash-lite"), defaultChain)
+        assertEquals("gemini-3.8-flash", defaultChain.first())
+        assertTrue(defaultChain.contains("gemini-3.5-flash-lite"))
+        assertEquals(defaultChain.distinct().size, defaultChain.size)
 
         val argonChain = com.example.ai.FirebaseAiAgentClient.buildFirebaseModelCandidates("gemini-4-argon")
-        assertEquals(listOf("gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite"), argonChain)
+        assertEquals("gemini-4-argon", argonChain.first())
+        assertTrue(argonChain.contains("gemini-3.8-flash"))
+        assertEquals(argonChain.distinct().size, argonChain.size)
+
+        // A retired saved preference must resolve to a live model, never head the chain itself.
+        // gemini-2.5-flash remaps to gemini-3.5-flash-lite, which is Firebase-served, so that
+        // becomes the head of the chain instead of the retired ID.
+        val retiredChain = com.example.ai.FirebaseAiAgentClient.buildFirebaseModelCandidates("gemini-2.5-flash")
+        assertEquals("gemini-3.5-flash-lite", retiredChain.first())
+        assertTrue(retiredChain.contains("gemini-3.8-flash"))
+
+        // No Firebase candidate may be a model Google has retired.
+        (defaultChain + argonChain + retiredChain).forEach {
+            assertFalse(AiModelsCatalog.retiredGeminiModelRemap.containsKey(it.lowercase()))
+        }
     }
 
     @Test
