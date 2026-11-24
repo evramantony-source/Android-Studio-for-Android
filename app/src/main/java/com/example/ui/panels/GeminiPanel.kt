@@ -96,7 +96,6 @@ import com.example.ai.AiThinkingMode
 import com.example.ai.AiUiState
 import com.example.ai.AiUsageSummary
 import com.example.ai.ChatMessage
-import com.example.ai.FirebaseAiAgentClient
 import com.example.ai.GeminiCodeAssistant
 import com.example.ai.ProjectChatThread
 import com.example.ai.SuggestedCodeBlock
@@ -192,12 +191,11 @@ fun GeminiPanel(
     val effectiveSystemInstruction = activeThreadMeta?.customSystemInstruction?.takeIf { it.isNotBlank() }
         ?: editorSettings.customSystemInstruction
 
-    val isFirebaseReady = remember { FirebaseAiAgentClient.isFirebaseConfigured() }
     val resolvedOpenRouterKey = remember(providerApiKeys) {
         GeminiCodeAssistant.resolveOpenRouterApiKey(providerApiKeys[AiProvider.OPENROUTER].orEmpty())
     }
     val hasDirectProviderKey = when (effectiveProvider) {
-        AiProvider.GEMINI -> isFirebaseReady ||
+        AiProvider.GEMINI ->
             GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
         AiProvider.OPENROUTER -> resolvedOpenRouterKey.isNotEmpty()
         else -> providerApiKeys[effectiveProvider].orEmpty().isNotBlank()
@@ -410,7 +408,7 @@ fun GeminiPanel(
             ) {
                 AiProvider.entries.forEach { provider ->
                     val ready = when (provider) {
-                        AiProvider.GEMINI -> isFirebaseReady ||
+                        AiProvider.GEMINI ->
                             GeminiCodeAssistant.resolveApiKey(providerApiKeys[AiProvider.GEMINI].orEmpty()).isNotEmpty()
                         AiProvider.OPENROUTER -> resolvedOpenRouterKey.isNotEmpty()
                         AiProvider.OPENAI, AiProvider.CLAUDE ->

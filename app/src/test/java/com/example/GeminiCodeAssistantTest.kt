@@ -545,63 +545,6 @@ class GeminiCodeAssistantTest {
     }
 
     @Test
-    fun firebaseAiCandidateChainPrioritizesBuiltInGemini38AndFlashLite() {
-        assertTrue(com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel("gemini-3.8-flash"))
-        assertTrue(com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel("gemini-3.5-flash-lite"))
-        assertTrue(com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel("gemini-4-hydrogen"))
-        assertFalse(com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel("gemini-2.5-flash"))
-
-        val defaultChain = com.example.ai.FirebaseAiAgentClient.buildFirebaseModelCandidates("gemini-3.8-flash")
-        assertEquals("gemini-3.8-flash", defaultChain.first())
-        assertTrue(defaultChain.contains("gemini-3.5-flash-lite"))
-        assertEquals(defaultChain.distinct().size, defaultChain.size)
-
-        val argonChain = com.example.ai.FirebaseAiAgentClient.buildFirebaseModelCandidates("gemini-4-argon")
-        assertEquals("gemini-4-argon", argonChain.first())
-        assertTrue(argonChain.contains("gemini-3.8-flash"))
-        assertEquals(argonChain.distinct().size, argonChain.size)
-
-        // A retired saved preference must resolve to a live model, never head the chain itself.
-        // gemini-2.5-flash remaps to gemini-3.5-flash-lite, which is Firebase-served, so that
-        // becomes the head of the chain instead of the retired ID.
-        val retiredChain = com.example.ai.FirebaseAiAgentClient.buildFirebaseModelCandidates("gemini-2.5-flash")
-        assertEquals("gemini-3.5-flash-lite", retiredChain.first())
-        assertTrue(retiredChain.contains("gemini-3.8-flash"))
-
-        // No Firebase candidate may be a model Google has retired.
-        (defaultChain + argonChain + retiredChain).forEach {
-            assertFalse(AiModelsCatalog.retiredGeminiModelRemap.containsKey(it.lowercase()))
-        }
-    }
-
-    @Test
-    fun appCheckDiagnosticsDetectsErrorsAndFormatsSummary() {
-        assertTrue(com.example.ai.AppCheckDiagnostics.isAppCheckMessage("Firebase App Check token is invalid."))
-        assertTrue(com.example.ai.AppCheckDiagnostics.isAppCheckMessage("Recaptcha task failed: NETWORK_ERROR"))
-        assertTrue(com.example.ai.AppCheckDiagnostics.isAppCheckMessage("HTTP 403: App attestation failed"))
-        assertFalse(com.example.ai.AppCheckDiagnostics.isAppCheckMessage("Model quota exceeded (429)"))
-
-        val snap = com.example.ai.AppCheckDiagnosticSnapshot(
-            mode = com.example.ai.AppCheckProviderMode.RECAPTCHA_ENTERPRISE,
-            hasSiteKeyResource = false,
-            isDebugBuild = false,
-            projectId = "gen-lang-client-0552974152",
-            certSha1 = "4D:95:5B:76:B0:68:1E:11:8D:E4:58:D7:86:2A:01:E5:D0:81:6D:F2",
-        )
-        assertFalse(snap.hasProvisionedCertMismatch())
-        assertTrue(snap.copy(certSha1 = "D2:03:CB:F9:11:22").hasProvisionedCertMismatch())
-        val label = snap.summaryLabel()
-        assertTrue(label.contains("reCAPTCHA Enterprise"))
-        assertTrue(label.contains("release"))
-        assertTrue(label.contains("4D:95:5B:76"))
-        assertTrue(label.contains("fallback site key"))
-
-        val withAttestationErr = snap.withRecordedError("Error returned from API. code: 403 body: App attestation failed.")
-        val withBackoff = withAttestationErr.withRecordedError("Too many attempts.")
-        assertTrue(withBackoff.effectiveErrorMessage("Too many attempts.").contains("403 body: App attestation failed"))
-    }
-
-    @Test
     fun openRouterProviderIncludesFreeAndPaidModelsZeroCostFreeTierAndFallback() {
         assertEquals("openrouter/auto", AiProvider.OPENROUTER.defaultModelId)
         assertEquals("openrouter/auto", AiModelsCatalog.normalizeModelId(AiProvider.OPENROUTER, ""))

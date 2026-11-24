@@ -57,14 +57,14 @@ jobs:
             echo "Decoded debug.keystore from committed debug.keystore.base64."
           elif [ -f debug.keystore ]; then
             KEYSTORE_SOURCE="cached-ci-fallback"
-            echo "::warning::debug.keystore.base64 and DEBUG_KEYSTORE_BASE64 missing; reusing cached CI keystore to avoid APK signature conflicts. Add DEBUG_KEYSTORE_BASE64 secret for Firebase App Check."
+            echo "::warning::debug.keystore.base64 and DEBUG_KEYSTORE_BASE64 missing; reusing cached CI keystore to avoid APK signature conflicts. Add a DEBUG_KEYSTORE_BASE64 secret for a stable signing identity across runs."
           else
             keytool -genkeypair -keystore debug.keystore \
               -storepass android -alias androiddebugkey -keypass android \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=Android Debug,O=Android,C=US"
             KEYSTORE_SOURCE="new-ci-fallback"
-            echo "::warning::Generated fallback CI debug.keystore (cached for future runs). Add DEBUG_KEYSTORE_BASE64 secret from debug.keystore.base64 for Firebase App Check."
+            echo "::warning::Generated fallback CI debug.keystore (cached for future runs). Add a DEBUG_KEYSTORE_BASE64 secret from debug.keystore.base64 for a stable signing identity across runs."
           fi
           CERT_SHA1=$(keytool -list -v -keystore debug.keystore -storepass android -alias androiddebugkey | sed -n 's/^[[:space:]]*SHA1:[[:space:]]*//p' | head -n 1)
           echo "CERT_SHA1=$CERT_SHA1" >> "$GITHUB_ENV"
@@ -98,39 +98,6 @@ jobs:
             printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY" >> .env
           fi
 
-      - name: Configure Firebase files from secrets if missing in repo
-        env:
-          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
-          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
-          FIREBASE_APPLET_CONFIG_XML: ${{ secrets.FIREBASE_APPLET_CONFIG_XML }}
-          RECAPTCHA_SITE_KEY: ${{ secrets.RECAPTCHA_SITE_KEY }}
-        run: |
-          if [ ! -f app/google-services.json ]; then
-            if [ -n "$GOOGLE_SERVICES_JSON" ]; then
-              printf '%s\n' "$GOOGLE_SERVICES_JSON" > app/google-services.json
-              echo "Restored app/google-services.json from GOOGLE_SERVICES_JSON secret."
-            elif [ -n "$GOOGLE_SERVICES_JSON_BASE64" ]; then
-              printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | tr -d '[:space:]' | base64 -d > app/google-services.json
-              echo "Restored app/google-services.json from GOOGLE_SERVICES_JSON_BASE64 secret."
-            else
-              echo "::notice::app/google-services.json not present; building without bundled Firebase config (add GOOGLE_SERVICES_JSON secret for zero-key Firebase AI or enter a key in-app)."
-            fi
-          fi
-          if [ ! -f app/src/main/res/values/firebase_applet_config.xml ]; then
-            if [ -n "$FIREBASE_APPLET_CONFIG_XML" ]; then
-              printf '%s\n' "$FIREBASE_APPLET_CONFIG_XML" > app/src/main/res/values/firebase_applet_config.xml
-              echo "Restored firebase_applet_config.xml from secret."
-            elif [ -n "$RECAPTCHA_SITE_KEY" ]; then
-              printf '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <string name="recaptcha_site_key" translatable="false">%s</string>\n</resources>\n' "$RECAPTCHA_SITE_KEY" > app/src/main/res/values/firebase_applet_config.xml
-              echo "Generated firebase_applet_config.xml from RECAPTCHA_SITE_KEY secret."
-            fi
-          fi
-          if [ -f app/google-services.json ]; then
-            echo "HAS_GOOGLE_SERVICES=true" >> "$GITHUB_ENV"
-          else
-            echo "HAS_GOOGLE_SERVICES=false" >> "$GITHUB_ENV"
-          fi
-
       - name: Set up Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -139,7 +106,7 @@ jobs:
       - name: Run unit & Robolectric tests
         run: gradle :app:testDebugUnitTest --no-daemon --stacktrace -Dorg.gradle.jvmargs="-Xmx3g -Dfile.encoding=UTF-8"
 
-      - name: Build Release APK (signed with registered cert, non-debuggable for Firebase App Check)
+      - name: Build Release APK (signed, non-debuggable)
         env:
           KEYSTORE_PATH: /tmp/ci-release.keystore
           STORE_PASSWORD: android
@@ -165,11 +132,11 @@ jobs:
         run: |
           cp app/build/outputs/apk/release/app-release.apk android-studio-for-android-release.apk
           if [ "$KEYSTORE_SOURCE" = "secret-DEBUG_KEYSTORE_BASE64" ] || [ "$KEYSTORE_SOURCE" = "repo-debug.keystore.base64" ]; then
-            CERT_STATUS="Signed with registered Firebase keystore ($CERT_SHA1)"
+            CERT_STATUS="Signed with your stable keystore ($CERT_SHA1)"
           else
-            CERT_STATUS="WARNING: Signed with fallback CI keystore ($CERT_SHA1). Add DEBUG_KEYSTORE_BASE64 secret (from debug.keystore.base64) for zero-key Firebase App Check."
+            CERT_STATUS="NOTE: Signed with fallback CI keystore ($CERT_SHA1). Add a DEBUG_KEYSTORE_BASE64 secret (from debug.keystore.base64) to keep one signing identity across runs."
           fi
-          RELEASE_NOTES=$(printf 'Latest Release APK from commit %s.\n- Bundled google-services.json: %s\n- Signing cert (%s): %s' "${GITHUB_SHA::7}" "$HAS_GOOGLE_SERVICES" "$KEYSTORE_SOURCE" "$CERT_STATUS")
+          RELEASE_NOTES=$(printf 'Latest Release APK from commit %s.\n- AI providers: Gemini, OpenRouter, ChatGPT, Claude (bring your own API key)\n- Signing cert (%s): %s' "${GITHUB_SHA::7}" "$KEYSTORE_SOURCE" "$CERT_STATUS")
           RELEASE_OK=true
           if gh release view latest-debug >/dev/null 2>&1; then
             gh release upload latest-debug android-studio-for-android-release.apk --clobber || RELEASE_OK=false
@@ -188,8 +155,7 @@ jobs:
           fi
           {
             echo "### Android Studio: For Android APK Ready"
-            echo "- **1-Tap Release APK (Recommended for Phone + Firebase App Check):** https://github.com/${{ github.repository }}/releases/latest/download/android-studio-for-android-release.apk"
+            echo "- **1-Tap Release APK (Recommended for Phone):** https://github.com/${{ github.repository }}/releases/latest/download/android-studio-for-android-release.apk"
             echo "- **Releases Page:** https://github.com/${{ github.repository }}/releases/tag/latest-debug"
             echo "- **Signing:** ${CERT_STATUS}"
-            echo "- **google-services.json bundled:** ${HAS_GOOGLE_SERVICES}"
           } >> "$GITHUB_STEP_SUMMARY"

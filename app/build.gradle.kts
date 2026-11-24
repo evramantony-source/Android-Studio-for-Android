@@ -5,14 +5,6 @@ plugins {
   alias(libs.plugins.secrets)
 }
 
-if (
-  file("google-services.json").exists() ||
-    file("src/debug/google-services.json").exists() ||
-    file("src/release/google-services.json").exists()
-) {
-  apply(plugin = libs.plugins.google.services.get().pluginId)
-}
-
 android {
   namespace = "com.example"
   compileSdk { version = release(36) { minorApiLevel = 1 } }
@@ -123,10 +115,6 @@ dependencies {
   implementation(libs.androidx.lifecycle.viewmodel.compose)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
-  implementation(platform(libs.firebase.bom))
-  implementation(libs.firebase.ai)
-  implementation(libs.firebase.appcheck.recaptcha)
-  implementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.serialization.json)
   // Offline on-device Java -> DEX -> Signed APK compiler toolchain
   implementation(libs.ecj)

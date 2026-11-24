@@ -279,7 +279,7 @@ object AiModelsCatalog {
             provider = AiProvider.GEMINI,
             label = "Gemini 3.8 Flash",
             badge = "Default",
-            description = "Stable default — fast autonomous coding, builds and tool use. Works with Firebase AI Logic (no API key needed).",
+            description = "Stable default — fast autonomous coding, builds and tool use.",
             contextWindow = "1M ctx",
         ),
         AiModelOption(
@@ -715,7 +715,7 @@ object AiModelsCatalog {
             provider = AiProvider.OPENROUTER,
             label = "Qwen3 Coder (Free)",
             badge = "Free",
-            description = "Free coding-specialized Qwen3 model on OpenRouter — no credits or Firebase required.",
+            description = "Free coding-specialized Qwen3 model on OpenRouter — no credits required.",
             contextWindow = "262K ctx",
         ),
         AiModelOption(
@@ -781,7 +781,7 @@ object AiModelsCatalog {
             provider = AiProvider.OPENROUTER,
             label = "Gemini 2.5 Flash (OR)",
             badge = "Gemini",
-            description = "Google Gemini 2.5 Flash routed via OpenRouter (no Firebase App Check needed).",
+            description = "Google Gemini 2.5 Flash routed via OpenRouter.",
             contextWindow = "1M ctx",
         ),
         AiModelOption(

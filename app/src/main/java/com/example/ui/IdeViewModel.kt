@@ -371,13 +371,6 @@ class IdeViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         if (fetched.isEmpty()) return
         val savedModel = repository.providerModels.first()[AiProvider.GEMINI].orEmpty()
-        // A Firebase AI Logic model is served without an API key, so leave it alone -- but only
-        // when Firebase is actually bundled. Otherwise it still has to be a model the key serves.
-        if (com.example.ai.FirebaseAiAgentClient.isFirebaseConfigured() &&
-            com.example.ai.FirebaseAiAgentClient.isFirebaseAiLogicModel(savedModel)
-        ) {
-            return
-        }
         val fetchedIds = fetched.map { it.id.lowercase() }.toSet()
         if (savedModel.lowercase() !in fetchedIds) {
             // Prefer a model this key has actually been verified to serve, walking our

@@ -89,9 +89,8 @@ fun ProviderKeysDialog(
     var keyTestStatus by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
 
     val activeKey = keyInputs[selectedProvider].orEmpty()
-    val hasBuiltInFirebase = remember { com.example.ai.FirebaseAiAgentClient.isFirebaseConfigured() }
     val hasBuiltInGemini = selectedProvider == AiProvider.GEMINI &&
-        (hasBuiltInFirebase || GeminiCodeAssistant.hasBuiltInApiKey())
+        GeminiCodeAssistant.hasBuiltInApiKey()
     val hasBuiltInOpenRouter = remember { GeminiCodeAssistant.hasBuiltInOpenRouterApiKey() }
     val currentModel = AiModelsCatalog.normalizeModelId(selectedProvider, providerModels[selectedProvider])
 
@@ -124,7 +123,7 @@ fun ProviderKeysDialog(
                             GeminiCodeAssistant.resolveApiKey(keyInputs[provider].orEmpty()).isNotEmpty()
                         val hasCustomOpenRouter = keyInputs[provider].orEmpty().isNotBlank()
                         val configured = when (provider) {
-                            AiProvider.GEMINI -> hasBuiltInFirebase || hasCustomGemini
+                            AiProvider.GEMINI -> GeminiCodeAssistant.hasBuiltInApiKey() || hasCustomGemini
                             AiProvider.OPENROUTER -> hasBuiltInOpenRouter || hasCustomOpenRouter
                             AiProvider.OPENAI, AiProvider.CLAUDE -> hasCustomOpenRouter || hasOpenRouterBridge
                         }
@@ -136,8 +135,8 @@ fun ProviderKeysDialog(
                             },
                             label = {
                                 val labelText = when {
-                                    provider == AiProvider.GEMINI && hasBuiltInFirebase && hasCustomGemini -> "${provider.shortName} • Custom + Built-in"
-                                    provider == AiProvider.GEMINI && hasBuiltInFirebase -> "${provider.shortName} • Built-in"
+                                    provider == AiProvider.GEMINI && GeminiCodeAssistant.hasBuiltInApiKey() && hasCustomGemini -> "${provider.shortName} • Custom + Built-in"
+                                    provider == AiProvider.GEMINI && GeminiCodeAssistant.hasBuiltInApiKey() -> "${provider.shortName} • Built-in"
                                     provider == AiProvider.OPENROUTER && hasBuiltInOpenRouter && !hasCustomOpenRouter -> "${provider.shortName} • Built-in"
                                     (provider == AiProvider.OPENAI || provider == AiProvider.CLAUDE) && !hasCustomOpenRouter && hasOpenRouterBridge -> "${provider.shortName} • via OR"
                                     configured -> "${provider.shortName} • Ready"
@@ -153,32 +152,23 @@ fun ProviderKeysDialog(
                     }
                 }
 
-                val appCheckDiag = com.example.ai.AppCheckDiagnostics.snapshot
                 Text(
                     text = when {
-                        selectedProvider == AiProvider.GEMINI && hasBuiltInFirebase && appCheckDiag.hasProvisionedCertMismatch() ->
-                            "Built-in Firebase AI is bundled, but this APK is signed with cert ${appCheckDiag.certSha1.take(11)}… instead of ${appCheckDiag.expectedCertSha1Prefix()}…. Add DEBUG_KEYSTORE_BASE64 (from debug.keystore.base64) to GitHub Secrets & install the Release APK for zero-key Firebase, or paste a Google AI Studio key below."
-                        selectedProvider == AiProvider.GEMINI && hasBuiltInFirebase ->
-                            "Built-in Gemini works automatically via Firebase AI Logic (no API key needed). Optionally paste a Google AI Studio key below as a backup/override."
                         selectedProvider == AiProvider.GEMINI && hasBuiltInGemini ->
                             "Built-in Gemini API key is bundled. Optionally paste your own Google AI Studio key below."
                         selectedProvider == AiProvider.GEMINI ->
-                            "This APK was built without google-services.json. Tap 'Get Key' for a free Google AI Studio API key (AIza...) below, or set GOOGLE_SERVICES_JSON in GitHub Secrets for zero-key Firebase AI."
+                            "Tap 'Get Key' below for a free Google AI Studio API key (AIza...). Gemini needs your own key — or use OpenRouter, which has free coding models."
                         selectedProvider == AiProvider.OPENROUTER && hasBuiltInOpenRouter ->
-                            "Built-in OpenRouter key is bundled (works on all APK builds without Firebase App Check). Also powers ChatGPT & Claude models automatically when direct keys are unset."
+                            "Built-in OpenRouter key is bundled. Also powers ChatGPT & Claude models automatically when direct keys are unset."
                         selectedProvider == AiProvider.OPENROUTER ->
-                            "OpenRouter key (sk-or-v1-...) works on any APK build without Firebase App Check and gives access to free & paid coding models (Qwen3 Coder, DeepSeek, Gemini, Claude, GPT)."
+                            "OpenRouter key (sk-or-v1-...) gives access to free & paid coding models (Gemini, Claude, GPT, and free agentic models)."
                         selectedProvider == AiProvider.OPENAI ->
                             "OpenAI API key (sk-...) for GPT-5, GPT-4.5, GPT-4.1, GPT-4o, o4-mini, o3, and o1 models. You can also paste an OpenRouter key (sk-or-v1-...) here or save it in OpenRouter to route ChatGPT models automatically."
                         else ->
                             "Anthropic API key (sk-ant-...) for Claude 4.6, 4.5, 4.1, 4, 3.7, and 3.5 models. You can also paste an OpenRouter key (sk-or-v1-...) here or save it in OpenRouter to route Claude models automatically."
                     },
                     style = MaterialTheme.typography.bodyMedium,
-                    color = if (selectedProvider == AiProvider.GEMINI && hasBuiltInFirebase && appCheckDiag.hasProvisionedCertMismatch()) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
 
                 OutlinedTextField(

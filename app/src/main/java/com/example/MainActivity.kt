@@ -34,7 +34,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.example.ai.configureAppCheck
 import com.example.ui.IdeViewModel
 import com.example.ui.screens.IdeWorkspaceScreen
 import com.example.ui.screens.ProjectsScreen
@@ -44,7 +43,6 @@ import com.example.ui.theme.JetBrainsMonoFontFamily
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        configureAppCheck(this, intent)
 
         enableEdgeToEdge()
         setContent {
