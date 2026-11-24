@@ -597,10 +597,10 @@ class GeminiCodeAssistantTest {
                     outputTokens = 200,
                     totalTokens = 700,
                     estimatedCostUsd = 0.0,
-                    lastModelId = "qwen/qwen3-coder:free",
+                    lastModelId = "particle-ai/particle-1:free",
                 ),
             ),
-            byModel = mapOf("qwen/qwen3-coder:free" to 700L),
+            byModel = mapOf("particle-ai/particle-1:free" to 700L),
         )
         val decoded = com.example.ai.AiUsageSummary.fromJson(usageSummary.toJson())
         assertEquals("particle-ai/particle-1:free", decoded.byProvider[AiProvider.OPENROUTER]?.lastModelId)
