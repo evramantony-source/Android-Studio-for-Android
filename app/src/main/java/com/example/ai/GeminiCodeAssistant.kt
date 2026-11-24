@@ -42,6 +42,12 @@ private const val TURN_TIMEOUT_MS = 420_000L
 private const val STREAM_UI_THROTTLE_MS = 55L
 private const val PRELOAD_CONTEXT_MAX_CHARS = 10_000
 
+// A 503 from Gemini is almost always brief. Retry the SAME model a few times with a real
+// backoff before moving on, instead of burning the whole fallback chain in two seconds.
+private const val MAX_TRANSIENT_ATTEMPTS_PER_MODEL = 3
+private const val TRANSIENT_BACKOFF_BASE_MS = 1_200L
+private const val TRANSIENT_BACKOFF_MAX_MS = 20_000L
+
 internal class GeminiApiException(
     val httpCode: Int,
     message: String,
@@ -811,8 +817,11 @@ class GeminiCodeAssistant {
                 val completedToolStepsBeforeError = steps.any {
                     it.status == AgentStepStatus.COMPLETED && !it.id.startsWith("think_")
                 }
-                // "Try another way": direct compact non-tool unary generateContent rescue
-                val rescue = tryCompactNonToolRescue(
+                val isOffline = isOfflineError(agentError)
+                // "Try another way": direct compact non-tool unary generateContent rescue.
+                // Pointless while offline -- it would walk the whole model chain to fail
+                // the same way on every one.
+                val rescue = if (isOffline) null else tryCompactNonToolRescue(
                     apiKey = apiKey,
                     verifiedLiveModelIds = verifiedLiveModelIds,
                     projectLanguage = projectLanguage,
@@ -834,18 +843,41 @@ class GeminiCodeAssistant {
                 )
                 if (rescue == null) {
                     if (completedToolStepsBeforeError) {
+                        // Edits already on disk are kept, but say honestly why the run
+                        // stopped. Reporting a dropped connection as "completed before
+                        // quota" told people the work was finished when it was not.
+                        val rateLimited = agentError is GeminiApiException &&
+                            (agentError.httpCode == 429 || agentError.httpCode == 503)
+                        val stepTitle = when {
+                            isOffline -> "Edits saved, then lost connection"
+                            rateLimited -> "Completed edits before quota limit"
+                            else -> "Edits saved, then the run stopped early"
+                        }
+                        val fallbackSummary = when {
+                            isOffline ->
+                                "I saved the file changes I had already made, then lost the " +
+                                    "connection to Google's API, so this run is **not finished**. " +
+                                    "Check your internet and tap **Retry** to continue."
+                            rateLimited ->
+                                "I completed your file updates, then hit the API rate limit " +
+                                    "before finishing. Tap **Build / Run** to test what is there, " +
+                                    "or **Retry** to continue."
+                            else ->
+                                "I saved the file changes I had already made, then the run " +
+                                    "stopped early (${agentError.message ?: "unknown error"}). " +
+                                    "Tap **Retry** to continue."
+                        }
                         addOrUpdateStep(
                             AgentStep(
                                 id = thinkStepId,
-                                title = "Completed edits before quota limit",
-                                detail = agentError.message ?: "Follow-up summary hit API limit",
+                                title = stepTitle,
+                                detail = agentError.message ?: "Run stopped before the summary",
                                 status = AgentStepStatus.COMPLETED,
                                 durationMs = System.currentTimeMillis() - turnStart,
                             ),
                         )
-                        val partialSummary = accumulatedVisibleText.toString().trim().ifBlank {
-                            "Completed your requested file updates. Tap **Build / Run** to test, or tap **Retry** if you want me to continue further."
-                        }
+                        val partialSummary = accumulatedVisibleText.toString().trim()
+                            .ifBlank { fallbackSummary }
                         onFinalizeSuccess(partialSummary, steps.toList(), cumulativeTokens, activeModel)
                         completed = true
                         break
@@ -1910,8 +1942,9 @@ class GeminiCodeAssistant {
             var includeThinkingConfig = true
             var stripThoughts = false
             var attemptsOnCandidate = 0
+            var transientAttempts = 0
 
-            while (attemptsOnCandidate < 3) {
+            while (attemptsOnCandidate < 3 + MAX_TRANSIENT_ATTEMPTS_PER_MODEL) {
                 coroutineContext.ensureActive()
                 attemptsOnCandidate++
                 val payloadContents = if (stripThoughts) stripThoughtPartsFromContents(contents) else contents
@@ -1988,6 +2021,25 @@ class GeminiCodeAssistant {
                         hasNextCandidate = index < candidates.size
                     }
 
+                    // Wait out a transient overload on THIS model before giving up on it.
+                    // This has to come before the failover branch: previously failover ran
+                    // first, so a 503 skipped to the next model after ~250ms and the whole
+                    // chain was exhausted in seconds while the overload was still clearing.
+                    if (isTransientHttpStatus(e.httpCode) &&
+                        transientAttempts < MAX_TRANSIENT_ATTEMPTS_PER_MODEL
+                    ) {
+                        transientAttempts++
+                        val waitMs = transientBackoffMs(transientAttempts, e.retryAfterMs)
+                        val label = if (e.httpCode == 429) "Rate limit (429)" else "High demand (${e.httpCode})"
+                        onStatusUpdate(
+                            "$label on $candidate",
+                            "Waiting ${"%.1f".format(waitMs / 1000.0)}s, then retry " +
+                                "$transientAttempts of $MAX_TRANSIENT_ATTEMPTS_PER_MODEL...",
+                        )
+                        delay(waitMs)
+                        continue
+                    }
+
                     if (shouldFailoverHttpStatus(e.httpCode) && hasNextCandidate) {
                         val nextModel = candidates[index]
                         val statusLabel = when (e.httpCode) {
@@ -1999,24 +2051,14 @@ class GeminiCodeAssistant {
                             statusLabel,
                             "Switching to $nextModel...",
                         )
-                        if (isTransientHttpStatus(e.httpCode)) {
-                            delay((e.retryAfterMs ?: 250L).coerceIn(200L, 1200L))
-                        }
                         break
-                    }
-
-                    if (isTransientHttpStatus(e.httpCode) && attemptsOnCandidate <= 2) {
-                        val waitMs = (e.retryAfterMs ?: 1800L).coerceIn(1000L, 4500L)
-                        onStatusUpdate(
-                            "High demand (${e.httpCode}) on $candidate",
-                            "Retrying $candidate in ${waitMs / 1000.0}s...",
-                        )
-                        delay(waitMs)
-                        continue
                     }
 
                     throw e
                 } catch (e: IOException) {
+                    // DNS failure means the device is offline: no other model can succeed, so
+                    // fail fast instead of walking the whole chain and mislabelling it a timeout.
+                    if (e is UnknownHostException) throw e
                     val timeoutErr = if (e is SocketTimeoutException) e else SocketTimeoutException(e.message ?: "Network timeout")
                     recordError(candidate, timeoutErr)
                     if (!hasNextCandidate && !discoveredLiveModels) {
@@ -2125,8 +2167,9 @@ class GeminiCodeAssistant {
             }
             .sortedWith(
                 compareBy<String>(
-                    { !it.contains("2.5-flash", ignoreCase = true) },
-                    { !it.contains("2.0-flash", ignoreCase = true) },
+                    { !it.contains("gemini-4", ignoreCase = true) },
+                    { !it.contains("gemini-3.8", ignoreCase = true) },
+                    { !it.contains("gemini-3", ignoreCase = true) },
                     { !it.contains("flash", ignoreCase = true) },
                     { it.contains("preview", ignoreCase = true) || it.contains("exp", ignoreCase = true) },
                 ).thenBy { it },
@@ -2260,6 +2303,9 @@ class GeminiCodeAssistant {
             )
         } catch (e: IOException) {
             if (receivedAnyPayload) throw e
+            // Offline: the unary retry would fail identically, so do not spend a second
+            // request (and a misleading "switching transport" step) on it.
+            if (isOfflineError(e)) throw e
             Log.w(TAG, "SSE failed before receiving payload for $modelId (${e.message}); trying unary generateContent", e)
             onFallback()
             return generateContentUnary(modelId, apiKey, requestBody, onTextDelta)
@@ -2686,7 +2732,7 @@ class GeminiCodeAssistant {
     private fun parseRetryAfterMs(header: String?): Long? {
         val raw = header?.trim() ?: return null
         val seconds = raw.toLongOrNull() ?: return null
-        return (seconds * 1000L).coerceIn(250L, 4500L)
+        return (seconds * 1000L).coerceIn(250L, TRANSIENT_BACKOFF_MAX_MS)
     }
 
     internal fun buildRequestPayload(
@@ -2926,6 +2972,39 @@ class GeminiCodeAssistant {
         fun hasBuiltInOpenRouterApiKey(): Boolean {
             val builtIn = BuildConfig.OPENROUTER_API_KEY.trim()
             return builtIn.isNotEmpty() && !builtIn.equals("OPENROUTER_API_KEY_DEFAULT_VALUE", ignoreCase = true)
+        }
+
+        /**
+         * Exponential backoff with jitter for a transient server error, never shorter than
+         * the server's own Retry-After. [jitterMs] is injectable so tests are deterministic.
+         */
+        internal fun transientBackoffMs(
+            attempt: Int,
+            retryAfterMs: Long?,
+            jitterMs: Long = kotlin.random.Random.nextLong(0L, 400L),
+        ): Long {
+            val step = attempt.coerceAtLeast(1).coerceAtMost(6)
+            val exponential = TRANSIENT_BACKOFF_BASE_MS shl (step - 1)
+            val base = maxOf(exponential, retryAfterMs ?: 0L)
+            return (base + jitterMs).coerceIn(TRANSIENT_BACKOFF_BASE_MS, TRANSIENT_BACKOFF_MAX_MS)
+        }
+
+        /** True when a failure means the device could not reach the network at all. */
+        internal fun isOfflineError(error: Throwable?): Boolean {
+            var cause = error
+            var depth = 0
+            while (cause != null && depth < 5) {
+                if (cause is UnknownHostException) return true
+                val msg = cause.message.orEmpty()
+                if (msg.contains("Unable to resolve host", ignoreCase = true) ||
+                    msg.contains("No address associated with hostname", ignoreCase = true)
+                ) {
+                    return true
+                }
+                cause = cause.cause
+                depth++
+            }
+            return false
         }
 
         internal fun isTransientHttpStatus(httpCode: Int): Boolean {

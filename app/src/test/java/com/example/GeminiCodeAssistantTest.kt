@@ -608,6 +608,66 @@ class GeminiCodeAssistantTest {
     }
 
     @Test
+    fun transientBackoffGrowsExponentiallyAndHonoursRetryAfter() {
+        // Deterministic: pass jitter explicitly.
+        val a1 = GeminiCodeAssistant.transientBackoffMs(1, null, jitterMs = 0L)
+        val a2 = GeminiCodeAssistant.transientBackoffMs(2, null, jitterMs = 0L)
+        val a3 = GeminiCodeAssistant.transientBackoffMs(3, null, jitterMs = 0L)
+        assertEquals(1_200L, a1)
+        assertEquals(2_400L, a2)
+        assertEquals(4_800L, a3)
+        assertTrue(a1 < a2 && a2 < a3)
+
+        // A server asking for longer than our own backoff wins.
+        assertEquals(15_000L, GeminiCodeAssistant.transientBackoffMs(1, 15_000L, jitterMs = 0L))
+        // ...but our backoff wins when it is the longer of the two.
+        assertEquals(4_800L, GeminiCodeAssistant.transientBackoffMs(3, 1_000L, jitterMs = 0L))
+
+        // Always clamped into a sane window, however extreme the inputs.
+        assertEquals(20_000L, GeminiCodeAssistant.transientBackoffMs(9, 600_000L, jitterMs = 0L))
+        assertTrue(GeminiCodeAssistant.transientBackoffMs(0, null, jitterMs = 0L) >= 1_200L)
+
+        // Jitter is added but never breaks the ceiling.
+        assertEquals(1_600L, GeminiCodeAssistant.transientBackoffMs(1, null, jitterMs = 400L))
+        assertEquals(20_000L, GeminiCodeAssistant.transientBackoffMs(9, 20_000L, jitterMs = 400L))
+    }
+
+    @Test
+    fun offlineErrorsAreRecognisedSoTheModelChainIsNotBurned() {
+        assertTrue(GeminiCodeAssistant.isOfflineError(java.net.UnknownHostException("generativelanguage.googleapis.com")))
+        assertTrue(
+            GeminiCodeAssistant.isOfflineError(
+                java.io.IOException("Unable to resolve host \"generativelanguage.googleapis.com\": No address associated with hostname"),
+            ),
+        )
+        // Wrapped causes must still be detected.
+        assertTrue(
+            GeminiCodeAssistant.isOfflineError(
+                RuntimeException("agent turn failed", java.net.UnknownHostException("host")),
+            ),
+        )
+        // Not offline: these must keep their own handling.
+        assertFalse(GeminiCodeAssistant.isOfflineError(null))
+        assertFalse(GeminiCodeAssistant.isOfflineError(java.net.SocketTimeoutException("timed out")))
+        assertFalse(GeminiCodeAssistant.isOfflineError(RuntimeException("High demand (503)")))
+    }
+
+    @Test
+    fun transientStatusesRetryTheSameModelBeforeFailingOver() {
+        // 503 and friends are transient and must be retried, not treated as a dead model.
+        listOf(408, 429, 500, 502, 503, 504, 529).forEach {
+            assertTrue("$it should be transient", GeminiCodeAssistant.isTransientHttpStatus(it))
+            assertTrue("$it should allow failover", GeminiCodeAssistant.shouldFailoverHttpStatus(it))
+        }
+        // 404 is not transient: there is nothing to wait for, so it fails over at once.
+        assertFalse(GeminiCodeAssistant.isTransientHttpStatus(404))
+        assertTrue(GeminiCodeAssistant.shouldFailoverHttpStatus(404))
+        // Auth failures are neither.
+        assertFalse(GeminiCodeAssistant.isTransientHttpStatus(401))
+        assertFalse(GeminiCodeAssistant.shouldFailoverHttpStatus(403))
+    }
+
+    @Test
     fun openRouterRetiredSlugsAreRemappedToLiveReplacements() {
         // Withdrawn free slugs must resolve to a LIVE FREE replacement -- never to a paid
         // model, and never to another withdrawn slug.
