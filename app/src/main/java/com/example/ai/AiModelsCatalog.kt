@@ -239,6 +239,56 @@ object AiModelsCatalog {
         "gemini-2.5-flash-lite",
     )
 
+    /**
+     * OpenRouter slugs that are no longer served, mapped to a live replacement.
+     * Verified against https://openrouter.ai/api/v1/models (a public, keyless endpoint).
+     * A free slug must always map to another free slug so a free-tier user is never
+     * silently switched onto a paid model.
+     */
+    val retiredOpenRouterModelRemap: Map<String, String> = mapOf(
+        // Free models that OpenRouter has withdrawn.
+        "qwen/qwen3-coder:free" to "particle-ai/particle-1:free",
+        "deepseek/deepseek-r1-0528:free" to "particle-ai/particle-1:free",
+        "deepseek/deepseek-chat-v3-0324:free" to "particle-ai/particle-1:free",
+        "google/gemma-3-27b-it:free" to "google/gemma-4-31b-it:free",
+        "meta-llama/llama-3.3-70b-instruct:free" to "nvidia/nemotron-3.5-lightning:free",
+        "mistralai/mistral-small-3.1-24b-instruct:free" to "google/gemma-4-26b-a4b-it:free",
+        "nvidia/nemotron-nano-9b-v2:free" to "nvidia/nemotron-3.5-lightning:free",
+        "qwen/qwen3-235b-a22b:free" to "nvidia/nemotron-3-ultra-550b-a55b:free",
+        // Paid models that OpenRouter has withdrawn.
+        "anthropic/claude-3.5-sonnet" to "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-3.7-sonnet" to "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-sonnet-4" to "anthropic/claude-sonnet-4.5",
+        "openai/o4-mini" to "openai/gpt-5-mini",
+    )
+
+    /**
+     * Live free OpenRouter models with tool-calling support, best coding models first.
+     * Every entry must be currently served; a withdrawn slug here recreates the 404
+     * cascade this list exists to prevent.
+     */
+    val openRouterFreeFailoverPool: List<String> = listOf(
+        "particle-ai/particle-1:free",
+        "baidu/ernie-5.5-flash-preview:free",
+        "nvidia/nemotron-3.5-lightning:free",
+        "inclusionai/ling-3.2-flash:free",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+        "google/gemma-4-31b-it:free",
+        "dots-studio/dots-3-note-preview:free",
+    )
+
+    /** Live paid OpenRouter models used as a last resort, strongest coding models first. */
+    val openRouterPaidFailoverPool: List<String> = listOf(
+        "anthropic/claude-sonnet-4.5",
+        "openai/gpt-5-mini",
+        "google/gemini-3.8-flash",
+        "openai/gpt-4.1",
+        "anthropic/claude-haiku-4.5",
+    )
+
+    fun isRetiredOpenRouterModel(modelId: String): Boolean =
+        modelId.trim().lowercase() in retiredOpenRouterModelRemap
+
     val builtInGeminiModels: List<AiModelOption> = listOf(
         // Gemini 4 series — current frontier, no shutdown date announced.
         AiModelOption(
@@ -711,70 +761,60 @@ object AiModelsCatalog {
             contextWindow = "200K ctx",
         ),
         AiModelOption(
-            id = "qwen/qwen3-coder:free",
+            id = "particle-ai/particle-1:free",
             provider = AiProvider.OPENROUTER,
-            label = "Qwen3 Coder (Free)",
+            label = "Particle-1 (Free)",
             badge = "Free",
-            description = "Free coding-specialized Qwen3 model on OpenRouter — no credits required.",
+            description = "Free token-efficient agentic coding model built for software engineering work.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "baidu/ernie-5.5-flash-preview:free",
+            provider = AiProvider.OPENROUTER,
+            label = "ERNIE 5.5 Flash (Free)",
+            badge = "Free",
+            description = "Free ERNIE 5.5 Flash with strong coding and agentic tool-calling.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "nvidia/nemotron-3.5-lightning:free",
+            provider = AiProvider.OPENROUTER,
+            label = "Nemotron 3.5 Lightning (Free)",
+            badge = "Free",
+            description = "Fast free NVIDIA MoE model suited to high-throughput agentic edits.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "inclusionai/ling-3.2-flash:free",
+            provider = AiProvider.OPENROUTER,
+            label = "Ling 3.2 Flash (Free)",
+            badge = "Free",
+            description = "Free hybrid reasoning model with a 1M-token context for whole-project work.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "nvidia/nemotron-3-ultra-550b-a55b:free",
+            provider = AiProvider.OPENROUTER,
+            label = "Nemotron 3 Ultra (Free)",
+            badge = "Free",
+            description = "Free frontier-reasoning NVIDIA model for complex architecture and build fixes.",
+            contextWindow = "1M ctx",
+        ),
+        AiModelOption(
+            id = "google/gemma-4-31b-it:free",
+            provider = AiProvider.OPENROUTER,
+            label = "Gemma 4 31B (Free)",
+            badge = "Free",
+            description = "Free Google Gemma 4 31B multimodal instruct model on OpenRouter.",
             contextWindow = "262K ctx",
         ),
         AiModelOption(
-            id = "deepseek/deepseek-r1-0528:free",
+            id = "dots-studio/dots-3-note-preview:free",
             provider = AiProvider.OPENROUTER,
-            label = "DeepSeek R1 0528 (Free)",
+            label = "Dots3-Note (Free)",
             badge = "Free",
-            description = "Free DeepSeek R1 reasoning model for debugging, architecture & build fixes.",
-            contextWindow = "164K ctx",
-        ),
-        AiModelOption(
-            id = "deepseek/deepseek-chat-v3-0324:free",
-            provider = AiProvider.OPENROUTER,
-            label = "DeepSeek V3 (Free)",
-            badge = "Free",
-            description = "Free DeepSeek V3 model with strong Java, Kotlin & tool-calling support.",
-            contextWindow = "164K ctx",
-        ),
-        AiModelOption(
-            id = "google/gemma-3-27b-it:free",
-            provider = AiProvider.OPENROUTER,
-            label = "Gemma 3 27B (Free)",
-            badge = "Free",
-            description = "Free Google Gemma 3 27B instruct model on OpenRouter (auto-adapted for Gemma).",
-            contextWindow = "131K ctx",
-            supportsTools = false,
-            supportsSystemPrompt = false,
-        ),
-        AiModelOption(
-            id = "meta-llama/llama-3.3-70b-instruct:free",
-            provider = AiProvider.OPENROUTER,
-            label = "Llama 3.3 70B (Free)",
-            badge = "Free",
-            description = "Free open-weight Llama 3.3 70B instruct model on OpenRouter.",
-            contextWindow = "131K ctx",
-        ),
-        AiModelOption(
-            id = "mistralai/mistral-small-3.1-24b-instruct:free",
-            provider = AiProvider.OPENROUTER,
-            label = "Mistral Small 3.1 (Free)",
-            badge = "Free",
-            description = "Free Mistral Small 3.1 24B model on OpenRouter for fast Android edits.",
-            contextWindow = "128K ctx",
-        ),
-        AiModelOption(
-            id = "nvidia/nemotron-nano-9b-v2:free",
-            provider = AiProvider.OPENROUTER,
-            label = "Nemotron Nano 9B v2 (Free)",
-            badge = "Free",
-            description = "Fast free NVIDIA Nemotron Nano 9B v2 model on OpenRouter.",
-            contextWindow = "128K ctx",
-        ),
-        AiModelOption(
-            id = "qwen/qwen3-235b-a22b:free",
-            provider = AiProvider.OPENROUTER,
-            label = "Qwen3 235B (Free)",
-            badge = "Free",
-            description = "Free large Qwen3 235B MoE model on OpenRouter.",
-            contextWindow = "131K ctx",
+            description = "Free open-weight MoE model from Dots Studio for everyday Android edits.",
+            contextWindow = "512K ctx",
         ),
         AiModelOption(
             id = "google/gemini-2.5-flash",
@@ -825,12 +865,12 @@ object AiModelsCatalog {
             contextWindow = "200K ctx",
         ),
         AiModelOption(
-            id = "anthropic/claude-sonnet-4",
+            id = "google/gemini-4-hydrogen",
             provider = AiProvider.OPENROUTER,
-            label = "Claude Sonnet 4 (OR)",
-            badge = "Claude",
-            description = "Anthropic Claude Sonnet 4 routed via OpenRouter with accurate tool calling.",
-            contextWindow = "200K ctx",
+            label = "Gemini 4 Hydrogen (OR)",
+            badge = "Gemini",
+            description = "Google's recommended Gemini 4 coding model routed via OpenRouter.",
+            contextWindow = "1M ctx",
         ),
         AiModelOption(
             id = "anthropic/claude-haiku-4.5",
@@ -841,20 +881,12 @@ object AiModelsCatalog {
             contextWindow = "200K ctx",
         ),
         AiModelOption(
-            id = "anthropic/claude-3.7-sonnet",
+            id = "google/gemini-3.8-flash",
             provider = AiProvider.OPENROUTER,
-            label = "Claude 3.7 Sonnet (OR)",
-            badge = "Claude",
-            description = "Anthropic Claude 3.7 Sonnet routed via OpenRouter.",
-            contextWindow = "200K ctx",
-        ),
-        AiModelOption(
-            id = "anthropic/claude-3.5-sonnet",
-            provider = AiProvider.OPENROUTER,
-            label = "Claude 3.5 Sonnet (OR)",
-            badge = "Claude",
-            description = "Anthropic Claude 3.5 Sonnet routed via OpenRouter.",
-            contextWindow = "200K ctx",
+            label = "Gemini 3.8 Flash (OR)",
+            badge = "Gemini",
+            description = "Google Gemini 3.8 Flash routed via OpenRouter — fast general-purpose coding.",
+            contextWindow = "1M ctx",
         ),
         AiModelOption(
             id = "openai/gpt-5",
@@ -895,14 +927,6 @@ object AiModelsCatalog {
             badge = "4o",
             description = "OpenAI GPT-4o Mini routed via OpenRouter.",
             contextWindow = "128K ctx",
-        ),
-        AiModelOption(
-            id = "openai/o4-mini",
-            provider = AiProvider.OPENROUTER,
-            label = "o4-mini (OR)",
-            badge = "o-Series",
-            description = "OpenAI o4-mini reasoning model routed via OpenRouter.",
-            contextWindow = "200K ctx",
         ),
         AiModelOption(
             id = "qwen/qwen3-coder",
@@ -1004,11 +1028,24 @@ object AiModelsCatalog {
                 else -> cleaned
             }
             AiProvider.GEMINI -> retiredGeminiModelRemap[lower] ?: cleaned
-            else -> cleaned
+            AiProvider.OPENROUTER -> retiredOpenRouterModelRemap[lower] ?: cleaned
         }
     }
 
     fun toOpenRouterSlug(
+        provider: AiProvider,
+        rawModelId: String,
+        liveOpenRouterModels: List<AiModelOption> = emptyList(),
+    ): String = retireSafeOpenRouterSlug(toOpenRouterSlugRaw(provider, rawModelId, liveOpenRouterModels))
+
+    /**
+     * Never hand OpenRouter a slug it has withdrawn: the ChatGPT/Claude bridge builds slugs
+     * from direct-provider model IDs, so a retired family would otherwise 404.
+     */
+    private fun retireSafeOpenRouterSlug(slug: String): String =
+        retiredOpenRouterModelRemap[slug.trim().lowercase()] ?: slug
+
+    private fun toOpenRouterSlugRaw(
         provider: AiProvider,
         rawModelId: String,
         liveOpenRouterModels: List<AiModelOption> = emptyList(),
@@ -1058,17 +1095,40 @@ object AiModelsCatalog {
         return lower == "openrouter/free" || lower == "openrouter/auto"
     }
 
+    private val SMALL_PARAM_TOKEN = Regex("(^|[-/])\\d{1,2}b([-:.]|$)")
+
     internal fun openRouterCodingRank(option: AiModelOption): Int {
         val id = option.id.lowercase()
         var score = 100
         if (option.supportsTools) score -= 45
         if (!option.supportsSystemPrompt) score += 25
         if (isOpenRouterMetaRouter(id)) score += 60
-        if (id.contains("coder") || id.contains("codestral") || id.contains("devstral")) score -= 25
-        if (id.contains("qwen") || id.contains("deepseek") || id.contains("claude") || id.contains("sonnet") || id.contains("gpt-5") || id.contains("gpt-4.1") || id.contains("gemini-2.5")) score -= 18
-        if (id.contains("r1") || id.contains("reasoning") || id.contains("nemotron") || id.contains("llama-3.3") || id.contains("mistral-small") || id.contains("glm") || id.contains("kimi")) score -= 10
-        if (id.contains("nano") || id.contains("1b") || id.contains("3b") || id.contains("4b") || id.contains("7b") || id.contains("8b") || id.contains("9b")) score += 20
-        if (id.contains("gemma")) score += 25
+        // Purpose-built coding models.
+        if (id.contains("coder") || id.contains("codestral") || id.contains("devstral") ||
+            id.contains("particle")
+        ) {
+            score -= 25
+        }
+        // Current strong general families.
+        if (id.contains("claude") || id.contains("sonnet") || id.contains("opus") ||
+            id.contains("gpt-5") || id.contains("gpt-4.1") || id.contains("gemini-4") ||
+            id.contains("gemini-3") || id.contains("ernie")
+        ) {
+            score -= 18
+        }
+        // Capable reasoning / agentic open-weight families.
+        if (id.contains("reasoning") || id.contains("nemotron") || id.contains("ling-") ||
+            id.contains("dots-") || id.contains("glm") || id.contains("kimi") ||
+            id.contains("qwen") || id.contains("deepseek")
+        ) {
+            score -= 10
+        }
+        // Small models: match a real parameter-count token so MoE active-parameter
+        // suffixes such as "a4b" or "a55b" are not mistaken for a tiny model.
+        if (id.contains("nano") || id.contains("lite") || SMALL_PARAM_TOKEN.containsMatchIn(id)) {
+            score += 20
+        }
+        if (id.contains("gemma")) score += 15
         return score
     }
 
@@ -1076,14 +1136,22 @@ object AiModelsCatalog {
         requestedModelId: String,
         liveModels: List<AiModelOption>,
     ): String {
-        val clean = normalizeModelId(AiProvider.OPENROUTER, requestedModelId)
+        val requested = requestedModelId.trim()
+        // The remapped id is the answer when there is no live catalogue to match against.
+        val clean = normalizeModelId(AiProvider.OPENROUTER, requested)
         val liveOr = liveModels.filter { it.provider == AiProvider.OPENROUTER }
         if (liveOr.size < 2) return clean
 
+        // Prefer exactly what the user picked while OpenRouter still serves it, then the
+        // documented replacement.
+        liveOr.firstOrNull { it.id.equals(requested, ignoreCase = true) }?.let { return it.id }
         liveOr.firstOrNull { it.id.equals(clean, ignoreCase = true) }?.let { return it.id }
         if (isOpenRouterMetaRouter(clean)) return clean
 
-        val wantsFree = isFreeOpenRouterModel(clean)
+        // Match on the ORIGINAL request, not the remapped id, so a withdrawn model still
+        // resolves within its own family when OpenRouter serves a newer sibling.
+        val matchBase = requested.ifBlank { clean }
+        val wantsFree = isFreeOpenRouterModel(matchBase) || isFreeOpenRouterModel(clean)
         val candidates = liveOr.filter { option ->
             !isOpenRouterMetaRouter(option.id) && (!wantsFree || isFreeOpenRouterModel(option.id))
         }
@@ -1095,7 +1163,7 @@ object AiModelsCatalog {
             }
         }
 
-        val cleanLower = clean.lowercase().removeSuffix(":free")
+        val cleanLower = matchBase.lowercase().removeSuffix(":free")
         val requestedVendor = cleanLower.substringBefore('/', "")
         val requestedTokens = cleanLower.substringAfter('/').split('-', '_', '.', ':')
             .filter { it.length >= 2 }
@@ -1271,10 +1339,7 @@ object AiModelsCatalog {
                     "claude-sonnet-4-6",
                     "claude-sonnet-4-5",
                     "claude-haiku-4-5",
-                    "claude-sonnet-4-20250514",
-                    "claude-3-7-sonnet-latest",
-                    "claude-3-5-sonnet-latest",
-                    "claude-3-haiku-20240307",
+                    "claude-opus-4-6",
                 )
             }
             AiProvider.OPENROUTER -> {
@@ -1304,13 +1369,7 @@ object AiModelsCatalog {
 
                 if (isFreeOpenRouterModel(cleanPrimary)) {
                     // Try capable named free models first; keep openrouter/free as last-resort free fallback and NEVER enter paid models.
-                    val fallbackFree = if (liveFree.isNotEmpty()) {
-                        liveFree
-                    } else {
-                        builtInOpenRouterModels
-                            .map { it.id }
-                            .filter { isFreeOpenRouterModel(it) && !isOpenRouterMetaRouter(it) }
-                    }
+                    val fallbackFree = liveFree.ifEmpty { openRouterFreeFailoverPool }
                     fallbackFree + listOf("openrouter/free")
                 } else {
                     val primaryVendor = cleanPrimary.lowercase().substringBefore('/', "")
@@ -1318,16 +1377,13 @@ object AiModelsCatalog {
                         livePaid.filter { it.lowercase().startsWith("$primaryVendor/") } +
                             when (primaryVendor) {
                                 "anthropic" -> listOf(
+                                    "anthropic/claude-sonnet-4.6",
                                     "anthropic/claude-sonnet-4.5",
-                                    "anthropic/claude-sonnet-4",
                                     "anthropic/claude-haiku-4.5",
-                                    "anthropic/claude-3.7-sonnet",
-                                    "anthropic/claude-3.5-sonnet",
                                 )
                                 "openai" -> listOf(
                                     "openai/gpt-5-mini",
                                     "openai/gpt-4.1",
-                                    "openai/gpt-4o",
                                     "openai/gpt-4o-mini",
                                 )
                                 else -> emptyList()
@@ -1335,22 +1391,12 @@ object AiModelsCatalog {
                     } else {
                         emptyList()
                     }
-                    val paidPool = (vendorSamePaid + if (livePaid.isNotEmpty()) {
-                        livePaid
-                    } else {
-                        listOf(
-                            "google/gemini-2.5-flash",
-                            "openai/gpt-4o-mini",
-                            "anthropic/claude-3.7-sonnet",
-                        )
-                    }).distinct()
+                    val paidPool = (vendorSamePaid + livePaid.ifEmpty { openRouterPaidFailoverPool })
+                        .distinct()
                     val freePool = if (liveFree.isNotEmpty()) {
                         liveFree.take(4)
                     } else {
-                        builtInOpenRouterModels
-                            .map { it.id }
-                            .filter { isFreeOpenRouterModel(it) && !isOpenRouterMetaRouter(it) }
-                            .take(4)
+                        openRouterFreeFailoverPool.take(4)
                     }
                     paidPool + listOf("openrouter/auto") + freePool + listOf("openrouter/free")
                 }
@@ -1359,7 +1405,13 @@ object AiModelsCatalog {
         val ordered = linkedSetOf<String>()
         ordered.add(cleanPrimary)
         pool.forEach { ordered.add(it) }
-        return ordered.toList()
+        // A withdrawn slug anywhere in the chain reproduces the 404 cascade, so drop them
+        // all. cleanPrimary is already de-retired by normalizeModelId above.
+        return if (provider == AiProvider.OPENROUTER) {
+            ordered.filterNot { isRetiredOpenRouterModel(it) }
+        } else {
+            ordered.toList()
+        }
     }
 
     suspend fun fetchLiveModels(

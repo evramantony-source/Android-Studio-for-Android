@@ -551,10 +551,18 @@ class GeminiCodeAssistantTest {
 
         val openRouterModels = AiModelsCatalog.modelsFor(AiProvider.OPENROUTER)
         assertTrue(openRouterModels.any { it.id == "openrouter/auto" })
-        assertTrue(openRouterModels.any { it.id == "qwen/qwen3-coder:free" })
-        assertTrue(openRouterModels.any { it.id == "deepseek/deepseek-chat-v3-0324:free" })
-        assertTrue(openRouterModels.any { it.id == "google/gemini-2.5-flash" })
-        assertTrue(openRouterModels.any { it.id == "anthropic/claude-sonnet-4" })
+        assertTrue(openRouterModels.any { it.id == "openrouter/free" })
+        assertTrue(openRouterModels.any { it.id == "particle-ai/particle-1:free" })
+        assertTrue(openRouterModels.any { it.id == "nvidia/nemotron-3.5-lightning:free" })
+        assertTrue(openRouterModels.any { it.id == "google/gemini-4-hydrogen" })
+        assertTrue(openRouterModels.any { it.id == "anthropic/claude-sonnet-4.5" })
+        // Withdrawn slugs must not be offered in the picker.
+        openRouterModels.forEach {
+            assertFalse(
+                "Catalog offers withdrawn OpenRouter model ${it.id}",
+                AiModelsCatalog.isRetiredOpenRouterModel(it.id),
+            )
+        }
 
         // Free tier models must always estimate $0.00 cost
         assertEquals(
@@ -564,17 +572,18 @@ class GeminiCodeAssistantTest {
         )
         assertEquals(
             0.0,
-            AiModelsCatalog.estimateCostUsd("deepseek/deepseek-chat-v3-0324:free", inputTokens = 25_000L, outputTokens = 5_000L),
+            AiModelsCatalog.estimateCostUsd("particle-ai/particle-1:free", inputTokens = 25_000L, outputTokens = 5_000L),
             0.0,
         )
         assertTrue(
-            AiModelsCatalog.estimateCostUsd("anthropic/claude-sonnet-4", inputTokens = 10_000L, outputTokens = 2_000L) > 0.0,
+            AiModelsCatalog.estimateCostUsd("anthropic/claude-sonnet-4.5", inputTokens = 10_000L, outputTokens = 2_000L) > 0.0,
         )
 
-        val chain = AiModelsCatalog.fallbackChain(AiProvider.OPENROUTER, "anthropic/claude-sonnet-4")
-        assertEquals("anthropic/claude-sonnet-4", chain.first())
+        val chain = AiModelsCatalog.fallbackChain(AiProvider.OPENROUTER, "anthropic/claude-sonnet-4.5")
+        assertEquals("anthropic/claude-sonnet-4.5", chain.first())
         assertTrue(chain.contains("openrouter/auto"))
-        assertTrue(chain.contains("qwen/qwen3-coder:free"))
+        assertTrue(chain.contains("particle-ai/particle-1:free"))
+        chain.forEach { assertFalse(AiModelsCatalog.isRetiredOpenRouterModel(it)) }
 
         assertEquals("sk-or-v1-user", GeminiCodeAssistant.resolveOpenRouterApiKey("  sk-or-v1-user  "))
 
@@ -594,14 +603,82 @@ class GeminiCodeAssistantTest {
             byModel = mapOf("qwen/qwen3-coder:free" to 700L),
         )
         val decoded = com.example.ai.AiUsageSummary.fromJson(usageSummary.toJson())
-        assertEquals("qwen/qwen3-coder:free", decoded.byProvider[AiProvider.OPENROUTER]?.lastModelId)
+        assertEquals("particle-ai/particle-1:free", decoded.byProvider[AiProvider.OPENROUTER]?.lastModelId)
         assertEquals(700L, decoded.totalTokens)
+    }
+
+    @Test
+    fun openRouterRetiredSlugsAreRemappedToLiveReplacements() {
+        // Withdrawn free slugs must resolve to a LIVE FREE replacement -- never to a paid
+        // model, and never to another withdrawn slug.
+        listOf(
+            "qwen/qwen3-coder:free",
+            "deepseek/deepseek-r1-0528:free",
+            "deepseek/deepseek-chat-v3-0324:free",
+            "google/gemma-3-27b-it:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "mistralai/mistral-small-3.1-24b-instruct:free",
+            "nvidia/nemotron-nano-9b-v2:free",
+            "qwen/qwen3-235b-a22b:free",
+        ).forEach { retired ->
+            val replacement = AiModelsCatalog.normalizeModelId(AiProvider.OPENROUTER, retired)
+            assertTrue("$retired must remap", replacement != retired)
+            assertTrue(
+                "$retired must stay free, got $replacement",
+                AiModelsCatalog.isFreeOpenRouterModel(replacement),
+            )
+            assertFalse(AiModelsCatalog.isRetiredOpenRouterModel(replacement))
+        }
+
+        // Withdrawn paid slugs resolve to live paid models.
+        assertEquals(
+            "anthropic/claude-sonnet-4.5",
+            AiModelsCatalog.normalizeModelId(AiProvider.OPENROUTER, "anthropic/claude-3.7-sonnet"),
+        )
+        assertEquals(
+            "openai/gpt-5-mini",
+            AiModelsCatalog.normalizeModelId(AiProvider.OPENROUTER, "openai/o4-mini"),
+        )
+
+        // Live slugs are left exactly as the user chose them.
+        listOf("openrouter/auto", "openrouter/free", "anthropic/claude-sonnet-4.6", "openai/gpt-5")
+            .forEach { assertEquals(it, AiModelsCatalog.normalizeModelId(AiProvider.OPENROUTER, it)) }
+
+        // Neither failover pool may contain a withdrawn slug.
+        (AiModelsCatalog.openRouterFreeFailoverPool + AiModelsCatalog.openRouterPaidFailoverPool)
+            .forEach { assertFalse("pool contains retired $it", AiModelsCatalog.isRetiredOpenRouterModel(it)) }
+        AiModelsCatalog.openRouterFreeFailoverPool
+            .forEach { assertTrue("$it must be free", AiModelsCatalog.isFreeOpenRouterModel(it)) }
+        AiModelsCatalog.openRouterPaidFailoverPool
+            .forEach { assertFalse("$it must be paid", AiModelsCatalog.isFreeOpenRouterModel(it)) }
+    }
+
+    @Test
+    fun openRouterCodingRankDoesNotPenalizeMoeActiveParamSuffixes() {
+        fun opt(id: String) = com.example.ai.AiModelOption(
+            id = id,
+            provider = AiProvider.OPENROUTER,
+            label = id,
+            badge = "Free",
+            description = "",
+        )
+        // "a55b" / "a4b" are active-parameter suffixes of large MoE models and must not be
+        // read as a tiny model, while a genuine small model still ranks worse.
+        assertTrue(
+            AiModelsCatalog.openRouterCodingRank(opt("nvidia/nemotron-3-ultra-550b-a55b:free")) <
+                AiModelsCatalog.openRouterCodingRank(opt("liquid/lfm-3-1.7b:free")),
+        )
+        // A purpose-built coding model outranks a general small one.
+        assertTrue(
+            AiModelsCatalog.openRouterCodingRank(opt("particle-ai/particle-1:free")) <
+                AiModelsCatalog.openRouterCodingRank(opt("google/gemma-4-31b-it:free")),
+        )
     }
 
     @Test
     fun openRouterFreeModelsNeverFailoverToPaidModels() {
         assertTrue(AiModelsCatalog.isFreeOpenRouterModel("openrouter/free"))
-        assertTrue(AiModelsCatalog.isFreeOpenRouterModel("google/gemma-3-27b-it:free"))
+        assertTrue(AiModelsCatalog.isFreeOpenRouterModel("google/gemma-4-31b-it:free"))
         assertFalse(AiModelsCatalog.isFreeOpenRouterModel("openrouter/auto"))
         assertFalse(AiModelsCatalog.isFreeOpenRouterModel("google/gemini-2.5-flash"))
 
@@ -627,10 +704,10 @@ class GeminiCodeAssistantTest {
 
         val gemmaFreeChain = AiModelsCatalog.fallbackChain(
             provider = AiProvider.OPENROUTER,
-            primaryModelId = "google/gemma-3-27b-it:free",
+            primaryModelId = "google/gemma-4-31b-it:free",
             liveModels = liveModels,
         )
-        assertEquals("google/gemma-3-27b-it:free", gemmaFreeChain.first())
+        assertEquals("google/gemma-4-31b-it:free", gemmaFreeChain.first())
         assertTrue(gemmaFreeChain.contains("openrouter/free"))
         assertTrue(gemmaFreeChain.contains("nvidia/nemotron-3-super-120b-a12b:free"))
         assertTrue(gemmaFreeChain.all { AiModelsCatalog.isFreeOpenRouterModel(it) })
@@ -979,8 +1056,10 @@ class GeminiCodeAssistantTest {
             "anthropic/claude-opus-4.6",
             AiModelsCatalog.toOpenRouterSlug(AiProvider.CLAUDE, "claude-opus-4-6-latest", liveOpenRouter),
         )
+        // anthropic/claude-3.7-sonnet has been withdrawn from OpenRouter, so the bridge must
+        // build the live replacement instead of a slug that would 404.
         assertEquals(
-            "anthropic/claude-3.7-sonnet",
+            "anthropic/claude-sonnet-4.5",
             AiModelsCatalog.toOpenRouterSlug(AiProvider.CLAUDE, "claude-3-7-sonnet-20250219", liveOpenRouter),
         )
         assertEquals(
@@ -988,7 +1067,7 @@ class GeminiCodeAssistantTest {
             AiModelsCatalog.toOpenRouterSlug(AiProvider.OPENAI, "gpt-5", liveOpenRouter),
         )
         assertEquals(
-            "openai/o4-mini",
+            "openai/gpt-5-mini",
             AiModelsCatalog.toOpenRouterSlug(AiProvider.OPENAI, "o4-mini", liveOpenRouter),
         )
     }
